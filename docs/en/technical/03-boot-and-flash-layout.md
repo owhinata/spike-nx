@@ -171,16 +171,45 @@ void stm32_boardinitialize(void)
 }
 ```
 
+### Pybricks Comparison
+
+Pybricks `SystemInit()` (platform.c lines 999-1050) execution order:
+
+```
+1. SCB->CCR: stack alignment
+2. SCB->VTOR: vector table relocation
+3. HAL_RCC_OscConfig(): HSE + PLL (16MHz → 96MHz)  ← HSE startup + PLL lock (~ms)
+4. HAL_RCC_ClockConfig(): SYSCLK=PLL, AHB/APB dividers
+5. RCC->AHB1ENR: GPIOA-E, DMA1-2 clock enable     ← GPIO clocks enabled
+6. RCC->APB1ENR: UART, TIM, I2C, DAC, SPI2
+7. RCC->APB2ENR: TIM1/8, UART9/10, ADC1, SPI1
+8. RCC->AHB2ENR: OTG_FS
+9. PA13 = OUTPUT_PP, HIGH                           ← BAT_PWR_EN set
+```
+
+NuttX `__start()` corresponding order:
+
+```
+1. stm32_clockconfig()     ← HSE + PLL + peripheral clocks (pybricks steps 3-8)
+2. arm_fpuconfig()
+3. stm32_lowsetup()
+4. stm32_gpioinit()        ← GPIO clocks already enabled in stm32_clockconfig()
+5. BSS clear, .data copy
+6. stm32_boardinitialize() ← ★ PA13 set (pybricks step 9)
+```
+
+**Difference**: NuttX adds FPU config, early UART, BSS clear before PA13. But GPIO clock (RCC_AHB1ENR_GPIOAEN) is already enabled in `stm32_clockconfig()`, so PA13 is configurable at `stm32_boardinitialize()`. The extra steps add ~tens of μs, negligible compared to HSE+PLL lock (~ms) which dominates in both cases.
+
 ### Timing Concern
 
-Pybricks sets PA13 in `SystemInit()` (before main). In NuttX, `stm32_boardinitialize()` runs slightly later (after clock config, FPU, BSS clear, etc.).
-
-- This delay should be acceptable (within a few milliseconds)
-- If issues arise, the assertion can be moved earlier into `stm32_clockconfig()` or immediately after `__start()`
+- Timing difference between pybricks and NuttX PA13 setup is ~tens to hundreds of μs
+- Total time from bootloader jump to PA13 assertion is ~few ms in both (HSE+PLL dominant)
+- This delay should be acceptable
+- If issues arise, a board-specific hook can be added in `stm32_clockconfig()` for earlier PA13 setup
 
 ### SWD Debug Trade-off
 
 Repurposing PA13 (SWDIO) and PA14 (SWCLK) as GPIO disables SWD debugging:
 - PA14 is used as `PORT_3V3_EN` (3.3V power to I/O ports)
-- Debug builds could delay/skip PA13/PA14 reconfiguration, running on USB power
-- Production firmware will not have SWD available
+- When USB-powered, battery power hold is unnecessary — debug builds can skip PA13/PA14 reconfiguration
+- See [13-debugging-strategy.md](13-debugging-strategy.md) for details

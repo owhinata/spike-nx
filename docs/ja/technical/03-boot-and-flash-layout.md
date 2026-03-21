@@ -171,16 +171,45 @@ void stm32_boardinitialize(void)
 }
 ```
 
+### pybricks との差分分析
+
+pybricks の `SystemInit()` (platform.c 999-1050行) での実行順序:
+
+```
+1. SCB->CCR: スタックアラインメント
+2. SCB->VTOR: ベクタテーブル再配置
+3. HAL_RCC_OscConfig(): HSE + PLL 設定 (16MHz → 96MHz)  ← HSE起動+PLLロック待ち (~数ms)
+4. HAL_RCC_ClockConfig(): SYSCLK=PLL, AHB/APB 分周設定
+5. RCC->AHB1ENR: GPIOA-E, DMA1-2 クロック有効化          ← GPIO クロック有効化
+6. RCC->APB1ENR: UART, TIM, I2C, DAC, SPI2 クロック有効化
+7. RCC->APB2ENR: TIM1/8, UART9/10, ADC1, SPI1 クロック有効化
+8. RCC->AHB2ENR: OTG_FS クロック有効化
+9. PA13 = OUTPUT_PP, HIGH                                 ← BAT_PWR_EN 設定
+```
+
+NuttX の `__start()` での対応する実行順序:
+
+```
+1. stm32_clockconfig()     ← HSE + PLL + ペリフェラルクロック (pybricks の 3-8 に相当)
+2. arm_fpuconfig()
+3. stm32_lowsetup()
+4. stm32_gpioinit()        ← GPIO クロックは stm32_clockconfig() で既に有効化済み
+5. BSS クリア、.data コピー
+6. stm32_boardinitialize() ← ★ PA13 設定 (pybricks の 9 に相当)
+```
+
+**差分**: NuttX では PA13 設定の前に FPU 設定、早期 UART 設定、BSS クリア等が追加で挟まる。ただし GPIO クロック (RCC_AHB1ENR_GPIOAEN) は `stm32_clockconfig()` 内で有効化されるため、`stm32_boardinitialize()` 時点で PA13 は設定可能。追加のステップは数十μs 程度であり、HSE 起動 + PLL ロック (~数ms) が支配的な pybricks と大きな差はない。
+
 ### タイミングの懸念
 
-pybricks では `SystemInit()` (main() の前) で PA13 を設定。NuttX では `stm32_boardinitialize()` はやや後 (クロック設定、FPU 設定、BSS クリア等の後)。
-
-- 通常はこの遅延で問題ないはず (数ミリ秒以内)
-- 問題が発生する場合は `stm32_clockconfig()` 内または `__start()` 直後に移動可能
+- pybricks と NuttX の PA13 設定タイミング差は数十μs〜数百μs 程度
+- LEGO ブートローダーからジャンプ後、PA13 が駆動されるまでの合計時間は両者とも数ms (HSE+PLL が支配的)
+- 通常はこの遅延で問題ないはず
+- 問題が発生する場合は `stm32_clockconfig()` 内にボード固有のフックを追加して PA13 を早期に設定可能
 
 ### SWD デバッグとのトレードオフ
 
-PA13 (SWDIO) と PA14 (SWCLK) を GPIO に転用するとSWDデバッグが不可能になる:
+PA13 (SWDIO) と PA14 (SWCLK) を GPIO に転用すると SWD デバッグが不可能になる:
 - PA14 は `PORT_3V3_EN` (I/O ポートへの 3.3V 電源) として使用
-- デバッグビルドでは PA13/PA14 の再設定を遅延またはスキップし、USB 電源で動作させる方法も考えられる
-- 本番ファームウェアでは SWD は使用不可
+- USB 電源動作時はバッテリー電源維持が不要なため、デバッグビルドでは PA13/PA14 の再設定をスキップ可能
+- 詳細は [13-debugging-strategy.md](13-debugging-strategy.md) を参照
