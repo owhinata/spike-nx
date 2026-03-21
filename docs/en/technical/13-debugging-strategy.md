@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The SPIKE Prime Hub repurposes SWD pins (PA13/PA14) for power control, making traditional SWD debugging difficult. A layered debugging strategy is needed.
+The SPIKE Prime Hub repurposes SWD pins (PA13/PA14) for power control, and extracting them externally is impractical, so SWD debugging is not used. USB CDC/ACM NSH console is the primary debug method.
 
 ### Debug Method Priority
 
@@ -10,9 +10,13 @@ The SPIKE Prime Hub repurposes SWD pins (PA13/PA14) for power control, making tr
 |---|---|---|
 | **Primary** | USB CDC/ACM NSH + syslog + `dmesg` | Day-to-day development |
 | **Secondary** | NuttX coredump → backup SRAM persistence | Post-crash analysis |
-| **Tertiary** | Debug build + SWD (USB power only) + OpenOCD | Hard-to-diagnose issues |
 | **Diagnostic** | NSH commands (`ps`, `free`, `top`, `/proc`) | Runtime monitoring |
-| **Emergency** | Connect-Under-Reset (NRST access required) | Bricked firmware recovery |
+| **Last resort** | Temporarily use I/O port UART for debug output | Initial bring-up when USB not working |
+
+### Methods NOT Used
+
+- **SWD**: PA13/PA14 pin extraction impractical — not used
+- **GDB**: Not used by default. May use via I/O port UART if absolutely necessary
 
 ---
 
@@ -40,6 +44,8 @@ NuttX debug output is syslog-based with a two-dimensional hierarchy:
 | `CONFIG_DEBUG_GPIO` | GPIO |
 | `CONFIG_DEBUG_I2C` | I2C bus |
 | `CONFIG_DEBUG_SPI` | SPI bus |
+| `CONFIG_DEBUG_NET` | Networking |
+| `CONFIG_DEBUG_FS` | Filesystem |
 
 **Master switch**: `CONFIG_DEBUG_FEATURES=y` enables all subsystem options.
 
@@ -47,12 +53,11 @@ NuttX debug output is syslog-based with a two-dimensional hierarchy:
 
 | Config | Target | Use Case |
 |---|---|---|
-| `CONFIG_SYSLOG_SERIAL` | UART | Via I/O port UART |
-| `CONFIG_SYSLOG_CHARDEV` | Character device | USB CDC/ACM etc. |
+| `CONFIG_SYSLOG_CHARDEV` | Character device | USB CDC/ACM (primary output) |
 | `CONFIG_RAMLOG` | RAM ring buffer | Read via `dmesg`. Preserved when USB disconnects |
 | `CONFIG_SYSLOG_FILE` | File | To mounted filesystem |
 
-**Recommendation**: Enable `CONFIG_RAMLOG` as secondary syslog target. Preserves logs when USB CDC/ACM is down; read via `dmesg` after reboot.
+**Recommendation**: Always enable `CONFIG_RAMLOG`. Preserves logs when USB CDC/ACM is down; read via `dmesg` after reconnect. Particularly important for early boot messages emitted before the USB driver is active — RAMLOG is the only way to see them.
 
 ---
 
@@ -69,7 +74,7 @@ CONFIG_STACK_COLORATION=y        # Dump all task stack usage
 CONFIG_DEBUG_ASSERTIONS=y        # Register dump on ASSERT/PANIC
 ```
 
-**Note**: When NSH console is USB CDC/ACM, hard fault output may not reach USB. Configure a UART as secondary output.
+**Note**: When NSH console is USB CDC/ACM, the USB driver itself may be non-functional during a hard fault. If crash info is written to RAMLOG, it can be checked via `dmesg` after re-flashing firmware via DFU (if backup SRAM persistence is implemented).
 
 ### Coredump (Post-Mortem Analysis)
 
@@ -84,7 +89,7 @@ Output is hex-encoded + LZF-compressed. Use `tools/coredump.py` to convert to EL
 
 ### Crash Data Persistence
 
-**Challenge**: Current NuttX outputs crash dumps to serial/syslog, lost on reset.
+**Challenge**: Crash dumps are output to serial/syslog, lost on reset.
 
 **Recommendation for SPIKE Hub**:
 - Save crash info to STM32F413's 4KB backup SRAM (battery-backed with VBAT)
@@ -124,72 +129,7 @@ Output is hex-encoded + LZF-compressed. Use `tools/coredump.py` to convert to EL
 
 ---
 
-## 5. SWD Debugging (USB-Powered)
-
-### Principle
-
-After reset, STM32 automatically configures PA13/PA14 as SWDIO/SWCLK. SWD works in the brief window before firmware GPIO initialization.
-
-### Debug Build Strategy
-
-When USB-powered, battery power hold circuit is unnecessary — skip PA13 GPIO reconfiguration:
-
-```c
-void stm32_boardinitialize(void)
-{
-#ifndef CONFIG_BOARD_SWD_DEBUG
-    // Production: PA13 = BAT_PWR_EN (HIGH)
-    stm32_configgpio(GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_OUTPUT_SET |
-                     GPIO_PORTA | GPIO_PIN13);
-#endif
-    // Debug: PA13 stays as SWDIO (USB power only)
-}
-```
-
-**Note**: SWD requires **both** PA13 (SWDIO) and PA14 (SWCLK). One pin alone is insufficient.
-
-### OpenOCD Connection
-
-```bash
-openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
-  -c '$_TARGETNAME configure -rtos nuttx' \
-  -c 'init; reset halt'
-
-arm-none-eabi-gdb --tui nuttx -ex 'target extended-remote localhost:3333'
-```
-
-Use [sony/openocd-nuttx](https://github.com/sony/openocd-nuttx) for NuttX thread awareness. `info threads` shows all NuttX tasks.
-
-### Connect-Under-Reset
-
-Even with production builds, SWD works if NRST is accessible:
-
-1. Hold NRST LOW (reset asserted)
-2. Connect ST-Link/J-Link in "connect under reset" mode
-3. PA13/PA14 function as SWD during reset
-4. Halt CPU before GPIO init code
-5. Requires physical access to NRST pad on SPIKE Hub PCB
-
----
-
-## 6. GDB Remote Debugging
-
-### NuttX GDB Server
-
-NuttX provides application-level GDB server over serial.
-
-### GDB via USB CDC/ACM
-
-Possible in principle, but shares port with NSH console. Options:
-1. Second CDC/ACM instance dedicated to GDB
-2. Use I/O port UART for GDB
-3. Mode switching (NSH ↔ GDB)
-
-**Recommendation**: Reserve Port A (UART7) as debug UART during development. Use USB CDC/ACM for NSH console.
-
----
-
-## 7. Recommended Debug Configuration
+## 5. Recommended Debug Configuration
 
 ### Development Build
 

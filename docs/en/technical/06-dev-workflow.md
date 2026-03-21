@@ -40,65 +40,33 @@ make -f scripts/nuttx.mk flash
 
 ---
 
-## 2. SWD Debug Feasibility
+## 2. Debug Strategy
 
-### Constraints
+### SWD
 
-The SPIKE Prime Hub repurposes SWD debug pins for power control:
+SWD pins (PA13/PA14) are repurposed for power control, and extracting them externally is impractical. **SWD is not used.**
 
 | Pin | SWD Function | Hub Usage |
 |---|---|---|
 | PA13 | SWDIO | BAT_PWR_EN (battery power hold) |
 | PA14 | SWCLK | PORT_3V3_EN (I/O port 3.3V power) |
 
-**SWD connection is lost once PA13 is configured as GPIO output.**
+### Debug Methods
 
-### Possibilities
-
-1. **USB-powered operation**: PA13 doesn't need to be HIGH when USB-powered. Debug builds could delay PA13 reconfiguration to maintain SWD
-2. **Hardware modification**: If SWD test pads exist on the PCB, an external probe (J-Link, ST-Link) could connect. Requires hub disassembly
-3. **Practically difficult**: Assume SWD is unavailable for normal development
-
-### Alternative Debug Methods
-
-| Method | Phase | Details |
+| Method | Use Case | Details |
 |---|---|---|
-| I/O port UART | Initial bring-up | Connect USB-UART adapter to any I/O port. Simplest debug method |
-| USB CDC/ACM | After USB works | NSH console. No extra hardware needed |
-| LED indication | Always | Check if LEDs can be controlled via direct GPIO before TLC5955 driver |
-| Hard fault output | Always | NuttX hard fault handler dumps registers to UART/USB |
+| **USB CDC/ACM NSH** | Primary day-to-day | NSH console + syslog + `dmesg` |
+| **RAMLOG + dmesg** | Log retention on USB disconnect | RAM ring buffer. Check after reconnect |
+| **coredump** | Post-crash analysis | Persist to backup SRAM → analyze with GDB |
+| **NSH commands** | Runtime monitoring | `ps`, `free`, `top`, `/proc` |
+
+See [13-debugging-strategy.md](13-debugging-strategy.md) for details.
 
 ---
 
-## 3. Serial Console Strategy
+## 3. Console
 
-### Phase 1: Initial Bring-up (USB Not Working)
-
-**Use I/O port UART.**
-
-Each SPIKE Hub I/O port has a UART. Connect a 3.3V USB-UART adapter:
-
-| Port | UART | TX Pin | RX Pin | Recommended Because |
-|---|---|---|---|---|
-| A | UART7 | PE8 | PE7 | UART7 supported in NuttX |
-| B | UART4 | PD1 | PD0 | UART4 supported in NuttX |
-
-NuttX defconfig for UART console:
-```
-CONFIG_STM32_UART7=y
-CONFIG_UART7_SERIALDRIVER=y
-CONFIG_UART7_SERIAL_CONSOLE=y
-CONFIG_UART7_BAUD=115200
-CONFIG_UART7_BITS=8
-CONFIG_UART7_PARITY=0
-CONFIG_UART7_2STOP=0
-```
-
-**Note**: I/O port connector TX/RX pin layout — refer to pybricks pin map. LEGO proprietary connector requires appropriate breakout cable.
-
-### Phase 2: After USB Works
-
-**Switch to USB CDC/ACM.**
+**Fixed to USB CDC/ACM.** I/O ports are not reserved for debugging (all ports available for Powered Up devices).
 
 ```
 CONFIG_STM32_OTGFS=y
@@ -106,9 +74,18 @@ CONFIG_USBDEV=y
 CONFIG_CDCACM=y
 CONFIG_CDCACM_CONSOLE=y
 CONFIG_NSH_USBCONSOLE=y
+CONFIG_NSH_USBCONDEV="/dev/ttyACM0"
 ```
 
 Recognized as `/dev/ttyACM0` (Linux) or `/dev/cu.usbmodemXXXX` (macOS) on host PC.
+
+### Initial Bring-up Note
+
+No serial output until USB CDC/ACM driver is working. Workarounds if USB isn't functional early on:
+
+1. **RAMLOG**: Boot messages accumulate in RAM. Check via `dmesg` once USB works
+2. **LED**: After TLC5955 driver, show boot progress via LEDs
+3. **Last resort**: Temporarily use I/O port UART (e.g., UART7) for debug output
 
 ---
 
@@ -122,47 +99,39 @@ Recognized as `/dev/ttyACM0` (Linux) or `/dev/cu.usbmodemXXXX` (macOS) on host P
 - Drive BAT_PWR_EN (PA13) HIGH
 - Success: Hub maintains power, doesn't shut down
 
-### Step 2: UART Output
+### Step 2: USB CDC/ACM
 
-**Goal**: Serial debug output available
+**Goal**: Establish console connection
 
-- Enable I/O port UART (UART7 recommended)
-- Early UART init via `stm32_lowsetup()`
-- Success: Boot messages visible via USB-UART adapter
+- Enable USB OTG FS driver
+- Configure CDC/ACM device class
+- Success: Host PC recognizes `/dev/ttyACM0`
 
-### Step 3: NSH Shell (UART)
+### Step 3: NSH Shell
 
 **Goal**: NuttX OS running with command shell
 
 - NuttX kernel boot → NSH shell
-- Command input/output via UART console
+- Command input/output via USB CDC/ACM console
 - Success: `nsh>` prompt displayed, `help` command works
 
-### Step 4: USB CDC/ACM
-
-**Goal**: Console over USB
-
-- Enable USB OTG FS driver
-- Configure CDC/ACM device class
-- Success: Host PC recognizes `/dev/ttyACM0`, NSH works over USB
-
-### Step 5: GPIO / LED
+### Step 4: TLC5955 LED
 
 **Goal**: Visual feedback
 
-- GPIO control of status LEDs
-- TLC5955 driver deferred; check if any LED is directly GPIO-controllable
+- Implement SPI1 + TLC5955 driver
+- Control status LEDs / 5×5 matrix
 - Success: LED on/off control works
+- Note: All LEDs are TLC5955-driven. No directly GPIO-controllable LEDs exist
 
-### Step 6: Additional Peripherals
+### Step 5: Additional Peripherals
 
 Enable incrementally:
-1. SPI (W25Q256 flash → filesystem)
-2. I2C (LSM6DS3TR-C IMU)
-3. ADC (battery monitoring)
+1. SPI2 (W25Q256 flash → filesystem)
+2. I2C2 (LSM6DS3TR-C IMU)
+3. ADC1 (battery monitoring)
 4. PWM (motor control)
-5. SPI (TLC5955 LED matrix)
-6. Additional UARTs (I/O port communication)
+5. UART (I/O port Powered Up device communication)
 
 ---
 

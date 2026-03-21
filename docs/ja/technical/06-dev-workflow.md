@@ -40,65 +40,33 @@ make -f scripts/nuttx.mk flash
 
 ---
 
-## 2. SWD デバッグ可否
+## 2. デバッグ方針
 
-### 制約
+### SWD
 
-SPIKE Prime Hub では SWD デバッグピンが電源制御に転用されている:
+SWD ピン (PA13/PA14) が電源制御に転用されており、ピンを外部に引き出すのが困難なため、**SWD は使用しない前提**とする。
 
 | ピン | SWD 機能 | Hub での用途 |
 |---|---|---|
 | PA13 | SWDIO | BAT_PWR_EN (バッテリー電源維持) |
 | PA14 | SWCLK | PORT_3V3_EN (I/O ポート 3.3V 電源) |
 
-**PA13 を GPIO 出力に設定した時点で SWD 接続は切断される。**
+### デバッグ手段
 
-### 可能性
-
-1. **USB 電源での動作時**: PA13 を HIGH にしなくても電源は維持される (USB バスパワー)。デバッグビルドでは PA13 の再設定を遅延させ、SWD 接続を維持できる可能性がある
-2. **ハードウェア改造**: Hub 基板上に SWD テストパッドがあれば、外部プローブ (J-Link, ST-Link) を接続可能。ただし Hub の分解が必要
-3. **現実的には困難**: 通常の開発では SWD は使用不可と想定する
-
-### 代替デバッグ手段
-
-| 方法 | 段階 | 詳細 |
+| 手段 | 用途 | 詳細 |
 |---|---|---|
-| I/O ポート UART | 初期ブリングアップ | 6 ポートのいずれかに USB-UART アダプタを接続。最もシンプルなデバッグ手段 |
-| USB CDC/ACM | USB ドライバ動作後 | NSH コンソール。追加ハードウェア不要 |
-| LED 表示 | 常時 | TLC5955 ドライバ動作前でも GPIO 直接制御で一部 LED を点灯可能か要確認 |
-| ハードフォルト出力 | 常時 | NuttX のハードフォルトハンドラがレジスタダンプを UART/USB に出力 |
+| **USB CDC/ACM NSH** | 日常開発の主要手段 | NSH コンソール + syslog + `dmesg` |
+| **RAMLOG + dmesg** | USB 切断時のログ保持 | RAM リングバッファ。再接続後に確認 |
+| **coredump** | クラッシュ後分析 | バックアップ SRAM に永続化 → GDB で分析 |
+| **NSH コマンド** | ランタイム監視 | `ps`, `free`, `top`, `/proc` |
+
+詳細は [13-debugging-strategy.md](13-debugging-strategy.md) を参照。
 
 ---
 
-## 3. シリアルコンソール戦略
+## 3. コンソール
 
-### フェーズ 1: 初期ブリングアップ (USB 未動作)
-
-**I/O ポート UART を使用。**
-
-SPIKE Hub の I/O ポートはそれぞれ UART を持つ。USB-UART アダプタ (3.3V) を接続:
-
-| ポート | UART | TX ピン | RX ピン | 推奨理由 |
-|---|---|---|---|---|
-| A | UART7 | PE8 | PE7 | NuttX で UART7 対応済み |
-| B | UART4 | PD1 | PD0 | NuttX で UART4 対応済み |
-
-NuttX defconfig でコンソール UART を設定:
-```
-CONFIG_STM32_UART7=y
-CONFIG_UART7_SERIALDRIVER=y
-CONFIG_UART7_SERIAL_CONSOLE=y
-CONFIG_UART7_BAUD=115200
-CONFIG_UART7_BITS=8
-CONFIG_UART7_PARITY=0
-CONFIG_UART7_2STOP=0
-```
-
-**注意**: I/O ポートコネクタの TX/RX ピン配置は pybricks のピンマップを参照。LEGO 独自コネクタのため、適切なブレークアウトケーブルが必要。
-
-### フェーズ 2: USB 動作後
-
-**USB CDC/ACM に切り替え。**
+**USB CDC/ACM 固定。** I/O ポートはデバッグ用に確保しない (全ポートを Powered Up デバイス接続用に使用)。
 
 ```
 CONFIG_STM32_OTGFS=y
@@ -106,9 +74,18 @@ CONFIG_USBDEV=y
 CONFIG_CDCACM=y
 CONFIG_CDCACM_CONSOLE=y
 CONFIG_NSH_USBCONSOLE=y
+CONFIG_NSH_USBCONDEV="/dev/ttyACM0"
 ```
 
 ホスト PC で `/dev/ttyACM0` (Linux) または `/dev/cu.usbmodemXXXX` (macOS) として認識。
+
+### 初期ブリングアップ時の注意
+
+USB CDC/ACM ドライバが動作するまでシリアル出力が得られない。初期段階で USB が動作しない場合の対処:
+
+1. **RAMLOG**: ブートメッセージが RAM に蓄積される。USB 動作後に `dmesg` で確認
+2. **LED**: TLC5955 ドライバ実装後、ブート進捗を LED で表示
+3. **やむを得ない場合**: 一時的に I/O ポート UART (UART7 等) をデバッグ出力に使用
 
 ---
 
@@ -122,47 +99,39 @@ CONFIG_NSH_USBCONSOLE=y
 - BAT_PWR_EN (PA13) を HIGH に設定
 - 成功判定: Hub がシャットダウンせず電源 ON を維持
 
-### ステップ 2: UART 出力
+### ステップ 2: USB CDC/ACM
 
-**目標**: シリアル出力でデバッグ可能にする
+**目標**: コンソール接続を確立
 
-- I/O ポートの UART (UART7 推奨) を有効化
-- `stm32_lowsetup()` で早期 UART 初期化
-- 成功判定: USB-UART アダプタ経由でブートメッセージが表示される
+- USB OTG FS ドライバ有効化
+- CDC/ACM デバイスクラス設定
+- 成功判定: ホスト PC で `/dev/ttyACM0` として認識
 
-### ステップ 3: NSH シェル (UART)
+### ステップ 3: NSH シェル
 
 **目標**: NuttX OS が動作し、NSH コマンド実行可能
 
 - NuttX カーネル起動 → NSH シェル
-- UART コンソールでコマンド入力/出力
+- USB CDC/ACM コンソールでコマンド入力/出力
 - 成功判定: `nsh>` プロンプトが表示され、`help` コマンドが動作
 
-### ステップ 4: USB CDC/ACM
-
-**目標**: USB 経由でコンソール接続
-
-- USB OTG FS ドライバ有効化
-- CDC/ACM デバイスクラス設定
-- 成功判定: ホスト PC で `/dev/ttyACM0` として認識、NSH 操作可能
-
-### ステップ 5: GPIO / LED
+### ステップ 4: TLC5955 LED
 
 **目標**: 視覚的フィードバック
 
-- ステータス LED の GPIO 制御
-- TLC5955 ドライバは後回し。まずは GPIO で制御可能な LED があるか確認
+- SPI1 + TLC5955 ドライバ実装
+- ステータス LED / 5×5 マトリクス制御
 - 成功判定: LED の点灯/消灯が制御可能
+- 注: 全 LED は TLC5955 経由。GPIO 直接制御可能な LED は存在しない
 
-### ステップ 6: 追加ペリフェラル
+### ステップ 5: 追加ペリフェラル
 
 以下を順次有効化:
-1. SPI (W25Q256 フラッシュ → ファイルシステム)
-2. I2C (LSM6DS3TR-C IMU)
-3. ADC (バッテリー監視)
+1. SPI2 (W25Q256 フラッシュ → ファイルシステム)
+2. I2C2 (LSM6DS3TR-C IMU)
+3. ADC1 (バッテリー監視)
 4. PWM (モーター制御)
-5. SPI (TLC5955 LED マトリクス)
-6. 追加 UART (I/O ポート通信)
+5. UART (I/O ポート Powered Up デバイス通信)
 
 ---
 
