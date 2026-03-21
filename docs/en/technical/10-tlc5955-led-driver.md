@@ -21,6 +21,8 @@ TLC5955 is a TI 48-channel 16-bit PWM LED driver communicating via SPI-like shif
 | SPI | SPI1 | DMA2 Stream2 (RX, ch3) / Stream3 (TX, ch3) |
 | LAT | PA15 (GPIO) | Latch signal |
 | SPI mode | CPOL=0, CPHA=0 (Mode 0) | MSB first, 8-bit, prescaler /4 |
+| SCLK | 24 MHz | APB2 96 MHz / 4 |
+| GSCLK | TIM12 CH2, 9.6 MHz | 96 MHz / prescaler 1 / period 10 |
 
 ---
 
