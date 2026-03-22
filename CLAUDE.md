@@ -84,6 +84,12 @@ TBD
 
 TBD
 
+## 用語
+
+- **Powered Up デバイス**: SPIKE Prime Hub の I/O ポートに接続するモーター・センサーの総称 (LEGO 公式ブランド名)
+- **LPF2**: LEGO Power Functions 2。Powered Up デバイスが使用するコネクタ規格・プロトコル規格のコミュニティ通称
+- **LUMP**: LEGO UART Messaging Protocol。Powered Up スマートデバイス (センサー/エンコーダ付きモーター) が Hub と通信する UART プロトコル
+
 ## SPIKE Prime Hub 仕様
 
 - MCU: STM32F413 (ARM Cortex-M4)
