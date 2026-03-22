@@ -16,10 +16,13 @@ Implementation plan for NuttX device drivers to control SPIKE Prime Hub hardware
 | 4 | Sensor Data Readout | `/dev/legosensor[N]` | **P1** | LUMP |
 | 5 | TLC5955 LED Driver | `/dev/leds` | **P1** | SPI1 |
 | 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **P1** | I2C2 |
-| 7 | USB CDC/ACM Console | `/dev/ttyACM0` | **Done** | OTG FS |
-| 8 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
-| 9 | Power Management | (board init) | **P0** | PA13/PA14 GPIO |
-| 10 | Bluetooth (TBD) | — | **P3** | USART2 |
+| 7 | DAC Audio | `/dev/dac0` | **P1** | DAC1 + TIM6 |
+| 8 | ADC Battery Monitor | `/dev/adc0` | **P1** | ADC1 (6ch) + DMA2 |
+| 9 | USB CDC/ACM Console | `/dev/ttyACM0` | **Done** | OTG FS |
+| 10 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
+| 11 | Power Management | (board init) | **P0** | PA13/PA14 GPIO |
+| 12 | MP2639A Charger | (board internal) | **P2** | TIM5 PWM + ADC |
+| 13 | Bluetooth (CC256x) | — | **P3** | USART2 + DMA |
 
 ### Priority Definitions
 
@@ -140,7 +143,35 @@ pybricks reference: `imu_lsm6ds3tr_c_stm32.c`
 - Can leverage NuttX sensor driver framework (`CONFIG_SENSORS_LSM6DSL` etc.)
 - Exposed as `/dev/imu0` or `/dev/accel0` + `/dev/gyro0`
 
-### Phase 3: Storage (P2)
+#### 2d. DAC Audio
+
+pybricks reference: `sound.c`
+
+- Analog audio output via DAC1 CH1 (PA4)
+- Speaker enable: PC10 (GPIO HIGH to enable)
+- TIM6 TRGO for sample rate control
+- DMA1_Stream5 (CH7) for buffer transfer
+- Implement using NuttX audio or DAC driver
+
+#### 2e. ADC Battery Monitor & Button Input
+
+pybricks reference: `battery_adc.c`, `button_resistor_ladder.c`
+
+- ADC1 6 channels + DMA2_Stream0 for periodic sampling
+- TIM2 trigger for ADC conversion
+
+| Channel | Pin | Purpose |
+|---|---|---|
+| CH10 | PC0 | Battery current (max 7300mA) |
+| CH11 | PC1 | Battery voltage (max 9900mV) |
+| CH8 | PB0 | Battery temperature (NTC thermistor) |
+| CH3 | PA3 | USB charger input current |
+| CH14 | PC4 | Charge status (resistor ladder) |
+| CH1 | PA1 | **Button pad** (resistor ladder, multiple buttons) |
+
+**Note**: Hub button input uses **ADC resistor ladder**, not GPIO. Button identity is determined from PA1 voltage level. Center button, Bluetooth button, etc. are multiplexed on a single ADC channel.
+
+### Phase 3: Storage & Charging (P2)
 
 #### 3a. W25Q256 SPI NOR Flash
 
@@ -152,11 +183,20 @@ bringup research: `11-w25q256-flash-driver.md`
 - Format with LittleFS or SmartFS
 - Storage for user programs and data logs
 
+#### 3b. MP2639A Charger Control
+
+- Battery charger IC (MP2639A)
+- Charge current setting: TIM5 CH1 (PA0) PWM (96kHz)
+- Charge status monitoring: ADC resistor ladder (CH14/PC4) 8-level detection
+- Charge complete / error detection
+
 ### Phase 4: Wireless (P3)
 
-#### 4a. Bluetooth
+#### 4a. Bluetooth (CC256x)
 
-- BLE module via USART2 (PD5/PD6)
+- CC256x BLE chip
+- USART2 (PD5/PD6) + flow control (PD3/PD4)
+- DMA1_Stream6/7 for TX/RX
 - Details TBD
 
 ---
@@ -172,6 +212,9 @@ boards/spike-prime-hub/src/
   stm32_legomotor.c     # H-Bridge motor control
   stm32_tlc5955.c       # TLC5955 LED driver
   stm32_lsm6ds3.c       # IMU (LSM6DS3TR-C) init
+  stm32_audio.c         # DAC audio + speaker control
+  stm32_battery.c       # ADC battery monitor + button input
+  stm32_charger.c       # MP2639A charger control
 
 drivers/lego/           # NuttX generic drivers (apps/ or in-board)
   lump_uart.c           # LUMP UART protocol engine
@@ -228,8 +271,11 @@ Phase 1d: H-Bridge Motor       ← After 1c
 Phase 2a: Sensor Readout       ← After 1c
 Phase 2b: TLC5955 LED          ← Independent
 Phase 2c: IMU                  ← Independent (I2C2)
+Phase 2d: DAC Audio            ← Independent (DAC1 + TIM6)
+Phase 2e: ADC Battery          ← Independent (ADC1 + DMA2)
     ↓
 Phase 3a: W25Q256 Flash        ← Independent
+Phase 3b: MP2639A Charger      ← After 2e (ADC)
     ↓
 Phase 4a: Bluetooth            ← Future
 ```

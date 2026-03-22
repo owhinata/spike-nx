@@ -16,10 +16,13 @@ SPIKE Prime Hub 上で NuttX からハードウェアを制御するためのデ
 | 4 | センサーデータ読取り | `/dev/legosensor[N]` | **P1** | LUMP |
 | 5 | TLC5955 LED ドライバ | `/dev/leds` | **P1** | SPI1 |
 | 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **P1** | I2C2 |
-| 7 | USB CDC/ACM コンソール | `/dev/ttyACM0` | **済** | OTG FS |
-| 8 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
-| 9 | 電源管理 | (board 初期化) | **P0** | PA13/PA14 GPIO |
-| 10 | Bluetooth (TBD) | — | **P3** | USART2 |
+| 7 | DAC オーディオ | `/dev/dac0` | **P1** | DAC1 + TIM6 |
+| 8 | ADC バッテリー監視 | `/dev/adc0` | **P1** | ADC1 (6ch) + DMA2 |
+| 9 | USB CDC/ACM コンソール | `/dev/ttyACM0` | **済** | OTG FS |
+| 10 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
+| 11 | 電源管理 | (board 初期化) | **P0** | PA13/PA14 GPIO |
+| 12 | MP2639A 充電制御 | (board 内部) | **P2** | TIM5 PWM + ADC |
+| 13 | Bluetooth (CC256x) | — | **P3** | USART2 + DMA |
 
 ### 優先度定義
 
@@ -140,7 +143,35 @@ pybricks 参照: `imu_lsm6ds3tr_c_stm32.c`
 - NuttX の sensor ドライバフレームワーク (`CONFIG_SENSORS_LSM6DSL` 等) を活用可能
 - `/dev/imu0` または `/dev/accel0` + `/dev/gyro0` として公開
 
-### Phase 3: ストレージ (P2)
+#### 2d. DAC オーディオ
+
+pybricks 参照: `sound.c`
+
+- DAC1 CH1 (PA4) でアナログ音声信号を出力
+- スピーカー有効化: PC10 (GPIO HIGH で有効)
+- TIM6 TRGO でサンプルレート制御
+- DMA1_Stream5 (CH7) でバッファ転送
+- NuttX の audio ドライバまたは DAC ドライバで実装
+
+#### 2e. ADC バッテリー監視・ボタン入力
+
+pybricks 参照: `battery_adc.c`, `button_resistor_ladder.c`
+
+- ADC1 6 チャンネル + DMA2_Stream0 で周期的サンプリング
+- TIM2 トリガで ADC 変換開始
+
+| チャンネル | ピン | 用途 |
+|---|---|---|
+| CH10 | PC0 | バッテリー電流 (最大 7300mA) |
+| CH11 | PC1 | バッテリー電圧 (最大 9900mV) |
+| CH8 | PB0 | バッテリー温度 (NTC サーミスタ) |
+| CH3 | PA3 | USB 充電入力電流 |
+| CH14 | PC4 | 充電状態 (抵抗ラダー) |
+| CH1 | PA1 | **ボタンパッド** (抵抗ラダーで複数ボタン検出) |
+
+**注意**: Hub のボタン入力は GPIO ではなく **ADC 抵抗ラダー** 方式。PA1 の電圧レベルから押下ボタンを判定する。Center ボタン、Bluetooth ボタン等を 1 本の ADC チャンネルで多重化。
+
+### Phase 3: ストレージ・充電 (P2)
 
 #### 3a. W25Q256 SPI NOR Flash
 
@@ -152,11 +183,20 @@ bringup 調査: `11-w25q256-flash-driver.md`
 - LittleFS または SmartFS でフォーマット
 - ユーザープログラム・データログの保存先
 
+#### 3b. MP2639A 充電制御
+
+- バッテリー充電 IC (MP2639A)
+- 充電電流設定: TIM5 CH1 (PA0) で PWM 制御 (96kHz)
+- 充電状態監視: ADC 抵抗ラダー (CH14/PC4) で 8 段階検出
+- 充電完了・エラー検出
+
 ### Phase 4: 無線通信 (P3)
 
-#### 4a. Bluetooth
+#### 4a. Bluetooth (CC256x)
 
-- USART2 (PD5/PD6) 経由の BLE モジュール
+- CC256x BLE チップ
+- USART2 (PD5/PD6) + フロー制御 (PD3/PD4)
+- DMA1_Stream6/7 で送受信
 - 詳細は TBD
 
 ---
@@ -172,6 +212,9 @@ boards/spike-prime-hub/src/
   stm32_legomotor.c     # H-Bridge モーター制御
   stm32_tlc5955.c       # TLC5955 LED ドライバ
   stm32_lsm6ds3.c       # IMU (LSM6DS3TR-C) 初期化
+  stm32_audio.c         # DAC オーディオ + スピーカー制御
+  stm32_battery.c       # ADC バッテリー監視 + ボタン入力
+  stm32_charger.c       # MP2639A 充電制御
 
 drivers/lego/           # NuttX 汎用ドライバ (apps/ または board 内)
   lump_uart.c           # LUMP UART プロトコルエンジン
@@ -228,8 +271,11 @@ Phase 1d: H-Bridge モーター ← 1c 完了後
 Phase 2a: センサー読取り    ← 1c 完了後
 Phase 2b: TLC5955 LED       ← 独立実装可能
 Phase 2c: IMU               ← 独立実装可能 (I2C2)
+Phase 2d: DAC オーディオ    ← 独立実装可能 (DAC1 + TIM6)
+Phase 2e: ADC バッテリー    ← 独立実装可能 (ADC1 + DMA2)
     ↓
 Phase 3a: W25Q256 Flash     ← 独立実装可能
+Phase 3b: MP2639A 充電      ← 2e (ADC) 完了後
     ↓
 Phase 4a: Bluetooth         ← 将来
 ```
