@@ -15,10 +15,11 @@ SPIKE Prime Hub 上で NuttX からハードウェアを制御するためのデ
 | 3 | H-Bridge モーター制御 | `/dev/legomotor[N]` | **P0** | TIM1/3/4 PWM |
 | 4 | センサーデータ読取り | `/dev/legosensor[N]` | **P1** | LUMP |
 | 5 | TLC5955 LED ドライバ | `/dev/leds` | **P1** | SPI1 |
-| 6 | USB CDC/ACM コンソール | `/dev/ttyACM0` | **済** | OTG FS |
-| 7 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
-| 8 | 電源管理 | (board 初期化) | **P0** | PA13/PA14 GPIO |
-| 9 | Bluetooth (TBD) | — | **P3** | USART2 |
+| 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **P1** | I2C2 |
+| 7 | USB CDC/ACM コンソール | `/dev/ttyACM0` | **済** | OTG FS |
+| 8 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
+| 9 | 電源管理 | (board 初期化) | **P0** | PA13/PA14 GPIO |
+| 10 | Bluetooth (TBD) | — | **P3** | USART2 |
 
 ### 優先度定義
 
@@ -126,6 +127,19 @@ pybricks 参照: `led_dual_pwm.c`, bringup 調査: `10-tlc5955-led-driver.md`
 - LATCH ピン: GPIO で制御
 - NuttX の `/dev/leds` または `/dev/userleds` インターフェース
 
+#### 2c. IMU (LSM6DS3TR-C)
+
+pybricks 参照: `imu_lsm6ds3tr_c_stm32.c`
+
+- ST 製 6 軸 IMU（3 軸加速度 + 3 軸ジャイロ）
+- I2C2 経由で接続
+  - SCL: PB10 (AF4)
+  - SDA: PB3 (AF9)
+  - INT1: PB4 (EXTI4, データレディ割り込み)
+- 軸符号補正: X=-1, Y=+1, Z=-1（Hub 基板実装向き）
+- NuttX の sensor ドライバフレームワーク (`CONFIG_SENSORS_LSM6DSL` 等) を活用可能
+- `/dev/imu0` または `/dev/accel0` + `/dev/gyro0` として公開
+
 ### Phase 3: ストレージ (P2)
 
 #### 3a. W25Q256 SPI NOR Flash
@@ -157,6 +171,7 @@ boards/spike-prime-hub/src/
   stm32_legoport.c      # I/O ポートマネージャ (DCM)
   stm32_legomotor.c     # H-Bridge モーター制御
   stm32_tlc5955.c       # TLC5955 LED ドライバ
+  stm32_lsm6ds3.c       # IMU (LSM6DS3TR-C) 初期化
 
 drivers/lego/           # NuttX 汎用ドライバ (apps/ または board 内)
   lump_uart.c           # LUMP UART プロトコルエンジン
@@ -212,6 +227,7 @@ Phase 1d: H-Bridge モーター ← 1c 完了後
     ↓
 Phase 2a: センサー読取り    ← 1c 完了後
 Phase 2b: TLC5955 LED       ← 独立実装可能
+Phase 2c: IMU               ← 独立実装可能 (I2C2)
     ↓
 Phase 3a: W25Q256 Flash     ← 独立実装可能
     ↓

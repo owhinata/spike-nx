@@ -15,10 +15,11 @@ Implementation plan for NuttX device drivers to control SPIKE Prime Hub hardware
 | 3 | H-Bridge Motor Control | `/dev/legomotor[N]` | **P0** | TIM1/3/4 PWM |
 | 4 | Sensor Data Readout | `/dev/legosensor[N]` | **P1** | LUMP |
 | 5 | TLC5955 LED Driver | `/dev/leds` | **P1** | SPI1 |
-| 6 | USB CDC/ACM Console | `/dev/ttyACM0` | **Done** | OTG FS |
-| 7 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
-| 8 | Power Management | (board init) | **P0** | PA13/PA14 GPIO |
-| 9 | Bluetooth (TBD) | — | **P3** | USART2 |
+| 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **P1** | I2C2 |
+| 7 | USB CDC/ACM Console | `/dev/ttyACM0` | **Done** | OTG FS |
+| 8 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
+| 9 | Power Management | (board init) | **P0** | PA13/PA14 GPIO |
+| 10 | Bluetooth (TBD) | — | **P3** | USART2 |
 
 ### Priority Definitions
 
@@ -126,6 +127,19 @@ pybricks reference: `led_dual_pwm.c`, bringup research: `10-tlc5955-led-driver.m
 - LATCH pin: GPIO controlled
 - NuttX `/dev/leds` or `/dev/userleds` interface
 
+#### 2c. IMU (LSM6DS3TR-C)
+
+pybricks reference: `imu_lsm6ds3tr_c_stm32.c`
+
+- ST 6-axis IMU (3-axis accelerometer + 3-axis gyroscope)
+- Connected via I2C2
+  - SCL: PB10 (AF4)
+  - SDA: PB3 (AF9)
+  - INT1: PB4 (EXTI4, data-ready interrupt)
+- Axis sign correction: X=-1, Y=+1, Z=-1 (Hub PCB mounting orientation)
+- Can leverage NuttX sensor driver framework (`CONFIG_SENSORS_LSM6DSL` etc.)
+- Exposed as `/dev/imu0` or `/dev/accel0` + `/dev/gyro0`
+
 ### Phase 3: Storage (P2)
 
 #### 3a. W25Q256 SPI NOR Flash
@@ -157,6 +171,7 @@ boards/spike-prime-hub/src/
   stm32_legoport.c      # I/O port manager (DCM)
   stm32_legomotor.c     # H-Bridge motor control
   stm32_tlc5955.c       # TLC5955 LED driver
+  stm32_lsm6ds3.c       # IMU (LSM6DS3TR-C) init
 
 drivers/lego/           # NuttX generic drivers (apps/ or in-board)
   lump_uart.c           # LUMP UART protocol engine
@@ -212,6 +227,7 @@ Phase 1d: H-Bridge Motor       ← After 1c
     ↓
 Phase 2a: Sensor Readout       ← After 1c
 Phase 2b: TLC5955 LED          ← Independent
+Phase 2c: IMU                  ← Independent (I2C2)
     ↓
 Phase 3a: W25Q256 Flash        ← Independent
     ↓
