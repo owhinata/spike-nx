@@ -4,21 +4,26 @@
 
 ## 1. 開発環境の全体像
 
-SPIKE Prime Hub の実機が未入手のため、同一 MCU (STM32F413ZHT6) を搭載する **STM32F413H-Discovery Kit** でブリングアップを行う。Powered Up デバイスドライバの実装は Hub 入手後。
+SPIKE Prime Hub の実機が未入手のため、同一 MCU ファミリ (STM32F413) を搭載する **STM32F413H-Discovery Kit** でブリングアップを行う。Powered Up デバイスドライバの実装は Hub 入手後。
 
 ### STM32F413H-Discovery vs SPIKE Prime Hub
 
 | 項目 | Discovery Kit | SPIKE Prime Hub |
 |---|---|---|
-| MCU | STM32F413ZHT6 | STM32F413VGT6 |
+| MCU | STM32F413**ZH**T6 (144pin) | STM32F413**VG**T6 (100pin) |
+| Flash | 1.5 MB | 1 MB (VG 公称。実質 1.5MB の可能性あり — 要実機確認) |
+| RAM | 320 KB | 320 KB |
 | HSE | 8 MHz | 16 MHz |
-| Flash 開始 | 0x08000000 | 0x08008000 (ブートローダー後) |
+| Flash 開始 | 0x08000000 | 0x08008000 (LEGO ブートローダー後) |
 | SWD | ST-Link/V2-1 **使用可能** | PA13/PA14 転用、**使用不可** |
-| コンソール | USART6 VCP (PG14/PG9) | USB CDC/ACM のみ |
+| NSH コンソール | USB CDC/ACM | USB CDC/ACM |
+| USART6 | ST-Link VCP に接続 (デバッグ予備) | 未アサイン (pybricks デバッグ用のみ) |
 | LED | GPIO 直接 (LD1=PE3, LD2=PC5) | TLC5955 via SPI1 (GPIO 直接制御不可) |
 | PA13/PA14 | SWDIO/SWCLK (デバッグ) | BAT_PWR_EN / PORT_3V3_EN (電源制御) |
 | USB OTG FS | あり | あり |
 | User Button | あり | あり (Bluetooth ボタン) |
+
+> **Flash サイズ注記**: SPIKE Hub の MCU は STM32F413VG (公称 1MB Flash)。ただし pybricks のリンカスクリプトはブートローダー後 992K を使用しており、STM32F413 は全バリアントで物理的に 1.5MB Flash を持つ可能性がある。実機での確認が必要。
 
 ### NuttX フォーク
 
@@ -58,24 +63,25 @@ make -f scripts/nuttx.mk BOARD=spike-prime-hub     # SPIKE Hub
 
 ### Phase B: F412 代用ブリングアップ (Discovery)
 
-F412ZG 設定を代用し、Discovery Kit で NSH を動作させる。
+F412ZG 設定を代用し、Discovery Kit で NSH を動作させる。コンソールは **USB CDC/ACM** (SPIKE Hub と同一構成)。USART6 は空けておく。
 
 **ボード定義:**
 
 ```
 boards/stm32f413-discovery/
   Kconfig
-  configs/nsh/defconfig           # F412ZG 代用、USART6 コンソール
+  configs/nsh/defconfig           # F412ZG 代用、USB CDC/ACM コンソール
   include/board.h                 # 8MHz HSE → 96MHz SYSCLK
   scripts/Make.defs
   scripts/ld.script               # 0x08000000, 1024K Flash, 256K SRAM (F412 制限)
   src/Make.defs
   src/stm32_boot.c
   src/stm32_bringup.c
+  src/stm32_usbdev.c              # USB デバイス初期化
   src/stm32f413_discovery.h
 ```
 
-**成功基準:** NSH が USART6 VCP で動作、LED 点灯
+**成功基準:** NSH が USB CDC/ACM で動作、LED 点灯
 
 ### Phase C: STM32F413 チップサポート (NuttX フォーク)
 
@@ -105,13 +111,7 @@ Discovery Kit で F413 固有 UART9/10 を動作確認:
 
 **成功基準:** USB-UART アダプタ経由で 115200 baud 送受信成功
 
-### Phase E: USB CDC/ACM (Discovery)
-
-SPIKE Hub のコンソール構成を Discovery で検証。`configs/nsh-usbconsole/defconfig` を新規作成。
-
-**成功基準:** USB CDC/ACM でNSH 操作可能、`dmesg` で起動初期ログ確認
-
-### Phase F: SPIKE Hub ボード定義 (ビルドのみ)
+### Phase E: SPIKE Hub ボード定義 (ビルドのみ)
 
 Hub 用ボード定義を作成。実機テストは入手後。
 
@@ -129,16 +129,15 @@ boards/spike-prime-hub/
 
 ```
 Phase A ──→ Phase B ──→ Phase C ──→ Phase D
-  │                        │
-  │                        └──→ Phase F
-  └──→ Phase E (B 完了後、C/D と並行可能)
+                           │
+                           └──→ Phase E
 ```
 
 ---
 
 ## 3. 開発サイクル
 
-### Discovery Kit (SWD)
+### Discovery Kit
 
 ```
 コード編集
@@ -147,10 +146,10 @@ make -f scripts/nuttx.mk                         # Docker 内ビルド
   ↓
 make -f scripts/nuttx.mk flash                   # OpenOCD SWD フラッシュ
   ↓
-screen /dev/cu.usbmodem* 115200                   # USART6 VCP コンソール
+screen /dev/ttyACM0 115200                        # USB CDC/ACM コンソール
 ```
 
-OpenOCD コマンド:
+フラッシュ (OpenOCD SWD):
 ```bash
 openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
   -c "program nuttx/nuttx.bin 0x08000000 verify reset exit"
@@ -209,7 +208,8 @@ make -f scripts/nuttx.mk distclean                 # 完全クリーン
 | 手段 | 用途 |
 |---|---|
 | **SWD + OpenOCD + GDB** | ステップ実行、ブレークポイント、メモリ検査 |
-| **USART6 VCP** | NSH コンソール + syslog 出力 |
+| **USB CDC/ACM NSH** | NSH コンソール + syslog + `dmesg` |
+| **USART6 VCP** | デバッグ予備 (NSH には使用しない。syslog 副次出力等に利用可能) |
 | **NSH コマンド** | `ps`, `free`, `top`, `dmesg`, `/proc` |
 | **LED (PE3, PC5)** | ブート進捗表示 |
 

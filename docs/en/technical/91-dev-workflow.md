@@ -4,21 +4,26 @@
 
 ## 1. Development Environment Overview
 
-The SPIKE Prime Hub is not yet available. Initial bring-up uses the **STM32F413H-Discovery Kit** which has the same MCU (STM32F413ZHT6). Powered Up device driver implementation is deferred until Hub is available.
+The SPIKE Prime Hub is not yet available. Initial bring-up uses the **STM32F413H-Discovery Kit** which has the same MCU family (STM32F413). Powered Up device driver implementation is deferred until Hub is available.
 
 ### STM32F413H-Discovery vs SPIKE Prime Hub
 
 | Item | Discovery Kit | SPIKE Prime Hub |
 |---|---|---|
-| MCU | STM32F413ZHT6 | STM32F413VGT6 |
+| MCU | STM32F413**ZH**T6 (144-pin) | STM32F413**VG**T6 (100-pin) |
+| Flash | 1.5 MB | 1 MB (VG nominal. May be 1.5MB physically — needs verification) |
+| RAM | 320 KB | 320 KB |
 | HSE | 8 MHz | 16 MHz |
-| Flash origin | 0x08000000 | 0x08008000 (after bootloader) |
+| Flash origin | 0x08000000 | 0x08008000 (after LEGO bootloader) |
 | SWD | ST-Link/V2-1 **available** | PA13/PA14 repurposed, **not available** |
-| Console | USART6 VCP (PG14/PG9) | USB CDC/ACM only |
+| NSH Console | USB CDC/ACM | USB CDC/ACM |
+| USART6 | Connected to ST-Link VCP (debug reserve) | Unassigned (pybricks debug only) |
 | LED | GPIO direct (LD1=PE3, LD2=PC5) | TLC5955 via SPI1 (no direct GPIO) |
 | PA13/PA14 | SWDIO/SWCLK (debug) | BAT_PWR_EN / PORT_3V3_EN (power) |
 | USB OTG FS | Yes | Yes |
 | User Button | Yes | Yes (Bluetooth button) |
+
+> **Flash size note**: SPIKE Hub MCU is STM32F413VG (nominal 1MB Flash). However, pybricks linker script uses 992K after bootloader, and STM32F413 may physically have 1.5MB across all variants. Needs hardware verification.
 
 ### NuttX Fork
 
@@ -58,24 +63,25 @@ make -f scripts/nuttx.mk BOARD=spike-prime-hub     # SPIKE Hub
 
 ### Phase B: F412 Workaround Bring-up (Discovery)
 
-Use F412ZG config as workaround to run NSH on Discovery Kit.
+Use F412ZG config as workaround to run NSH on Discovery Kit. Console is **USB CDC/ACM** (same as SPIKE Hub). USART6 is kept free.
 
 **Board definition:**
 
 ```
 boards/stm32f413-discovery/
   Kconfig
-  configs/nsh/defconfig           # F412ZG workaround, USART6 console
+  configs/nsh/defconfig           # F412ZG workaround, USB CDC/ACM console
   include/board.h                 # 8MHz HSE → 96MHz SYSCLK
   scripts/Make.defs
   scripts/ld.script               # 0x08000000, 1024K Flash, 256K SRAM (F412 limit)
   src/Make.defs
   src/stm32_boot.c
   src/stm32_bringup.c
+  src/stm32_usbdev.c              # USB device initialization
   src/stm32f413_discovery.h
 ```
 
-**Success criteria:** NSH works on USART6 VCP, LEDs light up
+**Success criteria:** NSH works on USB CDC/ACM, LEDs light up
 
 ### Phase C: STM32F413 Chip Support (NuttX Fork)
 
@@ -105,13 +111,7 @@ Verify F413-specific UART9/10 on Discovery Kit:
 
 **Success criteria:** 115200 baud send/receive via USB-UART adapter
 
-### Phase E: USB CDC/ACM (Discovery)
-
-Verify SPIKE Hub console configuration on Discovery. Create `configs/nsh-usbconsole/defconfig`.
-
-**Success criteria:** NSH works over USB CDC/ACM, `dmesg` shows early boot logs
-
-### Phase F: SPIKE Hub Board Definition (Build Only)
+### Phase E: SPIKE Hub Board Definition (Build Only)
 
 Create Hub board definition. Hardware testing deferred until Hub is available.
 
@@ -129,16 +129,15 @@ boards/spike-prime-hub/
 
 ```
 Phase A ──→ Phase B ──→ Phase C ──→ Phase D
-  │                        │
-  │                        └──→ Phase F
-  └──→ Phase E (after B, parallel with C/D)
+                           │
+                           └──→ Phase E
 ```
 
 ---
 
 ## 3. Development Cycle
 
-### Discovery Kit (SWD)
+### Discovery Kit
 
 ```
 Edit code
@@ -147,10 +146,10 @@ make -f scripts/nuttx.mk                         # Docker build
   ↓
 make -f scripts/nuttx.mk flash                   # OpenOCD SWD flash
   ↓
-screen /dev/cu.usbmodem* 115200                   # USART6 VCP console
+screen /dev/ttyACM0 115200                        # USB CDC/ACM console
 ```
 
-OpenOCD command:
+Flash (OpenOCD SWD):
 ```bash
 openocd -f interface/stlink.cfg -f target/stm32f4x.cfg \
   -c "program nuttx/nuttx.bin 0x08000000 verify reset exit"
@@ -209,7 +208,8 @@ make -f scripts/nuttx.mk distclean                 # Full clean
 | Method | Use Case |
 |---|---|
 | **SWD + OpenOCD + GDB** | Step execution, breakpoints, memory inspection |
-| **USART6 VCP** | NSH console + syslog output |
+| **USB CDC/ACM NSH** | NSH console + syslog + `dmesg` |
+| **USART6 VCP** | Debug reserve (not used for NSH. Available for secondary syslog etc.) |
 | **NSH commands** | `ps`, `free`, `top`, `dmesg`, `/proc` |
 | **LEDs (PE3, PC5)** | Boot progress indication |
 
