@@ -1,1 +1,11 @@
 .DS_Store
+
+# NuttX build artifacts
+nuttx/.config
+nuttx/.config.old
+nuttx/nuttx
+nuttx/nuttx.bin
+nuttx/nuttx.hex
+nuttx/nuttx.map
+nuttx/System.map
+nuttx/.version
