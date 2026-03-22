@@ -9,3 +9,9 @@ nuttx/nuttx.hex
 nuttx/nuttx.map
 nuttx/System.map
 nuttx/.version
+
+# Board build artifacts
+boards/*/src/*.o
+boards/*/src/*.a
+boards/*/src/.depend
+boards/*/src/Make.dep
