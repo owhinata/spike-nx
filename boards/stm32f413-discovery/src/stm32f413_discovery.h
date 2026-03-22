@@ -41,6 +41,7 @@
  *   PA9  = OTG_FS_VBUS
  */
 
+#undef  GPIO_OTGFS_VBUS
 #define GPIO_OTGFS_VBUS (GPIO_INPUT | GPIO_FLOAT | GPIO_SPEED_100MHz | \
                          GPIO_OPENDRAIN | GPIO_PORTA | GPIO_PIN9)
 
