@@ -135,13 +135,13 @@
 #define NUM_BUTTONS       1
 #define BUTTON_USER_BIT   (1 << BUTTON_USER)
 
-/* USART6: Connected to ST-Link VCP on Discovery Kit
- *   PC6 = TX
- *   PC7 = RX
+/* USART6: Connected to ST-Link VCP on Discovery Kit (UM2135)
+ *   PG14 = TX (AF8)
+ *   PG9  = RX (AF8)
  */
 
-#define GPIO_USART6_RX    GPIO_USART6_RX_1
-#define GPIO_USART6_TX    GPIO_USART6_TX_1
+#define GPIO_USART6_RX    GPIO_USART6_RX_2
+#define GPIO_USART6_TX    GPIO_USART6_TX_2
 
 /* SPI1: Available on Arduino header */
 
