@@ -3,6 +3,13 @@ MAKEOPTS      := -j$(shell nproc 2>/dev/null || echo 2)
 BOARD         ?= stm32f4discovery
 BOARD_CONFIG  ?= nsh
 
+# out-of-tree board: if boards/<BOARD> exists, use path-based configure
+ifneq ($(wildcard $(CURDIR)/boards/$(BOARD)),)
+  CONFIGURE_ARG = ../boards/$(BOARD)/configs/$(BOARD_CONFIG)
+else
+  CONFIGURE_ARG = $(BOARD):$(BOARD_CONFIG)
+endif
+
 DOCKER_RUN := docker run --rm \
 	--user "$(shell id -u):$(shell id -g)" \
 	-v /etc/passwd:/etc/passwd:ro \
@@ -36,7 +43,7 @@ docker-build: nuttx/Makefile
 
 configure: docker-build
 	@if [ ! -f nuttx/.config ]; then \
-		$(DOCKER_RUN) ./tools/configure.sh -l $(BOARD):$(BOARD_CONFIG); \
+		$(DOCKER_RUN) ./tools/configure.sh -l $(CONFIGURE_ARG); \
 	fi
 
 menuconfig: docker-build

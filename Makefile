@@ -4,7 +4,7 @@
 
 # NuttX targets
 nuttx:
-	$(MAKE) -f scripts/nuttx.mk build BOARD=stm32f4discovery BOARD_CONFIG=nsh
+	$(MAKE) -f scripts/nuttx.mk build BOARD=stm32f413-discovery BOARD_CONFIG=nsh
 
 nuttx-%:
 	$(MAKE) -f scripts/nuttx.mk $*
