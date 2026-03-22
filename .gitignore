@@ -15,3 +15,9 @@ boards/*/src/*.o
 boards/*/src/*.a
 boards/*/src/.depend
 boards/*/src/Make.dep
+
+# Apps build artifacts
+apps/**/*.o
+apps/**/.built
+apps/**/.depend
+apps/**/Make.dep

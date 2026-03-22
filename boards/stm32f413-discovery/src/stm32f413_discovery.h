@@ -65,5 +65,9 @@ int stm32_bringup(void);
 
 void weak_function stm32_usbinitialize(void);
 
+#ifdef CONFIG_SENSORS_LSM9DS0
+int stm32_lsm9ds0_initialize(void);
+#endif
+
 #endif /* __ASSEMBLY__ */
 #endif /* __BOARDS_STM32F413_DISCOVERY_SRC_STM32F413_DISCOVERY_H */
