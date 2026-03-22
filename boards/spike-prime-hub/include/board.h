@@ -114,6 +114,14 @@
 #define NUM_BUTTONS       1
 #define BUTTON_USER_BIT   (1 << BUTTON_USER)
 
+/* USART6: Debug via external ST-Link (emergency use, shares pins with Port E motor)
+ *   PC6 = TX (AF8)
+ *   PC7 = RX (AF8)
+ */
+
+#define GPIO_USART6_RX    GPIO_USART6_RX_1
+#define GPIO_USART6_TX    GPIO_USART6_TX_1
+
 /* SPI1: TLC5955 LED driver */
 
 #define GPIO_SPI1_MISO    GPIO_SPI1_MISO_1
