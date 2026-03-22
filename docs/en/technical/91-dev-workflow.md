@@ -17,7 +17,7 @@ The SPIKE Prime Hub is not yet available. Initial bring-up uses the **STM32F413H
 | Flash origin | 0x08000000 | 0x08008000 (after LEGO bootloader) |
 | SWD | ST-Link/V2-1 **available** | PA13/PA14 repurposed, **not available** |
 | NSH Console | USB CDC/ACM | USB CDC/ACM |
-| USART6 | Connected to ST-Link VCP (debug reserve) | Unassigned (pybricks debug only) |
+| USART6 | Connected to ST-Link VCP: PG14 (TX) / PG9 (RX) (UM2135) | Unassigned (pybricks debug only) |
 | LED | GPIO direct (LD1=PE3, LD2=PC5) | TLC5955 via SPI1 (no direct GPIO) |
 | PA13/PA14 | SWDIO/SWCLK (debug) | BAT_PWR_EN / PORT_3V3_EN (power) |
 | USB OTG FS | Yes | Yes |

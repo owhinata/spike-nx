@@ -1,3 +1,9 @@
 [submodule "pybricks"]
 	path = pybricks
 	url = https://github.com/pybricks/pybricks-micropython.git
+[submodule "nuttx"]
+	path = nuttx
+	url = https://github.com/owhinata/nuttx.git
+[submodule "nuttx-apps"]
+	path = nuttx-apps
+	url = https://github.com/owhinata/nuttx-apps.git

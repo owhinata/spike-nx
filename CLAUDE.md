@@ -78,7 +78,27 @@ make -f scripts/pybricks.mk distclean
 
 ### NuttX
 
-TBD
+NuttX 12.12.0 (owhinata fork) を git submodule として `./nuttx` と `./nuttx-apps` に配置。Docker コンテナでビルド。
+
+```bash
+# フルビルド（submodule init → docker image build → configure → make）
+make -f scripts/nuttx.mk
+
+# ボード指定ビルド
+make -f scripts/nuttx.mk BOARD=stm32f4discovery BOARD_CONFIG=nsh
+
+# Kconfig メニュー
+make -f scripts/nuttx.mk menuconfig
+
+# defconfig 保存
+make -f scripts/nuttx.mk savedefconfig
+
+# クリーンビルド
+make -f scripts/nuttx.mk clean
+
+# 完全クリーン（docker image 削除 + submodule deinit）
+make -f scripts/nuttx.mk distclean
+```
 
 ## デバイスアクセス
 
