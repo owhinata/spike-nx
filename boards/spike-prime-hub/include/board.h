@@ -114,9 +114,14 @@
 #define NUM_BUTTONS       1
 #define BUTTON_USER_BIT   (1 << BUTTON_USER)
 
-/* USART6: Debug via external ST-Link (emergency use, shares pins with Port E motor)
+/* USART6: Debug via external ST-Link (emergency use)
  *   PC6 = TX (AF8)
  *   PC7 = RX (AF8)
+ *
+ * Note: PG14/PG9 (USART6_TX/RX_2) are not available on the 100-pin
+ * LQFP package (STM32F413VG). PC6/PC7 are the only option.
+ * These pins are shared with Port E H-bridge motor PWM (TIM3 CH1/CH2),
+ * so USART6 and Port E motor are mutually exclusive.
  */
 
 #define GPIO_USART6_RX    GPIO_USART6_RX_1
