@@ -1,6 +1,6 @@
 DOCKER_IMAGE  := nuttx-builder
 MAKEOPTS      := -j$(shell nproc 2>/dev/null || echo 2)
-BOARD         ?= stm32f4discovery
+BOARD         ?= stm32f413-discovery
 BOARD_CONFIG  ?= nsh
 
 # out-of-tree board: if boards/<BOARD> exists, use path-based configure
