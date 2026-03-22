@@ -69,12 +69,9 @@ int stm32l4_lsm6dsl_initialize(void)
       return -ENODEV;
     }
 
-  /* Configure LSM6DSL with INT1 for accel DRDY, gyro via kthread */
+  /* Configure LSM6DSL with INT1 for gyro DRDY (burst reads both sensors) */
 
-  config.xl_int    = LSM6DSL_INT1;
-  config.gy_int    = LSM6DSL_INT2;
-  config.xl_attach = lsm6dsl_int1_attach;
-  config.gy_attach = NULL;  /* No INT2 GPIO — use kthread polling */
+  config.attach = lsm6dsl_int1_attach;
 
   /* Register LSM6DSL as uORB sensor */
 
