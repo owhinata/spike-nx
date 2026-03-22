@@ -17,7 +17,7 @@ SPIKE Prime Hub の実機が未入手のため、同一 MCU ファミリ (STM32F
 | Flash 開始 | 0x08000000 | 0x08008000 (LEGO ブートローダー後) |
 | SWD | ST-Link/V2-1 **使用可能** | PA13/PA14 転用、**使用不可** |
 | NSH コンソール | USB CDC/ACM | USB CDC/ACM |
-| USART6 | ST-Link VCP に接続 (デバッグ予備) | 未アサイン (pybricks デバッグ用のみ) |
+| USART6 | ST-Link VCP に接続: PG14 (TX) / PG9 (RX) (UM2135) | 未アサイン (pybricks デバッグ用のみ) |
 | LED | GPIO 直接 (LD1=PE3, LD2=PC5) | TLC5955 via SPI1 (GPIO 直接制御不可) |
 | PA13/PA14 | SWDIO/SWCLK (デバッグ) | BAT_PWR_EN / PORT_3V3_EN (電源制御) |
 | USB OTG FS | あり | あり |
