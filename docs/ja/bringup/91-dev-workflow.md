@@ -52,7 +52,6 @@ SPIKE Prime Hub の実機が未入手のため、同一 MCU ファミリ (STM32F
 | `distclean` | 全クリーン (Docker image 削除 + submodule deinit) |
 | `menuconfig` | 対話的設定 |
 | `savedefconfig` | defconfig 更新 |
-| `flash` | Discovery: OpenOCD SWD / Hub: dfu-util DFU |
 
 **BOARD 切替:**
 
@@ -144,7 +143,7 @@ Phase A ──→ Phase B ──→ Phase C ──→ Phase D
   ↓
 make -f scripts/nuttx.mk                         # Docker 内ビルド
   ↓
-make -f scripts/nuttx.mk flash                   # OpenOCD SWD フラッシュ
+openocd ... -c "program nuttx/nuttx.bin ..."     # OpenOCD SWD フラッシュ
   ↓
 screen /dev/ttyACM0 115200                        # USB CDC/ACM コンソール
 ```
@@ -172,7 +171,7 @@ make -f scripts/nuttx.mk BOARD=spike-prime-hub    # Docker 内ビルド
   ↓
 DFU モード進入                                     # Bluetooth ボタン長押し + USB 接続
   ↓
-make -f scripts/nuttx.mk BOARD=spike-prime-hub flash  # dfu-util DFU フラッシュ
+dfu-util -d 0694:0008 -a 0 -s 0x08008000:leave -D nuttx/nuttx.bin  # DFU フラッシュ
   ↓
 screen /dev/ttyACM0 115200                         # USB CDC/ACM コンソール
 ```

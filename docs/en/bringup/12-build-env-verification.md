@@ -26,8 +26,8 @@ apt-get install -y python3-kconfiglib
 
 | Repository | Tag | Exists |
 |---|---|---|
-| `apache/nuttx` | `nuttx-12.12.0` | Confirmed |
-| `apache/nuttx-apps` | `nuttx-12.12.0` | Confirmed |
+| `owhinata/nuttx` | `nuttx-12.12.0` | Confirmed |
+| `owhinata/nuttx-apps` | `nuttx-12.12.0` | Confirmed |
 
 **Note**: These exist as git tags, not GitHub Release objects. Use `git clone --branch nuttx-12.12.0`.
 

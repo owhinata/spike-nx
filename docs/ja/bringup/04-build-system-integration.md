@@ -49,8 +49,8 @@ pybricks と同様の submodule パターンを採用:
 
 ```
 spike-nx/
-├── nuttx/              # git submodule: apache/nuttx (タグ nuttx-12.12.0)
-├── nuttx-apps/         # git submodule: apache/nuttx-apps (タグ nuttx-12.12.0)
+├── nuttx/              # git submodule: owhinata/nuttx (f413-support ブランチ)
+├── nuttx-apps/         # git submodule: owhinata/nuttx-apps (タグ nuttx-12.12.0)
 ├── boards/             # カスタムボード定義 (out-of-tree)
 │   └── spike-prime-hub/
 │       ├── configs/nsh/defconfig

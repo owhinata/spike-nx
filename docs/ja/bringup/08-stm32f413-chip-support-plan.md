@@ -123,7 +123,7 @@ CONFIG_ARCH_CHIP_STM32F412ZG=y
 ```
 spike-nx/
 ├── nuttx/          # git submodule: owhinata/nuttx (フォーク、f413-support ブランチ)
-├── nuttx-apps/     # git submodule: apache/nuttx-apps (タグ nuttx-12.12.0)
+├── nuttx-apps/     # git submodule: owhinata/nuttx-apps (タグ nuttx-12.12.0)
 ├── boards/         # カスタムボード定義 (out-of-tree)
 └── ...
 ```

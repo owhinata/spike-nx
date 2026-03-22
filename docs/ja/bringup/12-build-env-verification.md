@@ -26,8 +26,8 @@ apt-get install -y python3-kconfiglib
 
 | リポジトリ | タグ | 存在 |
 |---|---|---|
-| `apache/nuttx` | `nuttx-12.12.0` | 確認済み |
-| `apache/nuttx-apps` | `nuttx-12.12.0` | 確認済み |
+| `owhinata/nuttx` | `nuttx-12.12.0` | 確認済み |
+| `owhinata/nuttx-apps` | `nuttx-12.12.0` | 確認済み |
 
 **注意**: GitHub Release オブジェクトではなくタグとして存在。`git clone --branch nuttx-12.12.0` で取得可能。
 
