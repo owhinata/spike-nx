@@ -19,10 +19,6 @@
 #  include <nuttx/input/buttons.h>
 #endif
 
-#ifdef CONFIG_SENSORS_LSM9DS0
-#  include <nuttx/sensors/lsm9ds0.h>
-#endif
-
 #include "stm32.h"
 #include "stm32f413_discovery.h"
 
@@ -48,15 +44,6 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: btn_lower_initialize() failed: %d\n", ret);
-    }
-#endif
-
-#ifdef CONFIG_SENSORS_LSM9DS0
-  ret = stm32_lsm9ds0_initialize();
-  if (ret < 0)
-    {
-      syslog(LOG_ERR, "ERROR: stm32_lsm9ds0_initialize() failed: %d\n",
-             ret);
     }
 #endif
 

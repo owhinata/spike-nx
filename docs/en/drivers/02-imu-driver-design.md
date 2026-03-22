@@ -2,90 +2,95 @@
 
 ## 1. Overview
 
-The LSM9DS0 (9-axis: accelerometer + gyroscope + magnetometer) is used as the development target, paired with an STM32F4 Discovery board for early development. The goal is to achieve feature parity with the pybricks LSM6DS3TR-C driver on NuttX.
+The LSM6DSL (6-axis: accelerometer + gyroscope) on the B-L4S5I-IOT01A Discovery board is used as the development target. The goal is to achieve feature parity with the pybricks LSM6DS3TR-C driver on NuttX.
 
-After development is complete, the LSM9DS0 driver will be replaced with an LSM6DS3TR-C driver when migrating to the SPIKE Prime Hub. The IMU processing library (apps/imu/) is sensor-agnostic and requires no changes.
+The LSM6DSL and LSM6DS3TR-C (on SPIKE Prime Hub) are in the same ST IMU family with compatible register layouts. The IMU processing library (apps/imu/) is sensor-agnostic and requires no changes when migrating between sensors.
 
 ---
 
-## 2. Device: LSM9DS0
+## 2. Device: LSM6DSL
 
 ### Architecture
 
-The LSM9DS0 uses a two-die architecture.
+The LSM6DSL is a single-die 6-axis IMU combining a 3-axis accelerometer and 3-axis gyroscope.
 
-| Die | Sensors | I2C Address (SA0=H/L) | WHO_AM_I |
-|-----|---------|------------------------|----------|
-| G die | Gyroscope | 0x6B / 0x6A | 0xD4 |
-| XM die | Accelerometer + Magnetometer | 0x1D / 0x1E | 0x49 |
-
-The SA0 pin selects between two addresses for each die.
+| Sensor | I2C Address (SDO/SA0) | WHO_AM_I |
+|--------|------------------------|----------|
+| Accel + Gyro | 0x6A (LOW) / 0x6B (HIGH) | 0x6A |
 
 ### Performance Specifications
 
-| Parameter | Gyro (G) | Accelerometer (XM) | Magnetometer (XM) |
-|-----------|----------|--------------------|--------------------|
-| Max ODR | 760 Hz | 1600 Hz | 100 Hz |
-| Full-scale | 245 / 500 / 2000 dps | ±2 / 4 / 6 / 8 / 16 g | ±2 / 4 / 8 / 12 gauss |
+| Parameter | Gyroscope | Accelerometer |
+|-----------|-----------|---------------|
+| Max ODR | 6.66 kHz | 6.66 kHz |
+| Full-scale | 125 / 250 / 500 / 1000 / 2000 dps | ±2 / 4 / 8 / 16 g |
 
-### I2C Multi-byte Reads
+### Data Acquisition (pybricks pattern)
 
-Setting bit 7 (0x80) of the register address enables auto-increment mode. This is required for 6-byte continuous reads (2 bytes each for X, Y, Z).
+A single DRDY interrupt on INT1 (gyro data ready) triggers a 12-byte burst read:
+- Bytes 0-5: Gyro X/Y/Z (OUTX_L_G 0x22 through OUTZ_H_G 0x27)
+- Bytes 6-11: Accel X/Y/Z (OUTX_L_A 0x28 through OUTZ_H_A 0x2D)
+
+Both sensors share the same ODR so accel data is always fresh when gyro DRDY fires.
+
+### Key Register Configuration
+
+| Register | Setting | Purpose |
+|----------|---------|---------|
+| CTRL3_C (0x12) | BDU=1, IF_INC=1 | Block Data Update, auto-increment |
+| CTRL5_C (0x14) | ROUNDING=011 | Enable rounding for burst reads |
+| DRDY_PULSE_CFG (0x0B) | DRDY_PULSED=1 | Pulsed DRDY mode (more reliable) |
+| INT1_CTRL (0x0D) | INT1_DRDY_G=1 | Route gyro DRDY to INT1 |
 
 ---
 
 ## 3. NuttX Driver Architecture
 
-The driver follows the existing NuttX LSM9DS1 driver pattern with the following file structure.
+The driver is implemented as a uORB sensor driver in the nuttx fork.
 
 ```
 [Kernel Space]
-  lsm9ds0_base.h    - Register definitions, device struct, ops
-  lsm9ds0_base.c    - I2C helpers, config/start/stop for each sensor
-  lsm9ds0_uorb.c    - uORB registration, poll thread, data scaling
-  lsm9ds0.h         - Public API (config struct, register function)
+  lsm6dsl_uorb.h    - Config struct, registration API
+  lsm6dsl_uorb.c    - I2C helpers, burst read, uORB registration
 
 [uORB Topics]
-  /dev/uorb/sensor_accel0   (m/s², from XM die)
-  /dev/uorb/sensor_gyro0    (rad/s, from G die)
-  /dev/uorb/sensor_mag0     (gauss, from XM die)
+  /dev/uorb/sensor_accel0   (m/s²)
+  /dev/uorb/sensor_gyro0    (rad/s)
 ```
 
-### Key Difference from LSM9DS1
+### Data Acquisition Modes
 
-The LSM9DS0 has **separate I2C addresses** for the G die and XM die. Unlike the LSM9DS1, where accelerometer and gyroscope share a single address, the LSM9DS0 gyroscope has its own independent address. The device struct must hold two I2C addresses.
+| Mode | Mechanism | When used |
+|------|-----------|-----------|
+| Interrupt | INT1 DRDY → HPWORK → burst read | Board provides `attach` callback |
+| Polling | kthread sleep → burst read | `attach = NULL` |
 
 ### Default Scale Settings
 
 | Sensor | Default | Rationale |
 |--------|---------|-----------|
-| Accelerometer | ±8 g | Covers typical robot motion range |
-| Gyroscope | 2000 dps | Handles fast rotations |
-| Magnetometer | 4 gauss | Sufficient for typical ambient fields |
-
-### Poll Thread
-
-A dedicated thread periodically reads data from all 3 sensors and pushes uORB events.
+| Accelerometer | ±2 g | Chip reset default, sufficient for orientation |
+| Gyroscope | 250 dps | Chip reset default |
 
 ---
 
 ## 4. Data Flow
 
 ```
-I2C read (6 bytes per sensor)
-  → raw int16 × 3 (X, Y, Z)
-  → two's complement conversion
+INT1 (gyro DRDY) fires
+  → HPWORK: burst read 12 bytes from 0x22
+  → raw int16 × 6 (gyro XYZ + accel XYZ)
   → float scale multiplication
-  → uORB push_event (sensor_accel / sensor_gyro / sensor_mag struct)
+  → push_event to sensor_gyro0 and sensor_accel0
 ```
 
-Raw values are stored as signed 16-bit integers (little-endian) for each sensor. After scale multiplication to convert to physical units, the data is published to the corresponding uORB topic.
+Both accel and gyro events share the same timestamp, ensuring synchronized data.
 
 ---
 
 ## 5. IMU Processing Library (apps/imu/)
 
-A sensor-agnostic processing layer that consumes uORB data. The same code works with both the LSM9DS0 and LSM6DS3TR-C.
+A sensor-agnostic processing layer that consumes uORB data. The same code works with both the LSM6DSL and LSM6DS3TR-C.
 
 ### File Structure
 
@@ -184,23 +189,16 @@ Settings are persisted as a binary file at `/data/imu_cal.bin`.
 
 ## 10. Hub Migration Guide
 
-When migrating to the SPIKE Prime Hub, replace the LSM9DS0 driver with an LSM6DS3TR-C driver.
+When migrating to the SPIKE Prime Hub, replace the LSM6DSL driver with an LSM6DS3TR-C driver.
 
 ### Key Differences
 
-| Aspect | LSM9DS0 (Discovery) | LSM6DS3TR-C (Hub) |
+| Aspect | LSM6DSL (B-L4S5I) | LSM6DS3TR-C (Hub) |
 |--------|---------------------|-------------------|
-| I2C address | 2 addresses (G + XM) | 1 address (accel+gyro combined) |
-| Magnetometer | Yes | No |
-| I2C bus | I2C1 | I2C2 |
-| ODR | 760 Hz (gyro) | 833 Hz |
-
-### Hub I2C2 Pin Assignment
-
-| Pin | Function | AF |
-|-----|----------|-----|
-| PB10 | SCL | AF4 |
-| PB3 | SDA | AF9 (STM32F413-specific) |
+| I2C address | 0x6A | 0x6A |
+| I2C bus | I2C2 (PB10/PB11) | I2C2 (PB10/PB3) |
+| WHO_AM_I | 0x6A | 0x6A |
+| ODR | Up to 6.66 kHz | Up to 6.66 kHz |
 
 ### Axis Sign Correction
 
@@ -218,22 +216,12 @@ The sensor fusion and calibration code in `apps/imu/` requires no changes. Since
 
 ---
 
-## 11. Board Wiring (Discovery + LSM9DS0)
+## 11. Board Wiring (B-L4S5I-IOT01A)
 
-### I2C1 Connection
+### I2C2 Connection (onboard)
 
-| Discovery Pin | LSM9DS0 Pin | Description |
-|--------------|-------------|-------------|
-| PB6 | SCL | I2C1 clock |
-| PB7 | SDA | I2C1 data |
-| 3.3V | VCC | Power supply |
-| GND | GND | Ground |
-
-### SA0 Configuration
-
-The SA0 pin selects the I2C address. Default is HIGH (pull-up).
-
-| SA0 | G Address | XM Address |
-|-----|-----------|------------|
-| HIGH | 0x6B | 0x1D |
-| LOW | 0x6A | 0x1E |
+| Pin | Function | Description |
+|-----|----------|-------------|
+| PB10 | I2C2_SCL | I2C clock |
+| PB11 | I2C2_SDA | I2C data |
+| PD11 | INT1 | Gyro DRDY interrupt (EXTI11) |
