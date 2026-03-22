@@ -1,14 +1,14 @@
 /****************************************************************************
  * boards/stm32f413-discovery/scripts/ld.script
  *
- * STM32F412ZG (Phase B workaround): 1024K Flash, 256K SRAM
- *   SRAM1: 256 KB @ 0x20000000
+ * STM32F413ZHT6: 1536K Flash, 320K SRAM
+ *   SRAM1: 320 KB @ 0x20000000
  ****************************************************************************/
 
 MEMORY
 {
-  flash (rx) : ORIGIN = 0x08000000, LENGTH = 1024K
-  sram (rwx) : ORIGIN = 0x20000000, LENGTH = 256K
+  flash (rx) : ORIGIN = 0x08000000, LENGTH = 1536K
+  sram (rwx) : ORIGIN = 0x20000000, LENGTH = 320K
 }
 
 OUTPUT_ARCH(arm)
