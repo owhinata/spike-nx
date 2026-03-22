@@ -63,7 +63,7 @@ make -f scripts/nuttx.mk BOARD=spike-prime-hub     # SPIKE Hub
 
 ### Phase B: F412 Workaround Bring-up (Discovery)
 
-Use F412ZG config as workaround to run NSH on Discovery Kit. Console is **USB CDC/ACM** (same as SPIKE Hub). USART6 is kept free.
+Uses upstream NuttX (nuttx-12.12.0) + out-of-tree board definition only. No NuttX fork changes required. F412ZG config as workaround to run NSH on Discovery Kit. Console is **USB CDC/ACM** (same as SPIKE Hub). USART6 is kept free.
 
 **Board definition:**
 
@@ -83,12 +83,12 @@ boards/stm32f413-discovery/
 
 **Success criteria:** NSH works on USB CDC/ACM, LEDs light up
 
-### Phase C: STM32F413 Chip Support (NuttX Fork)
+### Phase C: STM32F413 Chip Support — NuttX Fork Required
 
-Apply 10-file patch to `f413-support` branch of owhinata/nuttx:
+Phase C onward requires NuttX kernel changes. Apply 10-file patch to `f413-support` branch of owhinata/nuttx (see [08-stm32f413-chip-support-plan.md](08-stm32f413-chip-support-plan.md) for details):
 
 1. Kconfig: F413 family + UART9/10
-2. chip.h: peripheral counts, 1.5MB Flash / 320KB SRAM
+2. chip.h: peripheral counts, Flash/SRAM sizes (VG=1MB, ZH=1.5MB)
 3. stm32f40xxx_irq.h: UART9 IRQ=88, UART10 IRQ=89
 4. stm32f40xxx_memorymap.h: UART9/10 base addresses
 5. stm32f40xxx_rcc.h: APB2ENR UART9/10 bits

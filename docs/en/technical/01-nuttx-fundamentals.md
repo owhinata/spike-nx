@@ -146,7 +146,7 @@ CONFIG_ARCH_BOARD_CUSTOM_DIR="../custom-boards/spike-prime-hub"
 | Tool | Purpose |
 |---|---|
 | `arm-none-eabi-gcc` | ARM cross-compiler |
-| `kconfig-frontends` | Kconfig tools (kconfig-conf, kconfig-mconf) |
+| `python3-kconfiglib` | Kconfig tools (pure Python, officially recommended by NuttX) |
 | `make` (GNU Make) | Build system |
 | `genromfs` | ROMFS image generation (optional) |
 | `git`, `bison`, `flex`, `gperf`, `xxd` | Build dependencies |

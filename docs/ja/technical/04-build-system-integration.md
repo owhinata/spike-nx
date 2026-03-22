@@ -18,20 +18,20 @@ apt-get install -y --no-install-recommends \
     libncurses5-dev libncursesw5-dev xxd \
     gperf automake libtool pkg-config genromfs \
     libgmp-dev libmpc-dev libmpfr-dev libisl-dev \
-    kconfig-frontends-nox \
+    python3-kconfiglib \
     u-boot-tools util-linux
 ```
 
 | パッケージ | 用途 |
 |---|---|
-| `kconfig-frontends-nox` | Kconfig ツール (menuconfig 等)。Ubuntu 24.04 で apt 利用可能。`-nox` は X11 不要版 |
+| `python3-kconfiglib` | Kconfig ツール (menuconfig 等)。NuttX 公式推奨の純 Python 実装 |
 | `genromfs` | ROMFS イメージ生成 (オプション) |
 | `bison`, `flex` | パーサー生成 |
 | `gperf` | ハッシュ関数生成 |
 | `xxd` | バイナリ→Cヘッダ変換 |
 | その他 | ビルド依存 |
 
-**代替**: `kconfig-frontends` の代わりに `python3-kconfiglib` (純 Python 実装) も使用可能。
+> **注**: C ベースの `kconfig-frontends` は新しい NuttX Kconfig で構文エラーが発生する場合があるため使用しない ([issue #2405](https://github.com/apache/nuttx/issues/2405))。
 
 ### DFU フラッシュ用
 

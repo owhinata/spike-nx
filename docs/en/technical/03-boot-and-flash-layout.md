@@ -2,7 +2,9 @@
 
 ## 1. STM32F413VG Flash Sector Layout
 
-The STM32F413VG has 1.5 MB (1536 KB) flash with non-uniform sector sizes.
+The SPIKE Prime Hub MCU is STM32F413**VG** (nominal 1 MB Flash). However, the STM32F413 family may physically have 1.5 MB Flash (pybricks uses 992K after bootloader). **Design assumes 1 MB until hardware verification.**
+
+> **Note**: STM32F413H-Discovery Kit uses STM32F413**ZH** (1.5 MB Flash). Bank 2 (sectors 12-15) is available on Discovery but unconfirmed on SPIKE Hub.
 
 ### Bank 1 (1 MB, Sectors 0-11)
 
@@ -21,16 +23,17 @@ The STM32F413VG has 1.5 MB (1536 KB) flash with non-uniform sector sizes.
 | 10 | `0x080C0000` | 128 KB | Firmware |
 | 11 | `0x080E0000` | 128 KB | Firmware |
 
-### Bank 2 (512 KB, Sectors 12-15)
+### Bank 2 (512 KB, Sectors 12-15) — Needs Hardware Verification
 
 | Sector | Address | Size | Usage |
 |--------|---------|------|-------|
-| 12 | `0x08100000` | 128 KB | Additional area |
-| 13 | `0x08120000` | 128 KB | Additional area |
-| 14 | `0x08140000` | 128 KB | Additional area |
-| 15 | `0x08160000` | 128 KB | Additional area |
+| 12 | `0x08100000` | 128 KB | Additional (may be unavailable on VG) |
+| 13 | `0x08120000` | 128 KB | Same |
+| 14 | `0x08140000` | 128 KB | Same |
+| 15 | `0x08160000` | 128 KB | Same |
 
-**Total**: 4x16 KB + 1x64 KB + 11x128 KB = 1536 KB = 1.5 MB
+**Bank 1 total**: 4×16 KB + 1×64 KB + 7×128 KB = 1024 KB = 1 MB (VG nominal)
+**Bank 1+2 total**: 1024 KB + 512 KB = 1536 KB = 1.5 MB (ZH / if physically present)
 
 Source: RM0430 (STM32F413/423 Reference Manual) Table 5
 

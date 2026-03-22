@@ -61,9 +61,9 @@ make -f scripts/nuttx.mk                          # デフォルト: stm32f413-d
 make -f scripts/nuttx.mk BOARD=spike-prime-hub     # SPIKE Hub
 ```
 
-### Phase B: F412 代用ブリングアップ (Discovery)
+### Phase B: F412 代用ブリングアップ (Discovery) — out-of-tree のみ
 
-F412ZG 設定を代用し、Discovery Kit で NSH を動作させる。コンソールは **USB CDC/ACM** (SPIKE Hub と同一構成)。USART6 は空けておく。
+upstream NuttX (nuttx-12.12.0) + out-of-tree ボード定義のみで実施。NuttX フォークへの変更は不要。F412ZG 設定を代用し、Discovery Kit で NSH を動作させる。コンソールは **USB CDC/ACM** (SPIKE Hub と同一構成)。USART6 は空けておく。
 
 **ボード定義:**
 
@@ -83,12 +83,12 @@ boards/stm32f413-discovery/
 
 **成功基準:** NSH が USB CDC/ACM で動作、LED 点灯
 
-### Phase C: STM32F413 チップサポート (NuttX フォーク)
+### Phase C: STM32F413 チップサポート — NuttX フォーク必須
 
-owhinata/nuttx の `f413-support` ブランチに 10 ファイルパッチを適用:
+Phase C 以降は NuttX カーネルの変更が必要。owhinata/nuttx の `f413-support` ブランチに 10 ファイルパッチを適用 (詳細は [08-stm32f413-chip-support-plan.md](08-stm32f413-chip-support-plan.md) を参照):
 
 1. Kconfig: F413 ファミリ + UART9/10
-2. chip.h: ペリフェラル数、1.5MB Flash / 320KB SRAM
+2. chip.h: ペリフェラル数、Flash / SRAM サイズ (VG=1MB, ZH=1.5MB)
 3. stm32f40xxx_irq.h: UART9 IRQ=88, UART10 IRQ=89
 4. stm32f40xxx_memorymap.h: UART9/10 ベースアドレス
 5. stm32f40xxx_rcc.h: APB2ENR UART9/10 ビット

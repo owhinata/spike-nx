@@ -18,20 +18,20 @@ apt-get install -y --no-install-recommends \
     libncurses5-dev libncursesw5-dev xxd \
     gperf automake libtool pkg-config genromfs \
     libgmp-dev libmpc-dev libmpfr-dev libisl-dev \
-    kconfig-frontends-nox \
+    python3-kconfiglib \
     u-boot-tools util-linux
 ```
 
 | Package | Purpose |
 |---|---|
-| `kconfig-frontends-nox` | Kconfig tools (menuconfig, etc.). Available via apt on Ubuntu 24.04. `-nox` = no X11 |
+| `python3-kconfiglib` | Kconfig tools (menuconfig, etc.). Pure Python, officially recommended by NuttX |
 | `genromfs` | ROMFS image generation (optional) |
 | `bison`, `flex` | Parser generators |
 | `gperf` | Hash function generator |
 | `xxd` | Binary-to-C-header conversion |
 | Others | Build dependencies |
 
-**Alternative**: `python3-kconfiglib` (pure Python) can replace `kconfig-frontends`.
+> **Note**: C-based `kconfig-frontends` can cause syntax errors with newer NuttX Kconfig files — do not use ([issue #2405](https://github.com/apache/nuttx/issues/2405)).
 
 ### For DFU Flashing
 

@@ -29,12 +29,12 @@ Each port has 5 signal lines:
 
 | Port | UART | uart_tx | uart_rx | gpio1 | gpio2 | uart_buf | AF |
 |---|---|---|---|---|---|---|---|
-| A | UART7 | PE8 | PE7 | PE9 | PE11 | PA10 | AF8 |
-| B | UART4 | PD1 | PD0 | PD3 | PD5 | PA8 | AF11 |
-| C | UART8 | PE1 | PE0 | PB5 | PB4 | PE5 | AF8 |
-| D | UART5 | PC12 | PD2 | PA15 | PA13 | PB2 | AF8 |
-| E | UART10 | PE3 | PE2 | PA0 | PA3 | PB5 | AF11 |
-| F | UART9 | PD15 | PD14 | PD4 | PD7 | PC5 | AF11 |
+| A | UART7 | PE8 | PE7 | PD7 | PD8 | PA10 | AF8 |
+| B | UART4 | PD1 | PD0 | PD9 | PD10 | PA8 | AF11 |
+| C | UART8 | PE1 | PE0 | PD11 | PE4 | PE5 | AF8 |
+| D | UART5 | PC12 | PD2 | PC15 | PC14 | PB2 | AF8 |
+| E | UART10 | PE3 | PE2 | PC13 | PE12 | PB5 | AF11 |
+| F | UART9 | PD15 | PD14 | PC11 | PE6 | PC5 | AF11 |
 
 **Note**: Ports E and F use UART10/UART9 (STM32F413-specific).
 
