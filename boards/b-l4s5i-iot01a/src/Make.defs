@@ -1,0 +1,17 @@
+############################################################################
+# boards/b-l4s5i-iot01a/src/Make.defs
+############################################################################
+
+CSRCS = stm32_boot.c stm32_bringup.c
+
+ifeq ($(CONFIG_ARCH_LEDS),y)
+CSRCS += stm32_autoleds.c
+endif
+
+ifeq ($(CONFIG_BOARDCTL),y)
+CSRCS += stm32_appinit.c
+endif
+
+ifeq ($(CONFIG_SENSORS_LSM6DSL_UORB),y)
+CSRCS += stm32_lsm6dsl.c
+endif

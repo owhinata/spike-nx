@@ -28,8 +28,14 @@ DOCKER_RUN_IT := docker run --rm -it \
 
 .PHONY: build configure clean distclean docker-build submodules menuconfig savedefconfig
 
-build: docker-build configure
+build: docker-build link-apps configure
 	$(DOCKER_RUN) make $(MAKEOPTS)
+
+# Symlink project-local apps/ into nuttx-apps/external for build integration
+link-apps:
+	@if [ -d $(CURDIR)/apps ] && [ ! -e $(CURDIR)/nuttx-apps/external ]; then \
+		ln -s $(CURDIR)/apps $(CURDIR)/nuttx-apps/external; \
+	fi
 
 nuttx/Makefile:
 	git submodule update --init nuttx nuttx-apps
@@ -43,7 +49,7 @@ docker-build: nuttx/Makefile
 
 configure: docker-build
 	@if [ ! -f nuttx/.config ]; then \
-		$(DOCKER_RUN) ./tools/configure.sh -l $(CONFIGURE_ARG); \
+		$(DOCKER_RUN) ./tools/configure.sh -l -a ../nuttx-apps $(CONFIGURE_ARG); \
 	fi
 
 menuconfig: docker-build

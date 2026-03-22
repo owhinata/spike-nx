@@ -5,7 +5,7 @@
 # You can then do "make savedefconfig" to generate a new defconfig file that includes your
 # modifications.
 #
-# CONFIG_ARCH_FPU is not set
+CONFIG_ARCH_FPU=y
 # CONFIG_DEV_CONSOLE is not set
 CONFIG_ARCH="arm"
 CONFIG_ARCH_BOARD_CUSTOM=y

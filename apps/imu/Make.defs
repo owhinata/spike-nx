@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_APP_IMU),)
+CONFIGURED_APPS += $(APPDIR)/external/imu
+endif
