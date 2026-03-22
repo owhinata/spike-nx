@@ -143,6 +143,22 @@
 #define GPIO_USART6_RX    GPIO_USART6_RX_2
 #define GPIO_USART6_TX    GPIO_USART6_TX_2
 
+/* UART9: F413-specific (AF11)
+ *   PD15 = TX
+ *   PD14 = RX
+ */
+
+#define GPIO_UART9_TX     GPIO_UART9_TX_1
+#define GPIO_UART9_RX     GPIO_UART9_RX_1
+
+/* UART10: F413-specific (AF11)
+ *   PG12 = TX (PE3 conflicts with LD1)
+ *   PG11 = RX
+ */
+
+#define GPIO_UART10_TX    GPIO_UART10_TX_2
+#define GPIO_UART10_RX    GPIO_UART10_RX_2
+
 /* SPI1: Available on Arduino header */
 
 #define GPIO_SPI1_MISO    GPIO_SPI1_MISO_1
