@@ -49,8 +49,8 @@ Following the same pattern as pybricks:
 
 ```
 spike-nx/
-├── nuttx/              # git submodule: apache/nuttx (tag nuttx-12.12.0)
-├── nuttx-apps/         # git submodule: apache/nuttx-apps (tag nuttx-12.12.0)
+├── nuttx/              # git submodule: owhinata/nuttx (f413-support branch)
+├── nuttx-apps/         # git submodule: owhinata/nuttx-apps (tag nuttx-12.12.0)
 ├── boards/             # custom out-of-tree board definitions
 │   └── spike-prime-hub/
 │       ├── configs/nsh/defconfig

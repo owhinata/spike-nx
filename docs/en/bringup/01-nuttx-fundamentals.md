@@ -50,8 +50,8 @@ ChibiOS has precedent for adding F413 by cloning F412 support.
 
 ```
 workspace/
-  nuttx/          # apache/nuttx — kernel/OS
-  nuttx-apps/     # apache/nuttx-apps — applications (a.k.a. "apps")
+  nuttx/          # owhinata/nuttx (fork) — kernel/OS
+  nuttx-apps/     # owhinata/nuttx-apps (fork) — applications (a.k.a. "apps")
 ```
 
 The apps repo defaults to `../apps` relative to the nuttx directory. Override with `-a <path>`.

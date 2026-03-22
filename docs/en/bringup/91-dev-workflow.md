@@ -52,7 +52,6 @@ The SPIKE Prime Hub is not yet available. Initial bring-up uses the **STM32F413H
 | `distclean` | Full clean (Docker image removal + submodule deinit) |
 | `menuconfig` | Interactive configuration |
 | `savedefconfig` | Update defconfig |
-| `flash` | Discovery: OpenOCD SWD / Hub: dfu-util DFU |
 
 **Board selection:**
 
@@ -144,7 +143,7 @@ Edit code
   ↓
 make -f scripts/nuttx.mk                         # Docker build
   ↓
-make -f scripts/nuttx.mk flash                   # OpenOCD SWD flash
+openocd ... -c "program nuttx/nuttx.bin ..."     # OpenOCD SWD flash
   ↓
 screen /dev/ttyACM0 115200                        # USB CDC/ACM console
 ```
@@ -172,7 +171,7 @@ make -f scripts/nuttx.mk BOARD=spike-prime-hub    # Docker build
   ↓
 Enter DFU mode                                     # Bluetooth button + USB
   ↓
-make -f scripts/nuttx.mk BOARD=spike-prime-hub flash  # dfu-util DFU flash
+dfu-util -d 0694:0008 -a 0 -s 0x08008000:leave -D nuttx/nuttx.bin  # DFU flash
   ↓
 screen /dev/ttyACM0 115200                         # USB CDC/ACM console
 ```

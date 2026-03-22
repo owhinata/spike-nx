@@ -49,7 +49,8 @@ git remote prune origin
 
 - `setup/` — 初期設定、環境構築
 - `development/` — ビルド・実行ガイド
-- `technical/` — アーキテクチャ、調査結果
+- `bringup/` — ブリングアップ調査・計画
+- `drivers/` — デバイスドライバ設計・実装計画
 
 ### ソースコード参照
 

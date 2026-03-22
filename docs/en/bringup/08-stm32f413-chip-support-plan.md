@@ -123,7 +123,7 @@ CONFIG_ARCH_CHIP_STM32F412ZG=y
 ```
 spike-nx/
 ├── nuttx/          # git submodule: owhinata/nuttx (fork, f413-support branch)
-├── nuttx-apps/     # git submodule: apache/nuttx-apps (tag nuttx-12.12.0)
+├── nuttx-apps/     # git submodule: owhinata/nuttx-apps (tag nuttx-12.12.0)
 ├── boards/         # Custom board definition (out-of-tree)
 └── ...
 ```
