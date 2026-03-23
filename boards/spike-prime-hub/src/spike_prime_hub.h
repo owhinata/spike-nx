@@ -65,5 +65,9 @@ int stm32_bringup(void);
 
 void weak_function stm32_usbinitialize(void);
 
+#ifdef CONFIG_SCHED_CPULOAD_EXTCLK
+void stm32_cpuload_initialize(void);
+#endif
+
 #endif /* __ASSEMBLY__ */
 #endif /* __BOARDS_SPIKE_PRIME_HUB_SRC_SPIKE_PRIME_HUB_H */
