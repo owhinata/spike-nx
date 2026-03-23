@@ -27,6 +27,11 @@ clean:
 distclean:
 	-$(MAKE) -f scripts/nuttx.mk distclean
 	-$(MAKE) -f scripts/pybricks.mk distclean
+	-docker rmi nuttx-builder
+	-docker rmi pybricks-builder
+	-git submodule deinit -f nuttx
+	-git submodule deinit -f nuttx-apps
+	-git submodule deinit -f pybricks
 
 help:
 	@echo "Usage:"
@@ -36,11 +41,11 @@ help:
 	@echo "  make nuttx-menuconfig               Open NuttX Kconfig menu"
 	@echo "  make nuttx-savedefconfig             Save NuttX defconfig"
 	@echo "  make nuttx-clean                    Clean NuttX build artifacts"
-	@echo "  make nuttx-distclean                Full NuttX clean"
+	@echo "  make nuttx-distclean                NuttX distclean (remove .config)"
 	@echo ""
 	@echo "  make pybricks                       Build pybricks firmware"
 	@echo "  make pybricks-clean                 Clean pybricks build"
-	@echo "  make pybricks-distclean             Full pybricks clean"
+	@echo "  make pybricks-distclean             Pybricks distclean"
 	@echo ""
 	@echo "  make clean                          Clean all builds"
-	@echo "  make distclean                      Full clean all"
+	@echo "  make distclean                      Full clean (docker rmi + submodule deinit)"
