@@ -58,4 +58,5 @@ void stm32_cpuload_initialize(void)
   STM32L4_TIM_SETPERIOD(g_cpuload_tim, CPULOAD_TIM_PERIOD);
   STM32L4_TIM_SETISR(g_cpuload_tim, stm32_cpuload_handler, NULL, 0);
   STM32L4_TIM_ENABLEINT(g_cpuload_tim, GTIM_DIER_UIE);
+  STM32L4_TIM_ENABLE(g_cpuload_tim);
 }
