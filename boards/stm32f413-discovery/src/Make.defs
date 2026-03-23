@@ -16,6 +16,10 @@ ifeq ($(CONFIG_STM32_OTGFS),y)
 CSRCS += stm32_usbdev.c
 endif
 
+ifeq ($(CONFIG_SCHED_CPULOAD_EXTCLK),y)
+CSRCS += stm32_cpuload.c
+endif
+
 ifeq ($(CONFIG_BOARDCTL),y)
 CSRCS += stm32_appinit.c
 endif

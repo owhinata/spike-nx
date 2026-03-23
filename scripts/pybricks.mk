@@ -29,5 +29,3 @@ clean:
 
 distclean:
 	-$(DOCKER_RUN) bash -c "make clean-primehub"
-	-docker rmi $(DOCKER_IMAGE)
-	-git submodule deinit -f pybricks

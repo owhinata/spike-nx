@@ -17,6 +17,8 @@ boards/*/src/.depend
 boards/*/src/Make.dep
 
 # Apps build artifacts
+apps/Kconfig
+apps/.kconfig
 apps/**/*.o
 apps/**/.built
 apps/**/.depend

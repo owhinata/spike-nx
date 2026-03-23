@@ -55,6 +55,10 @@
 
 int stm32l4_bringup(void);
 
+#ifdef CONFIG_SCHED_CPULOAD_EXTCLK
+void stm32_cpuload_initialize(void);
+#endif
+
 #ifdef CONFIG_SENSORS_LSM6DSL_UORB
 int stm32l4_lsm6dsl_initialize(void);
 #endif

@@ -28,6 +28,10 @@ int stm32l4_bringup(void)
 {
   int ret = OK;
 
+#ifdef CONFIG_SCHED_CPULOAD_EXTCLK
+  stm32_cpuload_initialize();
+#endif
+
 #ifdef CONFIG_FS_PROCFS
   ret = nx_mount(NULL, STM32_PROCFS_MOUNTPOINT, "procfs", 0, NULL);
   if (ret < 0)

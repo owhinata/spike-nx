@@ -63,6 +63,3 @@ clean:
 
 distclean:
 	-$(DOCKER_RUN) make distclean
-	-docker rmi $(DOCKER_IMAGE)
-	-git submodule deinit -f nuttx
-	-git submodule deinit -f nuttx-apps
