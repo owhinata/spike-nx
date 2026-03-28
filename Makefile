@@ -5,12 +5,19 @@
 # NuttX targets
 BOARD        ?= stm32f413-discovery
 BOARD_CONFIG ?= nsh
+APP          ?=
 
 nuttx:
 	$(MAKE) -f scripts/nuttx.mk build BOARD=$(BOARD) BOARD_CONFIG=$(BOARD_CONFIG)
 
+nuttx-elf:
+	$(MAKE) -f scripts/nuttx.mk elf APP=$(APP) BOARD=$(BOARD) BOARD_CONFIG=$(BOARD_CONFIG)
+
+nuttx-elf-clean:
+	$(MAKE) -f scripts/nuttx.mk elf-clean
+
 nuttx-%:
-	$(MAKE) -f scripts/nuttx.mk $*
+	$(MAKE) -f scripts/nuttx.mk $* BOARD=$(BOARD) BOARD_CONFIG=$(BOARD_CONFIG)
 
 # Pybricks targets
 pybricks:
@@ -40,6 +47,9 @@ help:
 	@echo "  make nuttx-configure                Configure NuttX"
 	@echo "  make nuttx-menuconfig               Open NuttX Kconfig menu"
 	@echo "  make nuttx-savedefconfig             Save NuttX defconfig"
+	@echo "  make nuttx-export BOARD=<board>      Create NuttX export package"
+	@echo "  make nuttx-elf APP=<app> BOARD=<b>  Build app as ELF to ./data/"
+	@echo "  make nuttx-elf-clean                Clean ELF build artifacts"
 	@echo "  make nuttx-clean                    Clean NuttX build artifacts"
 	@echo "  make nuttx-distclean                NuttX distclean (remove .config)"
 	@echo ""

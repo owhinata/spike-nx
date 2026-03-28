@@ -83,23 +83,31 @@ NuttX 12.12.0 (owhinata fork) を git submodule として `./nuttx` と `./nuttx
 
 ```bash
 # フルビルド（submodule init → docker image build → configure → make）
-make -f scripts/nuttx.mk
-
-# ボード指定ビルド
-make -f scripts/nuttx.mk BOARD=stm32f4discovery BOARD_CONFIG=nsh
+make BOARD=b-l4s5i-iot01a
 
 # Kconfig メニュー
-make -f scripts/nuttx.mk menuconfig
+make nuttx-menuconfig
 
 # defconfig 保存
-make -f scripts/nuttx.mk savedefconfig
+make nuttx-savedefconfig
 
-# クリーンビルド
-make -f scripts/nuttx.mk clean
+# エクスポートパッケージ作成（ELF ビルドに必要）
+make nuttx-export BOARD=b-l4s5i-iot01a
+
+# ELF アプリビルド（export がなければ自動生成）
+make nuttx-elf APP=imu BOARD=b-l4s5i-iot01a
+
+# ELF ビルド成果物クリーン（.elf-build/）
+make nuttx-elf-clean
+
+# クリーンビルド（export パッケージも削除）
+make nuttx-clean
 
 # 完全クリーン（docker image 削除 + submodule deinit）
-make -f scripts/nuttx.mk distclean
+make distclean
 ```
+
+ELF ビルドの成果物は `./data/` に出力される。各アプリの ELF ビルド定義は `apps/<app>/elf.mk` に記載。
 
 ## デバイスアクセス
 
