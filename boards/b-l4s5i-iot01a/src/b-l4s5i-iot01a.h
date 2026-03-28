@@ -37,6 +37,14 @@
 #define GPIO_LSM6DSL_INT1 (GPIO_INPUT | GPIO_FLOAT | GPIO_EXTI | \
                            GPIO_PORTD | GPIO_PIN11)
 
+/* MX25R6435F OCTOSPI flash */
+
+#define HAVE_MX25R6435F 1
+
+#if !defined(CONFIG_MTD_MX25RXX) || !defined(CONFIG_STM32L4_OCTOSPI)
+#  undef HAVE_MX25R6435F
+#endif
+
 /* procfs */
 
 #ifdef CONFIG_FS_PROCFS
@@ -61,6 +69,10 @@ void stm32_cpuload_initialize(void);
 
 #ifdef CONFIG_SENSORS_LSM6DSL_UORB
 int stm32l4_lsm6dsl_initialize(void);
+#endif
+
+#ifdef HAVE_MX25R6435F
+int stm32l4_mx25r_initialize(void);
 #endif
 
 #endif /* __ASSEMBLY__ */

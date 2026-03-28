@@ -59,6 +59,14 @@ int stm32l4_bringup(void)
     }
 #endif
 
+#ifdef HAVE_MX25R6435F
+  ret = stm32l4_mx25r_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32l4_mx25r_initialize failed: %d\n", ret);
+    }
+#endif
+
 #ifdef CONFIG_SENSORS_LSM6DSL_UORB
   ret = stm32l4_lsm6dsl_initialize();
   if (ret < 0)

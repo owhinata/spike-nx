@@ -170,6 +170,30 @@
 #define GPIO_USART1_RX GPIO_USART1_RX_2
 #define GPIO_USART1_TX GPIO_USART1_TX_2
 
+/* Quad SPI: connected to MX25R6435F external flash memory
+ * Same pinout as B-L475E-IOT01A (same PCB).
+ * Pin definitions from stm32l4x6xx_pinmap.h (L4XR pinmap not available):
+ *   NCS  = PE11 (AF10)
+ *   CLK  = PE10 (AF10)
+ *   IO0  = PE12 (AF10)
+ *   IO1  = PE13 (AF10)
+ *   IO2  = PE14 (AF10)
+ *   IO3  = PE15 (AF10)
+ */
+
+#define GPIO_QSPI_CS  (GPIO_ALT | GPIO_AF10 | GPIO_PORTE | GPIO_PIN11 | \
+                        GPIO_FLOAT | GPIO_PUSHPULL | GPIO_SPEED_100MHz)
+#define GPIO_QSPI_IO0 (GPIO_ALT | GPIO_AF10 | GPIO_PORTE | GPIO_PIN12 | \
+                        GPIO_FLOAT | GPIO_PUSHPULL | GPIO_SPEED_100MHz)
+#define GPIO_QSPI_IO1 (GPIO_ALT | GPIO_AF10 | GPIO_PORTE | GPIO_PIN13 | \
+                        GPIO_FLOAT | GPIO_PUSHPULL | GPIO_SPEED_100MHz)
+#define GPIO_QSPI_IO2 (GPIO_ALT | GPIO_AF10 | GPIO_PORTE | GPIO_PIN14 | \
+                        GPIO_FLOAT | GPIO_PUSHPULL | GPIO_SPEED_100MHz)
+#define GPIO_QSPI_IO3 (GPIO_ALT | GPIO_AF10 | GPIO_PORTE | GPIO_PIN15 | \
+                        GPIO_FLOAT | GPIO_PUSHPULL | GPIO_SPEED_100MHz)
+#define GPIO_QSPI_SCK (GPIO_ALT | GPIO_AF10 | GPIO_PORTE | GPIO_PIN10 | \
+                        GPIO_FLOAT | GPIO_PUSHPULL | GPIO_SPEED_100MHz)
+
 /* I2C2: Onboard sensors (LSM6DSL, etc.) via PB10 (SCL), PB11 (SDA) */
 
 #define GPIO_I2C2_SCL  GPIO_I2C2_SCL_1
