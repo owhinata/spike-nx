@@ -18,6 +18,7 @@ all: $(ELF_BIN)
 
 $(ELF_BIN): $(OBJS)
 	$(LD) $(LDFLAGS) -o $@ $^
+	cp $@ $@.debug
 	$(STRIP) $@
 
 clean:

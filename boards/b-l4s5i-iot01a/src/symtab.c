@@ -9,6 +9,7 @@
 
 extern void __aeabi_f2d(void);
 extern void __aeabi_uldivmod(void);
+extern void __aeabi_unwind_cpp_pr1(void);
 
 #include <assert.h>
 #include <stdlib.h>
@@ -1485,6 +1486,7 @@ const struct symtab_s g_symtab[] =
 
   { "__aeabi_f2d", (FAR const void *)__aeabi_f2d },
   { "__aeabi_uldivmod", (FAR const void *)__aeabi_uldivmod },
+  { "__aeabi_unwind_cpp_pr1", (FAR const void *)__aeabi_unwind_cpp_pr1 },
 
   /* NuttX internal APIs */
 

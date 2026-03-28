@@ -95,7 +95,8 @@ endif
 			APP_ELFMK=$(CURDIR)/apps/$(APP)/elf.mk
 	@ELF_BIN=$$(sed -n 's/^ELF_BIN.*= *//p' $(CURDIR)/apps/$(APP)/elf.mk) && \
 		cp $(ELF_BUILDDIR)/$(APP)/$$ELF_BIN $(ELF_OUTDIR)/ && \
-		echo "ELF binary: $(ELF_OUTDIR)/$$ELF_BIN"
+		cp $(ELF_BUILDDIR)/$(APP)/$$ELF_BIN.debug $(ELF_OUTDIR)/ && \
+		echo "ELF binary: $(ELF_OUTDIR)/$$ELF_BIN (debug: $(ELF_OUTDIR)/$$ELF_BIN.debug)"
 
 elf-clean:
 	rm -rf $(ELF_BUILDDIR)
