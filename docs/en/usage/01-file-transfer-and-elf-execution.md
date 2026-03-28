@@ -20,8 +20,7 @@ Flash a firmware build with the following enabled:
 
 - `CONFIG_SYSTEM_ZMODEM=y` — Zmodem (sz/rz)
 - `CONFIG_ELF=y` — ELF loader
-- `CONFIG_NSH_FILE_APPS=y` — Execute files from NSH
-- `CONFIG_LIBC_ENVPATH=y` / `CONFIG_PATH_INITIAL="/data"` — PATH setup
+- `CONFIG_NSH_FILE_APPS=y` — Execute files from NSH (full path required)
 
 ## picocom Connection
 
@@ -120,12 +119,9 @@ make
 # In NSH, type rz → Ctrl-A Ctrl-S → select /tmp/elf-build/imu
 nsh> rz
 
-# Execute
+# Execute with full path
 nsh> /data/imu status
 nsh> /data/imu start
-
-# PATH is set to /data, so the path can be omitted
-nsh> imu start
 ```
 
 ### Notes
@@ -135,3 +131,5 @@ nsh> imu start
 - Symbols used by the ELF must be in the kernel symbol table (`g_symtab`)
 - Current symbol table is generated from `libs/libc/libc.csv` (standard C library functions)
 - ELF loading consumes RAM (code + data are placed in RAM)
+- Do NOT enable `CONFIG_LIBC_ENVPATH` (causes CPU overhead due to NSH PATH lookup on flash)
+- Always use full path to execute ELF binaries (e.g., `/data/imu`)

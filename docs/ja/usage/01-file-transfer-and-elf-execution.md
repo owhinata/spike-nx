@@ -20,8 +20,7 @@ sudo apt install lrzsz picocom
 
 - `CONFIG_SYSTEM_ZMODEM=y` — Zmodem (sz/rz)
 - `CONFIG_ELF=y` — ELF ローダー
-- `CONFIG_NSH_FILE_APPS=y` — NSH からファイル実行
-- `CONFIG_LIBC_ENVPATH=y` / `CONFIG_PATH_INITIAL="/data"` — PATH 設定
+- `CONFIG_NSH_FILE_APPS=y` — NSH からファイル実行 (フルパス指定)
 
 ## picocom 接続
 
@@ -120,12 +119,9 @@ make
 # NSH で rz → Ctrl-A Ctrl-S → /tmp/elf-build/imu を選択
 nsh> rz
 
-# 実行
+# フルパスで実行
 nsh> /data/imu status
 nsh> /data/imu start
-
-# PATH が /data に設定されているため、パス省略も可能
-nsh> imu start
 ```
 
 ### 注意事項
@@ -135,3 +131,5 @@ nsh> imu start
 - ELF が使用するシンボルはカーネルのシンボルテーブル (`g_symtab`) に含まれている必要がある
 - 現在のシンボルテーブルは `libs/libc/libc.csv` から生成 (標準 C ライブラリ関数)
 - ELF ロード時に RAM を消費する (コード + データがRAM上に配置される)
+- `CONFIG_LIBC_ENVPATH` は有効にしない (NSH の PATH 検索で CPU オーバーヘッドが発生するため)
+- ELF 実行は必ずフルパスで指定する (例: `/data/imu`)
