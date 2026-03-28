@@ -62,12 +62,12 @@ int stm32l4_mx25r_initialize(void)
 #ifdef CONFIG_FS_LITTLEFS
   /* Mount LittleFS; format on first boot */
 
-  ret = nx_mount("/dev/mtdblock0", "/mnt/flash", "littlefs", 0, NULL);
+  ret = nx_mount("/dev/mtdblock0", "/data", "littlefs", 0, NULL);
   if (ret < 0)
     {
       syslog(LOG_WARNING, "WARNING: LittleFS mount failed: %d, formatting\n",
              ret);
-      ret = nx_mount("/dev/mtdblock0", "/mnt/flash", "littlefs", 0,
+      ret = nx_mount("/dev/mtdblock0", "/data", "littlefs", 0,
                      "forceformat");
       if (ret < 0)
         {
@@ -76,7 +76,7 @@ int stm32l4_mx25r_initialize(void)
         }
     }
 
-  syslog(LOG_INFO, "LittleFS mounted at /mnt/flash\n");
+  syslog(LOG_INFO, "LittleFS mounted at /data\n");
 #endif
 
   return OK;
