@@ -23,3 +23,8 @@ apps/**/*.o
 apps/**/.built
 apps/**/.depend
 apps/**/Make.dep
+
+# ELF build artifacts
+.elf-build/
+nuttx/nuttx-export
+nuttx/nuttx-export-*.tar.gz
