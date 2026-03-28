@@ -55,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     u-boot-tools \
     util-linux \
     dfu-util \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --break-system-packages kconfiglib

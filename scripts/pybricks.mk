@@ -15,7 +15,7 @@ build: docker-build
 	$(DOCKER_RUN) bash -c "make $(MAKEOPTS) primehub"
 
 pybricks/README.md:
-	git submodule update --init
+	git submodule update --init pybricks
 
 submodules: pybricks/README.md
 

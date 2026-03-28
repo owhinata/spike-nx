@@ -100,8 +100,11 @@ make nuttx-elf APP=imu BOARD=b-l4s5i-iot01a
 # ELF ビルド成果物クリーン（.elf-build/）
 make nuttx-elf-clean
 
-# クリーンビルド（export パッケージも削除）
+# クリーンビルド（export パッケージも削除、.config は残る）
 make nuttx-clean
+
+# .config も含めて完全クリーン（BOARD 切り替え時はこちらを使う）
+make nuttx-distclean
 
 # 完全クリーン（docker image 削除 + submodule deinit）
 make distclean

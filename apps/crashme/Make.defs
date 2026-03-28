@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_APP_CRASHME),)
+CONFIGURED_APPS += $(APPDIR)/external/crashme
+endif
