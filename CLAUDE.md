@@ -110,7 +110,40 @@ make nuttx-distclean
 make distclean
 ```
 
-ELF ビルドの成果物は `./data/` に出力される。各アプリの ELF ビルド定義は `apps/<app>/elf.mk` に記載。
+ELF ビルドの成果物は `./data/` に出力される。各アプリの ELF ビルド定義は `apps/<app>/elf.mk` に記載。strip 前のデバッグシンボル付き ELF が `./data/<app>.debug` に保存される。
+
+### ELF アプリのシンボル確認
+
+ELF アプリが使用する未定義シンボルは、ボードの `symtab.c` に登録されている必要がある。未登録のシンボルがあると ELF ローダーがロードに失敗し `command not found` になる。
+
+```bash
+# ELF が必要とする未定義シンボルを確認
+arm-none-eabi-nm data/<app> | grep " U "
+
+# symtab.c に登録されているか確認
+grep "<symbol_name>" boards/<board>/src/symtab.c
+```
+
+不足している場合は `symtab.c` に `extern` 宣言とテーブルエントリを追加する。
+
+### ELF アプリのクラッシュダンプ解析
+
+ELF アプリがクラッシュすると、スタックダンプのバックトレースにカーネルアドレス (`0x0800xxxx`) と ELF ロードアドレス (`0x2000xxxx`) が混在する。
+
+1. カーネルアドレスはそのまま `addr2line` で解析:
+   ```bash
+   arm-none-eabi-addr2line -e nuttx/nuttx -f -p 0x0800xxxx
+   ```
+
+2. ELF アドレスはロードベースを差し引いてオフセットに変換してから解析:
+   ```bash
+   # ELF のディスアセンブリでクラッシュ箇所のオフセットを特定
+   arm-none-eabi-objdump -d data/<app>.debug
+
+   # ベースアドレス = RAM上のPC - ディスアセンブリ上のオフセット
+   # 算出したオフセットで addr2line
+   arm-none-eabi-addr2line -e data/<app>.debug -f -p <offset>
+   ```
 
 ## デバイスアクセス
 
