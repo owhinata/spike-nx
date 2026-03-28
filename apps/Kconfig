@@ -1,5 +1,0 @@
-menu "External Applications"
-
-source "$APPSBINDIR/external/imu/Kconfig"
-
-endmenu # External Applications
