@@ -40,7 +40,7 @@ picocom /dev/cu.usbmodem1103 -b 115200 \
 
 1. NSH で `rz` を入力
 2. `Ctrl-A Ctrl-S` を押す
-3. ファイルパスを入力 (例: `/tmp/elf-build/imu`)
+3. ファイルパスを入力 (例: `data/imu`)
 4. 転送完了を待つ
 
 ```
@@ -65,71 +65,49 @@ nsh> sz /data/test.txt
 ### ELF バイナリのビルド
 
 ```bash
-# 1. エクスポートパッケージの作成 (NuttX ビルド後)
-make -f scripts/nuttx.mk export
+# エクスポートパッケージ作成 + ELF ビルド (export がなければ自動生成)
+make nuttx-elf APP=imu BOARD=b-l4s5i-iot01a
+```
 
-# 2. エクスポートパッケージの展開
-mkdir -p /tmp/elf-build && cd /tmp/elf-build
-tar xzf /path/to/spike-nx/nuttx/nuttx-export-*.tar.gz
-mv nuttx-export-* nuttx-export
+ELF バイナリは `./data/imu` に出力される。
 
-# 3. Makefile 作成 (例: imu アプリ)
-cat > Makefile << 'EOF'
-include nuttx-export/scripts/Make.defs
+各アプリの ELF ビルド定義は `apps/<app>/elf.mk` に記載:
 
-ARCHCFLAGS += -mlong-calls
-ARCHWARNINGS = -Wall -Wstrict-prototypes -Wshadow -Wundef
-ARCHOPTIMIZATION = -Os -fno-strict-aliasing -fomit-frame-pointer
-ARCHINCLUDES = -I. -isystem nuttx-export/include
-
-CFLAGS = $(ARCHCFLAGS) $(ARCHWARNINGS) $(ARCHOPTIMIZATION) \
-         $(ARCHCPUFLAGS) $(ARCHINCLUDES) $(ARCHDEFINES)
-
-LDELFFLAGS = --relocatable -e main
-LDELFFLAGS += -T nuttx-export/scripts/gnu-elf.ld
-
-IMUDIR = /path/to/spike-nx/apps/imu
-
-BIN = imu
-SRCS = $(IMUDIR)/imu_main.c $(IMUDIR)/imu_geometry.c \
-       $(IMUDIR)/imu_stationary.c $(IMUDIR)/imu_fusion.c \
-       $(IMUDIR)/imu_calibration.c
-OBJS = $(notdir $(SRCS:.c=$(OBJEXT)))
-
-all: $(BIN)
-
-%$(OBJEXT): $(IMUDIR)/%.c
-	$(CC) -c $(CFLAGS) -o $@ $<
-
-$(BIN): $(OBJS)
-	$(LD) $(LDELFFLAGS) -o $@ $^
-	$(STRIP) $@
-
-clean:
-	rm -f $(BIN) $(OBJS)
-EOF
-
-# 4. ビルド
-make
+```makefile
+# apps/imu/elf.mk
+ELF_BIN  = imu
+ELF_SRCS = imu_main.c imu_geometry.c imu_stationary.c imu_fusion.c imu_calibration.c
 ```
 
 ### 転送と実行
 
 ```bash
-# NSH で rz → Ctrl-A Ctrl-S → /tmp/elf-build/imu を選択
+# NSH で rz → Ctrl-A Ctrl-S → data/imu を選択
 nsh> rz
 
 # フルパスで実行
-nsh> /data/imu status
 nsh> /data/imu start
+nsh> /data/imu status
+nsh> /data/imu stop
+```
+
+### ビルドコマンド一覧
+
+```bash
+# ELF ビルド (export がなければ自動生成)
+make nuttx-elf APP=imu BOARD=b-l4s5i-iot01a
+
+# ELF のみ再ビルド (export 済みの場合、高速)
+make nuttx-elf APP=imu
+
+# ELF ビルド成果物クリーン
+make nuttx-elf-clean
 ```
 
 ### 注意事項
 
-- ELF はリロケータブル形式 (`--relocatable`) でビルドする
-- `-mlong-calls` が必要 (RAM → Flash 間の関数呼び出しのため)
-- ELF が使用するシンボルはカーネルのシンボルテーブル (`g_symtab`) に含まれている必要がある
-- 現在のシンボルテーブルは `libs/libc/libc.csv` から生成 (標準 C ライブラリ関数)
-- ELF ロード時に RAM を消費する (コード + データがRAM上に配置される)
-- `CONFIG_LIBC_ENVPATH` は有効にしない (NSH の PATH 検索で CPU オーバーヘッドが発生するため)
 - ELF 実行は必ずフルパスで指定する (例: `/data/imu`)
+- `CONFIG_LIBC_ENVPATH` は有効にしない (NSH の PATH 検索で CPU オーバーヘッドが発生するため)
+- ELF が使用するシンボルはカーネルのシンボルテーブル (`g_symtab`) に含まれている必要がある
+- シンボルテーブルは `libc.csv` + `syscall.csv` + `libm.csv` + libgcc ヘルパーから生成
+- ELF ロード時にコード + データが RAM に配置される (~10KB for imu)
