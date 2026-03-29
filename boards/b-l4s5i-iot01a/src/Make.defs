@@ -16,14 +16,18 @@ ifeq ($(CONFIG_BOARDCTL),y)
 CSRCS += stm32_appinit.c
 endif
 
+ifeq ($(CONFIG_BOARDCTL_RESET),y)
+CSRCS += stm32_reset.c
+endif
+
+ifeq ($(CONFIG_SYSLOG_REGISTER),y)
+CSRCS += stm32_panic_syslog.c
+endif
+
 ifeq ($(CONFIG_SENSORS_LSM6DSL_UORB),y)
 CSRCS += stm32_lsm6dsl.c
 endif
 
 ifeq ($(CONFIG_MTD_MX25RXX),y)
 CSRCS += stm32_mx25r.c
-endif
-
-ifeq ($(CONFIG_ELF),y)
-CSRCS += symtab.c
 endif

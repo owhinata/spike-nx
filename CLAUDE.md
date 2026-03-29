@@ -91,23 +91,17 @@ make nuttx-menuconfig
 # defconfig 保存
 make nuttx-savedefconfig
 
-# エクスポートパッケージ作成（ELF ビルドに必要）
-make nuttx-export BOARD=b-l4s5i-iot01a
-
-# ELF アプリビルド（export がなければ自動生成）
-make nuttx-elf APP=imu BOARD=b-l4s5i-iot01a
-
-# ELF ビルド成果物クリーン（.elf-build/）
-make nuttx-elf-clean
-
-# クリーンビルド（export パッケージも削除）
+# クリーンビルド（.config は残る）
 make nuttx-clean
+
+# .config も含めて完全クリーン（BOARD 切り替え時はこちらを使う）
+make nuttx-distclean
 
 # 完全クリーン（docker image 削除 + submodule deinit）
 make distclean
 ```
 
-ELF ビルドの成果物は `./data/` に出力される。各アプリの ELF ビルド定義は `apps/<app>/elf.mk` に記載。
+アプリの ELF ビルド定義は `apps/<app>/elf.mk` に記載。ELF ローダー有効化は `feat/elf-loader` ブランチを参照。
 
 ## デバイスアクセス
 
@@ -118,6 +112,11 @@ TBD
 - **Powered Up デバイス**: SPIKE Prime Hub の I/O ポートに接続するモーター・センサーの総称 (LEGO 公式ブランド名)
 - **LPF2**: LEGO Power Functions 2。Powered Up デバイスが使用するコネクタ規格・プロトコル規格のコミュニティ通称
 - **LUMP**: LEGO UART Messaging Protocol。Powered Up スマートデバイス (センサー/エンコーダ付きモーター) が Hub と通信する UART プロトコル
+
+## 注意事項
+
+- NuttX の Kconfig にペリフェラルの定義があっても、実際の MCU にそのハードウェアが存在するとは限らない。Kconfig はチップファミリ単位（例: STM32F4XXX）の粗い分類で、個別チップの差分を反映していないことがある。ペリフェラルの有無は必ずリファレンスマニュアル（データシート）で確認すること。
+  - 例: STM32F413 は STM32F4XXX に分類されるため `CONFIG_STM32_BKPSRAM` が有効化可能だが、実際には BKPSRAM を持たない（RM0430 参照）。有効にするとコンパイルは通るが実行時に HardFault になる。
 
 ## SPIKE Prime Hub 仕様
 
