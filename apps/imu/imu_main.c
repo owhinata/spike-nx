@@ -204,7 +204,7 @@ static void cmd_start(void)
     }
 
   g_daemon_pid = task_create(IMU_DAEMON_NAME, 100,
-                             CONFIG_DEFAULT_TASK_STACKSIZE,
+                             4096,
                              imu_daemon, NULL);
   if (g_daemon_pid < 0)
     {

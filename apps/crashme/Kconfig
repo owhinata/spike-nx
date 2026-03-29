@@ -1,5 +1,0 @@
-config APP_CRASHME
-	tristate "Crash test app"
-	default n
-	---help---
-		Intentionally crashes the system for stack dump testing.
