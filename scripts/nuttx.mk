@@ -26,8 +26,14 @@ DOCKER_RUN_IT := docker run --rm -it \
 	-w "$(CURDIR)/nuttx" \
 	$(DOCKER_IMAGE)
 
+# ELF build paths
+EXPORT_DIR   := $(CURDIR)/nuttx/nuttx-export
+ELF_OUTDIR   := $(CURDIR)/data
+ELF_BUILDDIR := $(CURDIR)/.elf-build
+APP          ?=
+
 .PHONY: build configure clean distclean docker-build submodules \
-        menuconfig savedefconfig
+        menuconfig savedefconfig export elf elf-clean
 
 build: docker-build link-apps configure
 	$(DOCKER_RUN) make $(MAKEOPTS)
@@ -59,10 +65,48 @@ menuconfig: docker-build
 savedefconfig: docker-build
 	$(DOCKER_RUN) make savedefconfig
 
+# --- ELF app build ---
+
+export: build
+	$(DOCKER_RUN) make export
+	@rm -rf $(EXPORT_DIR)
+	@tar xzf nuttx/nuttx-export-*.tar.gz -C nuttx
+	@ln -sfn $$(ls -d nuttx/nuttx-export-*/ | head -1 | sed 's|nuttx/||;s|/$$||') $(EXPORT_DIR)
+	@echo "Export package: $(EXPORT_DIR)"
+
+elf:
+ifndef APP
+	$(error Usage: make -f scripts/nuttx.mk elf APP=imu)
+endif
+	@test -d $(EXPORT_DIR) || $(MAKE) -f scripts/nuttx.mk export BOARD=$(BOARD) BOARD_CONFIG=$(BOARD_CONFIG)
+	@test -f $(CURDIR)/apps/$(APP)/elf.mk || \
+		{ echo "ERROR: apps/$(APP)/elf.mk not found"; exit 1; }
+	@mkdir -p $(ELF_BUILDDIR)/$(APP) $(ELF_OUTDIR)
+	docker run --rm \
+		--user "$(shell id -u):$(shell id -g)" \
+		-v /etc/passwd:/etc/passwd:ro \
+		-v /etc/group:/etc/group:ro \
+		-v "$(CURDIR):$(CURDIR)" \
+		-w "$(ELF_BUILDDIR)/$(APP)" \
+		$(DOCKER_IMAGE) \
+		make -f $(CURDIR)/scripts/elf-app.mk \
+			EXPORT_DIR=$(EXPORT_DIR) \
+			APP_SRCDIR=$(CURDIR)/apps/$(APP) \
+			APP_ELFMK=$(CURDIR)/apps/$(APP)/elf.mk
+	@ELF_BIN=$$(sed -n 's/^ELF_BIN.*= *//p' $(CURDIR)/apps/$(APP)/elf.mk) && \
+		cp $(ELF_BUILDDIR)/$(APP)/$$ELF_BIN $(ELF_OUTDIR)/ && \
+		cp $(ELF_BUILDDIR)/$(APP)/$$ELF_BIN.debug $(ELF_OUTDIR)/ && \
+		echo "ELF binary: $(ELF_OUTDIR)/$$ELF_BIN (debug: $(ELF_OUTDIR)/$$ELF_BIN.debug)"
+
+elf-clean:
+	rm -rf $(ELF_BUILDDIR)
+
 # --- Clean ---
 
 clean:
 	-$(DOCKER_RUN) make clean
+	rm -rf $(EXPORT_DIR) nuttx/nuttx-export-*/
 
 distclean:
 	-$(DOCKER_RUN) make distclean
+	rm -rf $(ELF_BUILDDIR)
