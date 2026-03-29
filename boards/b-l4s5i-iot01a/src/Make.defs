@@ -31,7 +31,3 @@ endif
 ifeq ($(CONFIG_MTD_MX25RXX),y)
 CSRCS += stm32_mx25r.c
 endif
-
-ifeq ($(CONFIG_ELF),y)
-CSRCS += symtab.c
-endif
