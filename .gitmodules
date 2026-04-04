@@ -6,4 +6,4 @@
 	url = https://github.com/owhinata/nuttx.git
 [submodule "nuttx-apps"]
 	path = nuttx-apps
-	url = https://github.com/owhinata/nuttx-apps.git
+	url = https://github.com/apache/nuttx-apps.git

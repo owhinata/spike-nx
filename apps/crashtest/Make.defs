@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_APP_CRASHTEST),)
+CONFIGURED_APPS += $(APPDIR)/external/crashtest
+endif
