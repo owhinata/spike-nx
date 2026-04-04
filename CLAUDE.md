@@ -47,9 +47,10 @@ git remote prune origin
 
 ### カテゴリ
 
-- `bringup/` — ブリングアップ調査・計画
-- `drivers/` — デバイスドライバ設計・実装計画
-- `usage/` — 使い方ガイド
+- `hardware/` — ハードウェア仕様・ピンマップ・ペリフェラル
+- `drivers/` — ドライバアーキテクチャ・実装計画
+- `development/` — ビルド・デバッグ・開発ワークフロー
+- `nuttx/` — NuttX カスタマイズ（F413 チップサポート等）
 
 ### ローカルプレビュー
 
@@ -95,11 +96,8 @@ make -f scripts/pybricks.mk distclean
 NuttX 12.12.0 (owhinata fork) を git submodule として `./nuttx` と `./nuttx-apps` に配置。Docker コンテナでビルド。
 
 ```bash
-# フルビルド（デフォルト: SPIKE Prime Hub, usbnsh）
+# フルビルド（SPIKE Prime Hub, usbnsh）
 make
-
-# 別ボード指定
-make BOARD=stm32f413-discovery BOARD_CONFIG=nsh
 
 # Kconfig メニュー
 make nuttx-menuconfig

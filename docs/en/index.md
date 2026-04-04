@@ -7,11 +7,7 @@ A project to run NuttX RTOS on the SPIKE Prime Hub.
 ### Build
 
 ```bash
-# Build for SPIKE Prime Hub (default)
 make
-
-# Build for other boards
-make BOARD=stm32f413-discovery BOARD_CONFIG=nsh
 ```
 
 ### Flash (DFU)

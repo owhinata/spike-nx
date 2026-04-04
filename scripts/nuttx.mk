@@ -1,7 +1,7 @@
 DOCKER_IMAGE  := nuttx-builder
 MAKEOPTS      := -j$(shell nproc 2>/dev/null || echo 2)
-BOARD         ?= stm32f413-discovery
-BOARD_CONFIG  ?= nsh
+BOARD         ?= spike-prime-hub
+BOARD_CONFIG  ?= usbnsh
 
 # out-of-tree board: if boards/<BOARD> exists, use path-based configure
 ifneq ($(wildcard $(CURDIR)/boards/$(BOARD)),)

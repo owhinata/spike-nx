@@ -42,33 +42,29 @@ plugins:
           name: English
           build: true
           nav_translations:
-            ブリングアップ: Bringup
+            ハードウェア: Hardware
             ドライバ: Drivers
-            使い方: Usage
+            開発ガイド: Development
+            NuttX: NuttX
 
 nav:
   - Home: index.md
-  - ブリングアップ:
-      - bringup/01-nuttx-fundamentals.md
-      - bringup/02-stm32f413-nuttx-support.md
-      - bringup/03-boot-and-flash-layout.md
-      - bringup/04-build-system-integration.md
-      - bringup/05-peripheral-driver-survey.md
-      - bringup/07-ioport-device-detection.md
-      - bringup/08-stm32f413-chip-support-plan.md
-      - bringup/09-bootloader-analysis.md
-      - bringup/10-tlc5955-led-driver.md
-      - bringup/11-w25q256-flash-driver.md
-      - bringup/12-build-env-verification.md
-      - bringup/13-debugging-strategy.md
-      - bringup/14-motor-control-driver.md
-      - bringup/15-device-driver-architecture.md
-      - bringup/91-dev-workflow.md
+  - ハードウェア:
+      - hardware/hub-overview.md
+      - hardware/pin-mapping.md
+      - hardware/peripherals.md
   - ドライバ:
-      - drivers/01-driver-implementation-plan.md
-      - drivers/02-imu-driver-design.md
-  - 使い方:
-      - usage/01-file-transfer-and-elf-execution.md
+      - drivers/architecture.md
+      - drivers/implementation-plan.md
+      - drivers/port-detection.md
+      - drivers/motor-control.md
+      - drivers/imu.md
+  - 開発ガイド:
+      - development/getting-started.md
+      - development/debugging.md
+      - development/file-transfer.md
+  - NuttX:
+      - nuttx/f413-support.md
 
 markdown_extensions:
   - admonition

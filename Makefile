@@ -35,8 +35,7 @@ distclean:
 
 help:
 	@echo "Usage:"
-	@echo "  make nuttx                          Build NuttX firmware"
-	@echo "  make nuttx BOARD=<board>            Build NuttX for specific board"
+	@echo "  make nuttx                          Build NuttX firmware (SPIKE Prime Hub)"
 	@echo "  make nuttx-configure                Configure NuttX"
 	@echo "  make nuttx-menuconfig               Open NuttX Kconfig menu"
 	@echo "  make nuttx-savedefconfig             Save NuttX defconfig"

@@ -62,11 +62,7 @@ CoreMark 1.0 : 143.164435 / GCC13.2.1 20231009 -Os -fno-strict-aliasing -fno-omi
 ### ビルド
 
 ```bash
-# SPIKE Prime Hub 向けビルド（デフォルト）
 make
-
-# 別ボード向け
-make BOARD=stm32f413-discovery BOARD_CONFIG=nsh
 ```
 
 ### フラッシュ (DFU)
