@@ -93,7 +93,7 @@ make -f scripts/pybricks.mk distclean
 
 ### NuttX
 
-NuttX 12.12.0 (owhinata fork) を git submodule として `./nuttx` と `./nuttx-apps` に配置。Docker コンテナでビルド。
+NuttX 12.13.0 (owhinata fork) を git submodule として `./nuttx` と `./nuttx-apps` に配置。Docker コンテナでビルド。
 
 ```bash
 # フルビルド（SPIKE Prime Hub, usbnsh）
