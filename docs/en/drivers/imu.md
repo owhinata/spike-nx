@@ -2,99 +2,91 @@
 
 ## 1. Overview
 
-The LSM6DSL on the B-L4S5I-IOT01A Discovery board is adopted as the development target. The ultimate goal is to achieve functionality equivalent to the pybricks LSM6DS3TR-C driver on NuttX.
+The onboard LSM6DS3TR-C (6-axis IMU) on the SPIKE Prime Hub is driven using the NuttX LSM6DSL uORB sensor driver. The LSM6DS3TR-C has full register compatibility with the LSM6DSL, so the driver is used as-is.
 
-The LSM6DSL and LSM6DS3TR-C (mounted on the SPIKE Prime Hub) are from the same ST IMU family and have compatible register layouts. The IMU processing library (apps/imu/) is sensor-agnostic, so no changes are required when migrating between sensors.
+The IMU processing library (`apps/imu/`) is sensor-agnostic and consumes data via uORB topics.
 
 ## 2. Device Specifications
 
-The LSM6DSL/LSM6DS3TR-C is a single-die 6-axis IMU integrating a 3-axis accelerometer and 3-axis gyroscope.
+The LSM6DS3TR-C is a single-die 6-axis IMU integrating a 3-axis accelerometer and 3-axis gyroscope.
 
-| Sensor | I2C Address (SDO/SA0) | WHO_AM_I |
-|---|---|---|
-| Accelerometer + Gyroscope | 0x6A (LOW) / 0x6B (HIGH) | 0x6A |
-
-### Performance Specifications
-
-| Parameter | Gyroscope | Accelerometer |
-|---|---|---|
-| Max ODR | 6.66 kHz | 6.66 kHz |
-| Full Scale | 125 / 250 / 500 / 1000 / 2000 dps | +-2 / 4 / 8 / 16 g |
-
-### Default Scales
-
-| Sensor | Default | Rationale |
-|---|---|---|
-| Accelerometer | +-2 g | Chip reset default, sufficient for orientation detection |
-| Gyroscope | 250 dps | Chip reset default |
+| Item | Value |
+|---|---|
+| I2C Address | 0x6A (SDO/SA0 = GND) |
+| WHO_AM_I | 0x6A |
+| ODR | 833 Hz (pybricks-aligned) |
+| Accel FSR | ±8 g (0.244 mg/LSB) |
+| Gyro FSR | 2000 dps (70.0 mdps/LSB) |
 
 ## 3. Board Wiring
 
-### B-L4S5I-IOT01A (Development)
-
 | Pin | Function | Description |
 |---|---|---|
-| PB10 | I2C2_SCL | I2C clock |
-| PB11 | I2C2_SDA | I2C data |
-| PD11 | INT1 | Gyro DRDY interrupt (EXTI11) |
-
-### SPIKE Prime Hub (Final Target)
-
-| Pin | Function | Description |
-|---|---|---|
-| PB10 | I2C2_SCL | I2C clock |
-| PB3 | I2C2_SDA | I2C data (AF9) |
+| PB10 | I2C2_SCL | I2C clock (AF4) |
+| PB3 | I2C2_SDA | I2C data (AF9, F413-specific) |
 | PB4 | INT1 | Gyro DRDY interrupt (EXTI4) |
 
-## 4. Key Register Settings
+## 4. Register Configuration
 
 | Register | Setting | Purpose |
 |---|---|---|
+| CTRL1_XL (0x10) | ODR=833Hz, FS=±8g | Accel: ODR and full scale |
+| CTRL2_G (0x11) | ODR=833Hz, FS=2000dps | Gyro: ODR and full scale |
 | CTRL3_C (0x12) | BDU=1, IF_INC=1 | Block data update, address auto-increment |
 | CTRL5_C (0x14) | ROUNDING=011 | Rounding for burst reads |
-| DRDY_PULSE_CFG (0x0B) | DRDY_PULSED=1 | Pulsed mode DRDY (more reliable) |
+| DRDY_PULSE_CFG (0x0B) | DRDY_PULSED=1 | Pulsed mode DRDY |
 | INT1_CTRL (0x0D) | INT1_DRDY_G=1 | Route gyro DRDY to INT1 |
 
 ## 5. Data Acquisition
 
-A single INT1 (gyro DRDY) interrupt triggers a 12-byte bulk read:
+A single INT1 (gyro DRDY) interrupt triggers a 12-byte burst read:
 
 - Bytes 0-5: Gyro X/Y/Z (OUTX_L_G 0x22 through OUTZ_H_G 0x27)
 - Bytes 6-11: Accel X/Y/Z (OUTX_L_A 0x28 through OUTZ_H_A 0x2D)
 
-Since both sensors operate at the same ODR, accel data is also updated when the gyro DRDY fires.
+Both sensors operate at the same ODR (833 Hz), so accel data is also updated when the gyro DRDY fires.
 
 ### Data Flow
 
 ```
 INT1 (gyro DRDY) fires
-  -> HPWORK: 12-byte bulk read from 0x22
+  -> HPWORK: 12-byte burst read from 0x22
   -> raw int16 x 6 (gyro XYZ + accel XYZ)
   -> float scale multiplication
   -> push_event delivers to sensor_gyro0 and sensor_accel0
 ```
 
-Accelerometer and gyroscope events share the same timestamp, guaranteeing synchronized data.
-
-### Data Acquisition Modes
-
-| Mode | Mechanism | Usage Condition |
-|---|---|---|
-| Interrupt | INT1 DRDY -> HPWORK -> burst read | Board provides `attach` callback |
-| Polling | kthread sleep -> burst read | `attach = NULL` |
-
 ## 6. NuttX Driver Architecture
 
-The driver is implemented as a uORB sensor driver in the nuttx fork.
+### Kernel Space
 
 ```
-[Kernel Space]
-  lsm6dsl_uorb.h    - config struct, registration API
-  lsm6dsl_uorb.c    - I2C helpers, burst read, uORB registration
+nuttx/drivers/sensors/lsm6dsl_uorb.c        - I2C control, burst read, uORB registration
+nuttx/include/nuttx/sensors/lsm6dsl_uorb.h  - config struct, registration API
+```
 
-[uORB Topics]
-  /dev/uorb/sensor_accel0   (m/s^2)
-  /dev/uorb/sensor_gyro0    (rad/s)
+### Board Layer
+
+```
+boards/spike-prime-hub/src/stm32_lsm6dsl.c  - I2C2 init, INT1 interrupt setup, driver registration
+```
+
+### uORB Topics
+
+```
+/dev/uorb/sensor_accel0   (m/s^2)
+/dev/uorb/sensor_gyro0    (rad/s)
+```
+
+### defconfig
+
+```
+CONFIG_STM32_I2C2=y
+CONFIG_I2C=y
+CONFIG_SCHED_HPWORK=y
+CONFIG_SENSORS=y
+CONFIG_SENSORS_LSM6DSL_UORB=y
+CONFIG_APP_IMU=y
 ```
 
 ## 7. Sensor Fusion
@@ -141,10 +133,10 @@ Settings are persisted as a binary file at `/data/imu_cal.bin`.
 
 | Parameter | Default Value |
 |---|---|
-| Gravity | +-9806.65 mm/s^2 |
+| Gravity | ±9806.65 mm/s² |
 | Scale | 360 |
 | Gyro threshold | 2 deg/s |
-| Accel threshold | 2500 mm/s^2 |
+| Accel threshold | 2500 mm/s² |
 
 ## 9. Stationary Detection
 
@@ -166,41 +158,39 @@ Axis signs are corrected to match the Hub PCB mounting orientation:
 | Y | +1 |
 | Z | -1 |
 
-## 11. Hub Migration Guide
+!!! note
+    Axis sign correction is not yet applied. Raw data is output as-is.
 
-When migrating to the SPIKE Prime Hub, replace the LSM6DSL driver with the LSM6DS3TR-C driver.
-
-### Key Differences
-
-| Item | LSM6DSL (B-L4S5I) | LSM6DS3TR-C (Hub) |
-|---|---|---|
-| I2C Address | 0x6A | 0x6A |
-| I2C Bus | I2C2 (PB10/PB11) | I2C2 (PB10/PB3) |
-| WHO_AM_I | 0x6A | 0x6A |
-| ODR | Max 6.66 kHz | Max 6.66 kHz |
-
-The sensor fusion and calibration code in the processing library (`apps/imu/`) requires no changes. Since the uORB topic interface is identical, only the driver needs to be replaced.
-
-## 12. IMU Processing Library (apps/imu/)
+## 11. IMU Processing Library (apps/imu/)
 
 A sensor-agnostic processing layer that consumes uORB data.
 
 | File | Description |
 |---|---|
-| `imu_types.h` | Type definitions |
-| `imu_geometry.c/h` | Quaternion, vector, matrix operations |
-| `imu_stationary.c/h` | Stationary detection |
-| `imu_fusion.c/h` | Sensor fusion (complementary filter) |
-| `imu_calibration.c/h` | Calibration persistence |
 | `imu_main.c` | NSH command `imu` + daemon |
+| `imu_fusion.c/h` | Sensor fusion (complementary filter) |
+| `imu_stationary.c/h` | Stationary detection |
+| `imu_calibration.c/h` | Calibration persistence |
+| `imu_geometry.c/h` | Quaternion, vector, matrix operations |
+| `imu_types.h` | Type definitions |
 
-## 13. pybricks Feature Mapping
+### NSH Commands
+
+```
+nsh> imu start    # Start daemon
+nsh> imu accel    # Show acceleration
+nsh> imu gyro     # Show angular velocity
+nsh> imu status   # Show status
+nsh> imu stop     # Stop daemon
+```
+
+## 12. pybricks Feature Mapping
 
 | pybricks Feature | NuttX Implementation | Notes |
 |---|---|---|
 | `imu.up()` | `imu_fusion` gravity vector classification | 6-face detection |
 | `imu.tilt()` | `imu_fusion` derived from gravity vector | Pitch/Roll |
-| `imu.acceleration()` | uORB `sensor_accel0` direct read | mm/s^2 units |
+| `imu.acceleration()` | uORB `sensor_accel0` direct read | mm/s² units |
 | `imu.angular_velocity()` | uORB `sensor_gyro0` direct read | deg/s units |
 | `imu.heading()` | `imu_fusion` 3D heading | Z-axis rotation |
 | `imu.rotation()` | `imu_fusion` 1D heading | Per-axis |
