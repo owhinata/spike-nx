@@ -31,3 +31,7 @@ endif
 ifeq ($(CONFIG_SENSORS_LSM6DSL_UORB),y)
 CSRCS += stm32_lsm6dsl.c
 endif
+
+ifeq ($(CONFIG_STM32_SPI1),y)
+CSRCS += stm32_tlc5955.c
+endif

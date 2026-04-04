@@ -88,5 +88,17 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_STM32_SPI1
+  ret = tlc5955_initialize();
+  if (ret == OK)
+    {
+      /* NSH ready: light center button LED green */
+
+      tlc5955_set_duty(TLC5955_CH_STATUS_TOP_G, 0xffff);
+      tlc5955_set_duty(TLC5955_CH_STATUS_BTM_G, 0xffff);
+      tlc5955_update();
+    }
+#endif
+
   return ret;
 }

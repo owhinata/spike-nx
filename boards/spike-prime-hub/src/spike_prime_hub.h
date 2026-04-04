@@ -44,6 +44,32 @@
 #define GPIO_LSM6DSL_INT1 (GPIO_INPUT | GPIO_FLOAT | GPIO_EXTI | \
                            GPIO_PORTB | GPIO_PIN4)
 
+/* TLC5955 LED Driver
+ *   SPI1: MOSI=PA7, MISO=PA6, SCK=PA5 (AF5)
+ *   LAT:  PA15 (GPIO output, latch data on HIGH->LOW)
+ *   GSCLK: TIM12 CH2 = PB15 (9.6 MHz PWM clock for LED driver)
+ */
+
+#define GPIO_TLC5955_LAT  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+                           GPIO_OUTPUT_CLEAR | GPIO_PORTA | GPIO_PIN15)
+
+/* TLC5955 channel IDs (48 channels total) */
+
+#define TLC5955_NUM_CHANNELS  48
+
+#define TLC5955_CH_BATTERY_B       0
+#define TLC5955_CH_BATTERY_G       1
+#define TLC5955_CH_BATTERY_R       2
+#define TLC5955_CH_STATUS_TOP_B    3
+#define TLC5955_CH_STATUS_TOP_G    4
+#define TLC5955_CH_STATUS_TOP_R    5
+#define TLC5955_CH_STATUS_BTM_B    6
+#define TLC5955_CH_STATUS_BTM_G    7
+#define TLC5955_CH_STATUS_BTM_R    8
+#define TLC5955_CH_BT_B            18
+#define TLC5955_CH_BT_G            19
+#define TLC5955_CH_BT_R            20
+
 /* USB OTG FS
  *   PA9  = OTG_FS_VBUS
  */
@@ -75,6 +101,12 @@ int stm32_lsm6dsl_initialize(void);
 #endif
 
 void weak_function stm32_usbinitialize(void);
+
+#ifdef CONFIG_STM32_SPI1
+int tlc5955_initialize(void);
+void tlc5955_set_duty(uint8_t ch, uint16_t value);
+int tlc5955_update(void);
+#endif
 
 #ifdef CONFIG_SCHED_CPULOAD_EXTCLK
 void stm32_cpuload_initialize(void);
