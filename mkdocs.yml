@@ -1,0 +1,87 @@
+site_name: SPIKE Prime Hub NuttX Guide
+site_url: https://owhinata.github.io/spike-nx/
+site_description: SPIKE Prime Hub 上で NuttX RTOS を動作させるためのガイド
+repo_url: https://github.com/owhinata/spike-nx
+repo_name: owhinata/spike-nx
+
+theme:
+  name: material
+  language: ja
+  palette:
+    - scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: ダークモードに切り替え
+    - scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: ライトモードに切り替え
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - toc.integrate
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: folder
+      languages:
+        - locale: ja
+          name: 日本語
+          default: true
+          build: true
+        - locale: en
+          name: English
+          build: true
+          nav_translations:
+            ブリングアップ: Bringup
+            ドライバ: Drivers
+            使い方: Usage
+
+nav:
+  - Home: index.md
+  - ブリングアップ:
+      - bringup/01-nuttx-fundamentals.md
+      - bringup/02-stm32f413-nuttx-support.md
+      - bringup/03-boot-and-flash-layout.md
+      - bringup/04-build-system-integration.md
+      - bringup/05-peripheral-driver-survey.md
+      - bringup/07-ioport-device-detection.md
+      - bringup/08-stm32f413-chip-support-plan.md
+      - bringup/09-bootloader-analysis.md
+      - bringup/10-tlc5955-led-driver.md
+      - bringup/11-w25q256-flash-driver.md
+      - bringup/12-build-env-verification.md
+      - bringup/13-debugging-strategy.md
+      - bringup/14-motor-control-driver.md
+      - bringup/15-device-driver-architecture.md
+      - bringup/91-dev-workflow.md
+  - ドライバ:
+      - drivers/01-driver-implementation-plan.md
+      - drivers/02-imu-driver-design.md
+  - 使い方:
+      - usage/01-file-transfer-and-elf-execution.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - def_list
+  - attr_list
+  - md_in_html

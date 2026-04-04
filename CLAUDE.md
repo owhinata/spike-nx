@@ -43,14 +43,27 @@ git remote prune origin
 
 ## ドキュメント
 
-`docs/ja/` と `docs/en/` に同名 `.md` を作成（日英必須）。
+`docs/ja/` と `docs/en/` に同名 `.md` を作成（日英必須）。mkdocs (Material テーマ + i18n) で GitHub Pages に publish。
 
 ### カテゴリ
 
-- `setup/` — 初期設定、環境構築
-- `development/` — ビルド・実行ガイド
 - `bringup/` — ブリングアップ調査・計画
 - `drivers/` — デバイスドライバ設計・実装計画
+- `usage/` — 使い方ガイド
+
+### ローカルプレビュー
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+mkdocs serve        # http://localhost:8000
+mkdocs build --strict  # ビルド検証
+```
+
+### デプロイ
+
+main ブランチへの push 時に GitHub Actions で自動デプロイ（`docs/**`, `mkdocs.yml`, `requirements.txt` の変更時のみ）。
 
 ### ソースコード参照
 
