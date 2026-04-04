@@ -59,6 +59,8 @@ nav:
       - drivers/port-detection.md
       - drivers/motor-control.md
       - drivers/imu.md
+      - drivers/led.md
+      - drivers/power.md
   - 開発ガイド:
       - development/getting-started.md
       - development/debugging.md
