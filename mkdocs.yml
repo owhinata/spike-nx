@@ -1,0 +1,83 @@
+site_name: SPIKE Prime Hub NuttX Guide
+site_url: https://owhinata.github.io/spike-nx/
+site_description: SPIKE Prime Hub 上で NuttX RTOS を動作させるためのガイド
+repo_url: https://github.com/owhinata/spike-nx
+repo_name: owhinata/spike-nx
+
+theme:
+  name: material
+  language: ja
+  palette:
+    - scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: ダークモードに切り替え
+    - scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: ライトモードに切り替え
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - toc.integrate
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: folder
+      languages:
+        - locale: ja
+          name: 日本語
+          default: true
+          build: true
+        - locale: en
+          name: English
+          build: true
+          nav_translations:
+            ハードウェア: Hardware
+            ドライバ: Drivers
+            開発ガイド: Development
+            NuttX: NuttX
+
+nav:
+  - Home: index.md
+  - ハードウェア:
+      - hardware/hub-overview.md
+      - hardware/pin-mapping.md
+      - hardware/peripherals.md
+  - ドライバ:
+      - drivers/architecture.md
+      - drivers/implementation-plan.md
+      - drivers/port-detection.md
+      - drivers/motor-control.md
+      - drivers/imu.md
+  - 開発ガイド:
+      - development/getting-started.md
+      - development/debugging.md
+      - development/file-transfer.md
+  - NuttX:
+      - nuttx/f413-support.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - def_list
+  - attr_list
+  - md_in_html

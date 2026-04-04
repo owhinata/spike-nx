@@ -1,4 +1,6 @@
 .DS_Store
+.venv/
+site/
 
 # NuttX build artifacts
 nuttx/.config
