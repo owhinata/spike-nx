@@ -65,6 +65,7 @@ nav:
       - development/file-transfer.md
   - NuttX:
       - nuttx/f413-support.md
+      - nuttx/tickless-timer.md
 
 markdown_extensions:
   - admonition
