@@ -27,3 +27,7 @@ endif
 ifeq ($(CONFIG_SYSLOG_REGISTER),y)
 CSRCS += stm32_panic_syslog.c
 endif
+
+ifeq ($(CONFIG_SENSORS_LSM6DSL_UORB),y)
+CSRCS += stm32_lsm6dsl.c
+endif

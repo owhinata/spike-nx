@@ -55,5 +55,13 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_SENSORS_LSM6DSL_UORB
+  ret = stm32_lsm6dsl_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: Failed to initialize LSM6DSL: %d\n", ret);
+    }
+#endif
+
   return ret;
 }

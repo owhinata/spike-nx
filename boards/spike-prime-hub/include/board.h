@@ -127,6 +127,14 @@
 #define GPIO_USART6_RX    GPIO_USART6_RX_1
 #define GPIO_USART6_TX    GPIO_USART6_TX_1
 
+/* I2C2: IMU (LSM6DS3TR-C)
+ *   PB10 = I2C2_SCL (AF4)
+ *   PB3  = I2C2_SDA (AF9, F413-specific)
+ */
+
+#define GPIO_I2C2_SCL     GPIO_I2C2_SCL_1   /* PB10 */
+#define GPIO_I2C2_SDA     GPIO_I2C2_SDA_3   /* PB3 AF9 */
+
 /* SPI1: TLC5955 LED driver */
 
 #define GPIO_SPI1_MISO    GPIO_SPI1_MISO_1
