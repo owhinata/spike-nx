@@ -3,8 +3,8 @@
 .PHONY: nuttx nuttx-% pybricks pybricks-% clean distclean help
 
 # NuttX targets
-BOARD        ?= stm32f413-discovery
-BOARD_CONFIG ?= nsh
+BOARD        ?= spike-prime-hub
+BOARD_CONFIG ?= usbnsh
 
 nuttx:
 	$(MAKE) -f scripts/nuttx.mk build BOARD=$(BOARD) BOARD_CONFIG=$(BOARD_CONFIG)

@@ -82,8 +82,11 @@ make -f scripts/pybricks.mk distclean
 NuttX 12.12.0 (owhinata fork) を git submodule として `./nuttx` と `./nuttx-apps` に配置。Docker コンテナでビルド。
 
 ```bash
-# フルビルド（submodule init → docker image build → configure → make）
-make BOARD=b-l4s5i-iot01a
+# フルビルド（デフォルト: SPIKE Prime Hub, usbnsh）
+make
+
+# 別ボード指定
+make BOARD=stm32f413-discovery BOARD_CONFIG=nsh
 
 # Kconfig メニュー
 make nuttx-menuconfig
@@ -105,7 +108,18 @@ make distclean
 
 ## デバイスアクセス
 
-TBD
+### SPIKE Prime Hub (DFU)
+
+```bash
+# DFU モード: USB 抜く → Bluetooth ボタン押したまま USB 接続 → 5秒待って離す
+dfu-util -d 0694:0008 -a 0 -s 0x08008000:leave -D nuttx/nuttx.bin
+```
+
+### シリアル接続
+
+```bash
+picocom /dev/tty.usbmodem01
+```
 
 ## 用語
 
