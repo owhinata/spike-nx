@@ -63,6 +63,35 @@ if (count > period) {
 
 When the counter has passed the compare value (rollover occurred), the remaining time calculation is corrected.
 
+## Performance Counter
+
+`CONFIG_ARCH_PERF_EVENTS=y` enables high-precision time measurement using the STM32F413 DWT CYCCNT (Data Watchpoint and Trace cycle counter).
+
+| Item | Value |
+|------|-------|
+| Counter | DWT CYCCNT (32-bit) |
+| Frequency | 96 MHz (SYSCLK) |
+| Resolution | ~10.4 ns |
+| Overflow | ~44.7 seconds |
+
+### API
+
+```c
+#include <nuttx/clock.h>
+
+clock_t t0 = perf_gettime();       /* Get counter value */
+unsigned long freq = perf_getfreq(); /* Get frequency (96000000) */
+
+/* Calculate elapsed time */
+clock_t t1 = perf_gettime();
+uint64_t elapsed_ns = ((uint64_t)(t1 - t0) * 1000000000ULL) / freq;
+```
+
+- `perf_gettime()` — Returns the current DWT CYCCNT value
+- `perf_getfreq()` — Returns the counter frequency in Hz
+
+The 32-bit counter overflows approximately every 44.7 seconds. Use `clock_systime_ticks()` for longer measurements.
+
 ## ostest wdog Test WARNINGs
 
 The ostest wdog test produces many warnings like:

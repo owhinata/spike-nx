@@ -63,6 +63,35 @@ if (count > period) {
 
 カウンタが compare 値を超えている場合（ロールオーバー発生時）、残り時間の計算を補正する。
 
+## パフォーマンスカウンタ
+
+`CONFIG_ARCH_PERF_EVENTS=y` により、STM32F413 の DWT CYCCNT (Data Watchpoint and Trace サイクルカウンタ) を使った高精度時間計測が有効になっている。
+
+| 項目 | 値 |
+|------|-----|
+| カウンタ | DWT CYCCNT (32 ビット) |
+| 周波数 | 96 MHz (SYSCLK) |
+| 分解能 | 約 10.4 ns |
+| オーバーフロー | 約 44.7 秒 |
+
+### API
+
+```c
+#include <nuttx/clock.h>
+
+clock_t t0 = perf_gettime();       /* カウンタ値を取得 */
+unsigned long freq = perf_getfreq(); /* 周波数 (96000000) を取得 */
+
+/* 経過時間の計算 */
+clock_t t1 = perf_gettime();
+uint64_t elapsed_ns = ((uint64_t)(t1 - t0) * 1000000000ULL) / freq;
+```
+
+- `perf_gettime()` — DWT CYCCNT の現在値を返す
+- `perf_getfreq()` — カウンタ周波数 (Hz) を返す
+
+32 ビットカウンタのため約 44.7 秒でオーバーフローする。長時間の計測には `clock_systime_ticks()` を使用すること。
+
 ## ostest wdog テストの WARNING について
 
 ostest の wdog テストで以下のような WARNING が多数出力される:
