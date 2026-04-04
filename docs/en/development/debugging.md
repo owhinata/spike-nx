@@ -115,7 +115,11 @@ CONFIG_DEBUG_ASSERTIONS=y        # Register dump on ASSERT/PANIC paths
 | MMFAR (MemManage Fault Address Register) | Address of memory management violation |
 | BFAR (BusFault Address Register) | Address of bus fault |
 
-When the NSH console uses USB CDC/ACM, the USB driver itself may become inoperable during a HardFault. If crash information was written to RAMLOG, it can be reviewed with `dmesg` after re-flashing the firmware.
+### Panic Syslog Output
+
+Crash dumps are output through the panic syslog channel (`stm32_panic_syslog.c`) to **USB CDC ACM (stdout)**. This works for ASSERT paths, but may not work during HardFault as the USB driver may be inoperable.
+
+Use the `crashtest assert` command to verify panic syslog operation. During HardFault (bus fault, etc.), the Cortex-M enters a lockup state and does not go through the panic path, so no dump is output. In this case, the IWDG (3-second timeout) triggers a reset.
 
 ### Coredump
 

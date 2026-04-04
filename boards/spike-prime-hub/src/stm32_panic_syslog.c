@@ -1,13 +1,14 @@
 /****************************************************************************
  * boards/spike-prime-hub/src/stm32_panic_syslog.c
  *
- * Syslog channel that outputs to serial console only during panic/crash.
+ * Syslog channel that outputs to stdout (USB CDC ACM) during panic/crash.
  * Silent during normal operation to avoid console noise.
  ****************************************************************************/
 
 #include <nuttx/config.h>
 
 #include <stdio.h>
+#include <unistd.h>
 
 #include <nuttx/arch.h>
 #include <nuttx/init.h>
@@ -19,7 +20,8 @@ static int panic_putc(FAR syslog_channel_t *channel, int ch)
 
   if (g_nx_initstate == OSINIT_PANIC)
     {
-      up_putc(ch);
+      char c = (char)ch;
+      write(1, &c, 1);
     }
 
   return ch;
@@ -28,16 +30,11 @@ static int panic_putc(FAR syslog_channel_t *channel, int ch)
 static ssize_t panic_write(FAR syslog_channel_t *channel,
                            FAR const char *buf, size_t len)
 {
-  size_t i;
-
   UNUSED(channel);
 
   if (g_nx_initstate == OSINIT_PANIC)
     {
-      for (i = 0; i < len; i++)
-        {
-          up_putc(buf[i]);
-        }
+      write(1, buf, len);
     }
 
   return len;
@@ -46,6 +43,12 @@ static ssize_t panic_write(FAR syslog_channel_t *channel,
 static int panic_flush(FAR syslog_channel_t *channel)
 {
   UNUSED(channel);
+
+  if (g_nx_initstate == OSINIT_PANIC)
+    {
+      fsync(1);
+    }
+
   return OK;
 }
 

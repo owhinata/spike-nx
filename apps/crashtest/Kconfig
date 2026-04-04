@@ -1,0 +1,5 @@
+config APP_CRASHTEST
+	tristate "Crash test utility"
+	default n
+	---help---
+		Trigger various crash types to verify panic syslog output.

@@ -115,7 +115,11 @@ CONFIG_DEBUG_ASSERTIONS=y        # ASSERT/PANIC パスでレジスタダンプ
 | MMFAR (MemManage Fault Address Register) | メモリ管理違反のアドレス |
 | BFAR (BusFault Address Register) | バスフォルトのアドレス |
 
-NSH コンソールが USB CDC/ACM の場合、HardFault 時に USB ドライバ自体が動作不能になる可能性がある。RAMLOG にクラッシュ情報が書き込まれていれば、ファームウェア再書込み後に `dmesg` で確認できる。
+### panic syslog の出力先
+
+クラッシュ時のダンプは panic syslog チャネル (`stm32_panic_syslog.c`) を通じて **USB CDC ACM (stdout)** に出力される。ASSERT パスでは動作するが、HardFault 時は USB ドライバが停止するため出力されない可能性がある。
+
+`crashtest assert` コマンドで panic syslog の動作を確認できる。HardFault (バスフォルト等) では Cortex-M が lockup 状態に入り、panic パスを通らないため、ダンプは出力されない。この場合は IWDG (3 秒タイムアウト) がリセットを発生させる。
 
 ### coredump
 
