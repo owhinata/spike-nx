@@ -1,0 +1,30 @@
+.DS_Store
+
+# NuttX build artifacts
+nuttx/.config
+nuttx/.config.old
+nuttx/nuttx
+nuttx/nuttx.bin
+nuttx/nuttx.hex
+nuttx/nuttx.map
+nuttx/System.map
+nuttx/.version
+
+# Board build artifacts
+boards/*/src/*.o
+boards/*/src/*.a
+boards/*/src/.depend
+boards/*/src/Make.dep
+
+# Apps build artifacts
+apps/Kconfig
+apps/.kconfig
+apps/**/*.o
+apps/**/.built
+apps/**/.depend
+apps/**/Make.dep
+
+# ELF build artifacts
+.elf-build/
+nuttx/nuttx-export
+nuttx/nuttx-export-*.tar.gz

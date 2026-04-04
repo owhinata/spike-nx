@@ -1,0 +1,66 @@
+FROM ubuntu:24.04 AS nuttx-tools
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    bison \
+    flex \
+    g++ \
+    gperf \
+    libncurses5-dev \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /tools/nuttx-tools \
+    && curl -fL --retry 3 https://bitbucket.org/nuttx/tools/get/9ad3e1ee75c7.tar.gz \
+       -o /tmp/nuttx-tools.tar.gz \
+    && tar -C /tools/nuttx-tools --strip-components=1 -xzf /tmp/nuttx-tools.tar.gz \
+    && rm /tmp/nuttx-tools.tar.gz
+
+RUN cd /tools/nuttx-tools/kconfig-frontends \
+    && ./configure --enable-mconf --disable-gconf --disable-qconf \
+       --enable-static --prefix=/tools/kconfig-frontends \
+    && make install \
+    && rm -rf /tools/nuttx-tools
+
+###############################################################################
+# Final image
+###############################################################################
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    gcc-arm-none-eabi \
+    libnewlib-arm-none-eabi \
+    git \
+    wget \
+    bison \
+    flex \
+    gettext \
+    texinfo \
+    gperf \
+    xxd \
+    genromfs \
+    libncurses5-dev \
+    libncursesw5-dev \
+    python3 \
+    python3-pip \
+    u-boot-tools \
+    util-linux \
+    dfu-util \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --break-system-packages kconfiglib
+
+COPY --from=nuttx-tools /tools/kconfig-frontends/ /tools/kconfig-frontends/
+ENV PATH="/tools/kconfig-frontends/bin:$PATH"
+
+CMD [ "/bin/bash" ]

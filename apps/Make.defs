@@ -1,0 +1,7 @@
+SUBDIRS := $(dir $(wildcard $(APPDIR)/external/*/Make.defs))
+
+define Add_External
+  include $(1)Make.defs
+endef
+
+$(foreach SDIR, $(SUBDIRS), $(eval $(call Add_External,$(SDIR))))

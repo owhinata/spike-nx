@@ -1,0 +1,59 @@
+/****************************************************************************
+ * boards/spike-prime-hub/src/stm32_bringup.c
+ ****************************************************************************/
+
+/****************************************************************************
+ * Included Files
+ ****************************************************************************/
+
+#include <nuttx/config.h>
+
+#include <stdbool.h>
+#include <stdio.h>
+#include <debug.h>
+#include <errno.h>
+
+#include <nuttx/fs/fs.h>
+
+#ifdef CONFIG_INPUT_BUTTONS
+#  include <nuttx/input/buttons.h>
+#endif
+
+#include "stm32.h"
+#include "spike_prime_hub.h"
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
+int stm32_bringup(void)
+{
+  int ret = OK;
+
+#ifdef CONFIG_SCHED_CPULOAD_EXTCLK
+  stm32_cpuload_initialize();
+#endif
+
+#ifdef CONFIG_SYSLOG_REGISTER
+  panic_syslog_initialize();
+#endif
+
+#ifdef CONFIG_FS_PROCFS
+  ret = nx_mount(NULL, STM32_PROCFS_MOUNTPOINT, "procfs", 0, NULL);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: Failed to mount procfs at %s: %d\n",
+             STM32_PROCFS_MOUNTPOINT, ret);
+    }
+#endif
+
+#ifdef CONFIG_INPUT_BUTTONS
+  ret = btn_lower_initialize("/dev/buttons");
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: btn_lower_initialize() failed: %d\n", ret);
+    }
+#endif
+
+  return ret;
+}

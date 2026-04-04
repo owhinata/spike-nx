@@ -1,0 +1,5 @@
+config APP_IMU
+	tristate "IMU processing library"
+	default n
+	---help---
+		IMU sensor fusion, calibration, and stationarity detection.
