@@ -20,8 +20,13 @@
 #  include <nuttx/input/buttons.h>
 #endif
 
+#include <arch/board/board.h>
+
 #include "stm32.h"
 #include "stm32_i2c.h"
+#ifdef CONFIG_STM32_IWDG
+#  include "stm32_wdg.h"
+#endif
 #include "spike_prime_hub.h"
 
 /****************************************************************************
@@ -31,6 +36,10 @@
 int stm32_bringup(void)
 {
   int ret = OK;
+
+#ifdef CONFIG_STM32_IWDG
+  stm32_iwdginitialize("/dev/watchdog0", STM32_LSI_FREQUENCY);
+#endif
 
 #ifdef CONFIG_SCHED_CPULOAD_EXTCLK
   stm32_cpuload_initialize();

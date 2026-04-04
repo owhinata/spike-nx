@@ -66,6 +66,7 @@ nav:
   - NuttX:
       - nuttx/f413-support.md
       - nuttx/tickless-timer.md
+      - nuttx/watchdog.md
 
 markdown_extensions:
   - admonition
