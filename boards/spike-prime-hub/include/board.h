@@ -141,4 +141,13 @@
 #define GPIO_SPI1_MOSI    GPIO_SPI1_MOSI_1
 #define GPIO_SPI1_SCK     GPIO_SPI1_SCK_1
 
+/* SPI1 DMA channel mapping (DMA2, Channel 3)
+ *   RX: DMA2 Stream2 Channel 3
+ *   TX: DMA2 Stream3 Channel 3
+ * NuttX SPI driver expects DMACHAN_SPI1_RX/TX symbols.
+ */
+
+#define DMACHAN_SPI1_RX   DMAMAP_SPI1_RX_2   /* DMA2 Stream2 Ch3 */
+#define DMACHAN_SPI1_TX   DMAMAP_SPI1_TX_1   /* DMA2 Stream3 Ch3 */
+
 #endif /* __BOARDS_SPIKE_PRIME_HUB_INCLUDE_BOARD_H */

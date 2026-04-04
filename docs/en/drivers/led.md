@@ -91,6 +91,8 @@ tlc5955_update();
 
 ```
 CONFIG_STM32_SPI1=y
+CONFIG_STM32_SPI1_DMA=y
+CONFIG_STM32_DMA2=y
 ```
 
 ## Update Method
@@ -103,13 +105,16 @@ Use `tlc5955_update_sync()` when immediate update is needed (during initializati
 
 | Item | pybricks | NuttX |
 |------|----------|-------|
-| SPI transfer | HAL SPI + DMA (async) | NuttX SPI driver (sync polling) |
+| SPI transfer | HAL SPI + DMA (async) | NuttX SPI driver + DMA (sync) |
 | GSCLK | TIM12 CH2 (HAL PWM) | TIM12 CH2 (direct register) |
 | LAT | HAL GPIO | stm32_gpiowrite() |
 | Update method | Contiki protothread + changed flag | HPWORK queue + changed flag |
 | Control latch | Same parameters | Same parameters |
 
-**Note**: SPI1 DMA is currently disabled because the STM32F413 DMA channel mapping is not defined in NuttX. It can be enabled with `CONFIG_STM32_SPI1_DMA=y` once the mapping is added to NuttX.
+The SPI1 DMA channel mapping (`DMACHAN_SPI1_RX/TX`) was not defined in NuttX for STM32F413, so it is defined in `board.h`:
+
+- RX: DMA2 Stream2 Channel 3 (`DMAMAP_SPI1_RX_2`)
+- TX: DMA2 Stream3 Channel 3 (`DMAMAP_SPI1_TX_1`)
 
 ## Source Files
 

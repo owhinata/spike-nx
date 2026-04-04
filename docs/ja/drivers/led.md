@@ -91,6 +91,8 @@ tlc5955_update();
 
 ```
 CONFIG_STM32_SPI1=y
+CONFIG_STM32_SPI1_DMA=y
+CONFIG_STM32_DMA2=y
 ```
 
 ## 更新方式
@@ -103,13 +105,16 @@ CONFIG_STM32_SPI1=y
 
 | 項目 | pybricks | NuttX |
 |------|----------|-------|
-| SPI 転送 | HAL SPI + DMA (非同期) | NuttX SPI ドライバ (同期ポーリング) |
+| SPI 転送 | HAL SPI + DMA (非同期) | NuttX SPI ドライバ + DMA (同期) |
 | GSCLK | TIM12 CH2 (HAL PWM) | TIM12 CH2 (レジスタ直接操作) |
 | LAT | HAL GPIO | stm32_gpiowrite() |
 | 更新方式 | Contiki プロトスレッド + changed フラグ | HPWORK キュー + changed フラグ |
 | Control Latch | 同一パラメータ | 同一パラメータ |
 
-**注**: SPI1 DMA は STM32F413 の DMA チャネルマッピングが NuttX に未定義のため現在無効。将来 NuttX 側に定義を追加すれば `CONFIG_STM32_SPI1_DMA=y` で有効化可能。
+SPI1 DMA チャネルマッピング (`DMACHAN_SPI1_RX/TX`) は NuttX に未定義だったため、`board.h` で定義:
+
+- RX: DMA2 Stream2 Channel 3 (`DMAMAP_SPI1_RX_2`)
+- TX: DMA2 Stream3 Channel 3 (`DMAMAP_SPI1_TX_1`)
 
 ## 対象ファイル
 
