@@ -100,5 +100,13 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_STM32_ADC1
+  ret = stm32_power_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_power_initialize() failed: %d\n", ret);
+    }
+#endif
+
   return ret;
 }

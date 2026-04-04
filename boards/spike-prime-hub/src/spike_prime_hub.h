@@ -88,6 +88,16 @@
 #  endif
 #endif
 
+/* Center button (ADC resistor ladder)
+ *   PC4 = ADC1_CH14 (not CH4! PC4 maps to CH14 on STM32F413)
+ *   Unpressed: ADC ~3645, Pressed: ADC ~2872
+ *   Threshold: below 3200 = pressed
+ */
+
+#define GPIO_ADC_CENTER_BTN       (GPIO_ANALOG | GPIO_PORTC | GPIO_PIN4)
+#define CENTER_BTN_ADC_CH         14
+#define CENTER_BTN_PRESS_THRESHOLD 3200
+
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
@@ -106,6 +116,10 @@ void weak_function stm32_usbinitialize(void);
 int tlc5955_initialize(void);
 void tlc5955_set_duty(uint8_t ch, uint16_t value);
 int tlc5955_update(void);
+#endif
+
+#ifdef CONFIG_STM32_ADC1
+int stm32_power_initialize(void);
 #endif
 
 #ifdef CONFIG_SCHED_CPULOAD_EXTCLK
