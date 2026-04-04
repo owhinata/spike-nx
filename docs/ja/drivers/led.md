@@ -67,8 +67,11 @@ int tlc5955_initialize(void);
 /* チャネルの PWM 値を設定 (0=OFF, 0xFFFF=最大輝度) */
 void tlc5955_set_duty(uint8_t ch, uint16_t value);
 
-/* Grayscale データを TLC5955 に送信 */
+/* 遅延更新: HPWORK キューで SPI 転送をスケジュール */
 int tlc5955_update(void);
+
+/* 即時更新: 初期化/シャットダウン用 */
+int tlc5955_update_sync(void);
 ```
 
 ### 使用例
@@ -90,15 +93,23 @@ tlc5955_update();
 CONFIG_STM32_SPI1=y
 ```
 
+## 更新方式
+
+`tlc5955_set_duty()` はデータをバッファに書き込み `changed` フラグを立てるだけで、SPI 転送は行わない。`tlc5955_update()` を呼ぶと HPWORK キューに遅延転送がスケジュールされ、複数の `set_duty` 呼び出しが 1 回の SPI 転送にバッチ化される。
+
+初期化時やシャットダウン時など即時反映が必要な場合は `tlc5955_update_sync()` を使用する。
+
 ## pybricks との比較
 
 | 項目 | pybricks | NuttX |
 |------|----------|-------|
-| SPI 転送 | HAL SPI + DMA (非同期) | NuttX SPI ドライバ (同期) |
+| SPI 転送 | HAL SPI + DMA (非同期) | NuttX SPI ドライバ (同期ポーリング) |
 | GSCLK | TIM12 CH2 (HAL PWM) | TIM12 CH2 (レジスタ直接操作) |
 | LAT | HAL GPIO | stm32_gpiowrite() |
-| 更新方式 | Contiki プロトスレッド + changed フラグ | 即時 SPI 送信 |
+| 更新方式 | Contiki プロトスレッド + changed フラグ | HPWORK キュー + changed フラグ |
 | Control Latch | 同一パラメータ | 同一パラメータ |
+
+**注**: SPI1 DMA は STM32F413 の DMA チャネルマッピングが NuttX に未定義のため現在無効。将来 NuttX 側に定義を追加すれば `CONFIG_STM32_SPI1_DMA=y` で有効化可能。
 
 ## 対象ファイル
 

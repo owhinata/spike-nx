@@ -64,6 +64,21 @@ Handled by the LEGO bootloader. Pressing the center button powers the MCU and th
 
 During DFU mode, the LEGO bootloader lights the Bluetooth LED in rainbow colors (when battery is connected).
 
+## ADC DMA Continuous Conversion
+
+Button reading uses ADC1 DMA continuous conversion. TIM2 TRGO triggers a 6-channel scan at 1 kHz.
+
+| Rank | Channel | Pin | Purpose |
+|------|---------|-----|---------|
+| 0 | CH10 | PC0 | Battery current (IBAT) |
+| 1 | CH11 | PC1 | Battery voltage (VBAT) |
+| 2 | CH8 | PB0 | Battery temperature (NTC) |
+| 3 | CH3 | PA3 | USB charger current (IBUSBCH) |
+| 4 | CH14 | PC4 | Center button resistor ladder |
+| 5 | CH5 | PA1 | Left/Right/BT button resistor ladder |
+
+The DMA buffer is continuously updated by DMA2 Stream0 in circular mode. `stm32_adc_read(rank)` returns the latest value instantly.
+
 ## defconfig
 
 ```
@@ -75,13 +90,15 @@ CONFIG_STM32_ADC1=y
 | Item | pybricks | NuttX |
 |------|----------|-------|
 | Power off trigger | Center button 2s long press | Same |
-| ADC reading | HAL ADC + DMA + TIM2 trigger | Direct register access (polling) |
+| ADC reading | HAL ADC + DMA + TIM2 trigger | Direct register DMA + TIM2 trigger |
+| ADC scan rate | 1 kHz (6 channels) | 1 kHz (6 channels) |
 | Button polling | Contiki event loop (50ms) | HPWORK queue (50ms) |
 | Power off with USB | Power stays on (op-amp dependent) | PA13 LOW then reset |
 | ADC clock | APB2/4 = 24 MHz | APB2/4 = 24 MHz |
 
 ## Source Files
 
+- `boards/spike-prime-hub/src/stm32_adc_dma.c` — ADC DMA continuous conversion
 - `boards/spike-prime-hub/src/stm32_power.c` — Power control and button monitor
-- `boards/spike-prime-hub/src/spike_prime_hub.h` — GPIO/ADC definitions
+- `boards/spike-prime-hub/src/spike_prime_hub.h` — GPIO/ADC rank definitions
 - `boards/spike-prime-hub/src/stm32_boot.c` — PA13/PA14 early initialization

@@ -37,5 +37,5 @@ CSRCS += stm32_tlc5955.c
 endif
 
 ifeq ($(CONFIG_STM32_ADC1),y)
-CSRCS += stm32_power.c
+CSRCS += stm32_adc_dma.c stm32_power.c
 endif

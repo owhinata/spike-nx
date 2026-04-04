@@ -96,11 +96,12 @@ int stm32_bringup(void)
 
       tlc5955_set_duty(TLC5955_CH_STATUS_TOP_G, 0xffff);
       tlc5955_set_duty(TLC5955_CH_STATUS_BTM_G, 0xffff);
-      tlc5955_update();
+      tlc5955_update_sync();
     }
 #endif
 
 #ifdef CONFIG_STM32_ADC1
+  stm32_adc_dma_initialize();
   ret = stm32_power_initialize();
   if (ret < 0)
     {

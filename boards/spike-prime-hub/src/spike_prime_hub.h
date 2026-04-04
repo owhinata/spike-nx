@@ -115,10 +115,22 @@ void weak_function stm32_usbinitialize(void);
 #ifdef CONFIG_STM32_SPI1
 int tlc5955_initialize(void);
 void tlc5955_set_duty(uint8_t ch, uint16_t value);
-int tlc5955_update(void);
+int tlc5955_update(void);       /* Deferred update via work queue */
+int tlc5955_update_sync(void);  /* Immediate update (init/shutdown) */
 #endif
 
 #ifdef CONFIG_STM32_ADC1
+/* ADC DMA scan ranks (index into DMA buffer) */
+
+#define ADC_RANK_IBAT         0   /* CH10 PC0: Battery current */
+#define ADC_RANK_VBAT         1   /* CH11 PC1: Battery voltage */
+#define ADC_RANK_NTC          2   /* CH8  PB0: Battery temperature */
+#define ADC_RANK_IBUSBCH      3   /* CH3  PA3: USB charger current */
+#define ADC_RANK_BTN_CENTER   4   /* CH14 PC4: Center button */
+#define ADC_RANK_BTN_LRB      5   /* CH5  PA1: Left/Right/BT buttons */
+
+int stm32_adc_dma_initialize(void);
+uint16_t stm32_adc_read(uint8_t rank);
 int stm32_power_initialize(void);
 #endif
 

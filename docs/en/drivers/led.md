@@ -67,8 +67,11 @@ int tlc5955_initialize(void);
 /* Set PWM duty for a channel (0=OFF, 0xFFFF=full brightness) */
 void tlc5955_set_duty(uint8_t ch, uint16_t value);
 
-/* Send grayscale data to TLC5955 */
+/* Deferred update: schedule SPI transfer on HPWORK queue */
 int tlc5955_update(void);
+
+/* Immediate update: for init/shutdown use */
+int tlc5955_update_sync(void);
 ```
 
 ### Example
@@ -90,15 +93,23 @@ tlc5955_update();
 CONFIG_STM32_SPI1=y
 ```
 
+## Update Method
+
+`tlc5955_set_duty()` only writes data to the buffer and sets the `changed` flag without performing an SPI transfer. Calling `tlc5955_update()` schedules a deferred transfer on the HPWORK queue, batching multiple `set_duty` calls into a single SPI transfer.
+
+Use `tlc5955_update_sync()` when immediate update is needed (during initialization or shutdown).
+
 ## Comparison with pybricks
 
 | Item | pybricks | NuttX |
 |------|----------|-------|
-| SPI transfer | HAL SPI + DMA (async) | NuttX SPI driver (sync) |
+| SPI transfer | HAL SPI + DMA (async) | NuttX SPI driver (sync polling) |
 | GSCLK | TIM12 CH2 (HAL PWM) | TIM12 CH2 (direct register) |
 | LAT | HAL GPIO | stm32_gpiowrite() |
-| Update method | Contiki protothread + changed flag | Immediate SPI send |
+| Update method | Contiki protothread + changed flag | HPWORK queue + changed flag |
 | Control latch | Same parameters | Same parameters |
+
+**Note**: SPI1 DMA is currently disabled because the STM32F413 DMA channel mapping is not defined in NuttX. It can be enabled with `CONFIG_STM32_SPI1_DMA=y` once the mapping is added to NuttX.
 
 ## Source Files
 

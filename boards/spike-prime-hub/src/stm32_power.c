@@ -34,14 +34,7 @@
  * Only define what's missing.
  */
 
-#include "hardware/stm32_adc.h"
-
-#ifndef ADC_SQR3_OFFSET
-#  define ADC_SQR3_OFFSET     0x34
-#endif
-#ifndef ADC_DR_OFFSET
-#  define ADC_DR_OFFSET       0x4c
-#endif
+/* ADC is now handled by stm32_adc_dma.c */
 
 /* Button timing */
 
@@ -60,31 +53,9 @@ static uint32_t g_btn_press_start;
  * Private Functions
  ****************************************************************************/
 
-/****************************************************************************
- * Name: adc_read_channel
- *
- * Description:
- *   Read a single ADC1 channel using direct register access.
- ****************************************************************************/
-
-static uint16_t adc_read_channel(uint8_t ch)
-{
-  /* Configure channel in regular sequence (single conversion) */
-
-  putreg32(ch, STM32_ADC1_BASE + ADC_SQR3_OFFSET);
-
-  /* Start conversion */
-
-  modifyreg32(STM32_ADC1_BASE + STM32_ADC_CR2_OFFSET, 0, ADC_CR2_SWSTART);
-
-  /* Wait for conversion complete */
-
-  while (!(getreg32(STM32_ADC1_BASE + STM32_ADC_SR_OFFSET) & ADC_SR_EOC));
-
-  /* Read result */
-
-  return (uint16_t)(getreg32(STM32_ADC1_BASE + ADC_DR_OFFSET) & 0xfff);
-}
+/* ADC reading is now handled by DMA continuous conversion.
+ * stm32_adc_read(rank) returns the latest value from DMA buffer.
+ */
 
 /****************************************************************************
  * Name: center_btn_pressed
@@ -95,7 +66,7 @@ static uint16_t adc_read_channel(uint8_t ch)
 
 static bool center_btn_pressed(void)
 {
-  uint16_t val = adc_read_channel(CENTER_BTN_ADC_CH);
+  uint16_t val = stm32_adc_read(ADC_RANK_BTN_CENTER);
 
   return (val < CENTER_BTN_PRESS_THRESHOLD);
 }
@@ -118,7 +89,7 @@ static void power_off(void)
   tlc5955_set_duty(TLC5955_CH_STATUS_BTM_G, 0);
   tlc5955_set_duty(TLC5955_CH_STATUS_TOP_B, 0xffff);
   tlc5955_set_duty(TLC5955_CH_STATUS_BTM_B, 0xffff);
-  tlc5955_update();
+  tlc5955_update_sync();
 #endif
 
   /* Wait for button release to avoid immediate re-power-on */
@@ -198,39 +169,7 @@ static void btn_monitor_work(FAR void *arg)
 
 int stm32_power_initialize(void)
 {
-  /* Configure PC4 as analog input */
-
-  stm32_configgpio(GPIO_ADC_CENTER_BTN);
-
-  /* Enable ADC1 clock */
-
-  modifyreg32(STM32_RCC_APB2ENR, 0, RCC_APB2ENR_ADC1EN);
-
-  /* Set ADC clock prescaler: PCLK2/4 = 96MHz/4 = 24MHz (max 36MHz)
-   * ADC_CCR at ADC common base + 0x04, ADCPRE bits [17:16] = 01
-   */
-
-  modifyreg32(STM32_ADC_CCR, 3 << 16, 1 << 16);
-
-  /* Configure ADC1: 12-bit resolution, single conversion mode */
-
-  putreg32(ADC_CR1_RES_12BIT, STM32_ADC1_BASE + STM32_ADC_CR1_OFFSET);
-
-  /* Set sampling time for CH14: 56 cycles
-   * CH10-18 are in SMPR1 register, 3 bits per channel
-   * CH14 offset = (14 - 10) * 3 = 12
-   */
-
-  modifyreg32(STM32_ADC1_BASE + STM32_ADC_SMPR1_OFFSET,
-              0x7 << 12, 3 << 12);
-
-  /* Power on ADC */
-
-  modifyreg32(STM32_ADC1_BASE + STM32_ADC_CR2_OFFSET, 0, ADC_CR2_ADON);
-
-  /* Small delay for ADC startup */
-
-  up_mdelay(1);
+  /* ADC is initialized by stm32_adc_dma_initialize() in bringup */
 
   syslog(LOG_INFO, "POWER: Center button monitor started "
          "(long press=poweroff)\n");
