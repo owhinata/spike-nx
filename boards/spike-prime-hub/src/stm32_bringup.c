@@ -14,12 +14,14 @@
 #include <errno.h>
 
 #include <nuttx/fs/fs.h>
+#include <nuttx/i2c/i2c_master.h>
 
 #ifdef CONFIG_INPUT_BUTTONS
 #  include <nuttx/input/buttons.h>
 #endif
 
 #include "stm32.h"
+#include "stm32_i2c.h"
 #include "spike_prime_hub.h"
 
 /****************************************************************************
@@ -52,6 +54,20 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: btn_lower_initialize() failed: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_I2C_DRIVER
+  FAR struct i2c_master_s *i2c;
+
+  i2c = stm32_i2cbus_initialize(2);
+  if (i2c != NULL)
+    {
+      ret = i2c_register(i2c, 2);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "ERROR: i2c_register(2) failed: %d\n", ret);
+        }
     }
 #endif
 
