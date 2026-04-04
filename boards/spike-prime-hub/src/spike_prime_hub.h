@@ -37,6 +37,13 @@
 #define GPIO_BTN_USER   (GPIO_INPUT | GPIO_FLOAT | GPIO_EXTI | \
                          GPIO_PORTA | GPIO_PIN0)
 
+/* IMU (LSM6DS3TR-C)
+ *   PB4 = INT1 (gyro DRDY, EXTI4)
+ */
+
+#define GPIO_LSM6DSL_INT1 (GPIO_INPUT | GPIO_FLOAT | GPIO_EXTI | \
+                           GPIO_PORTB | GPIO_PIN4)
+
 /* USB OTG FS
  *   PA9  = OTG_FS_VBUS
  */
@@ -62,6 +69,10 @@
 #ifndef __ASSEMBLY__
 
 int stm32_bringup(void);
+
+#ifdef CONFIG_SENSORS_LSM6DSL_UORB
+int stm32_lsm6dsl_initialize(void);
+#endif
 
 void weak_function stm32_usbinitialize(void);
 
