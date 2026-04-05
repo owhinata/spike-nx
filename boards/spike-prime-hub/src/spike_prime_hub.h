@@ -88,6 +88,17 @@
 #  endif
 #endif
 
+/* Resistor ladder decoder
+ *
+ * Two resistor ladders encode digital signals as analog voltages:
+ *   DEV_0 (PC4, ADC rank 4): CH1 = center button, CH2 = /CHG (MP2639A)
+ *   DEV_1 (PA1, ADC rank 5): CH0 = left, CH1 = right, CH2 = BT button
+ */
+
+#define RLAD_CH0  0x01
+#define RLAD_CH1  0x02
+#define RLAD_CH2  0x04
+
 /* Center button (ADC resistor ladder)
  *   PC4 = ADC1_CH14 (not CH4! PC4 maps to CH14 on STM32F413)
  *   Unpressed: ADC ~3645, Pressed: ADC ~2872
@@ -97,6 +108,20 @@
 #define GPIO_ADC_CENTER_BTN       (GPIO_ANALOG | GPIO_PORTC | GPIO_PIN4)
 #define CENTER_BTN_ADC_CH         14
 #define CENTER_BTN_PRESS_THRESHOLD 3200
+
+/* TLC5955 charger MODE channel (ch14 active low: duty=0 enables charging) */
+
+#define TLC5955_CH_CHARGER_MODE   14
+
+/* Battery charger ISET PWM (TIM5 CH1, PA0, AF2)
+ *
+ * Note: PA0 is also defined as GPIO_BTN_USER for the Bluetooth button,
+ * but the physical BT button is on the resistor ladder (PA1).  When the
+ * battery charger is enabled, PA0 is used for ISET PWM.
+ */
+
+#define GPIO_ISET_PWM  (GPIO_ALT | GPIO_AF2 | GPIO_SPEED_50MHz | \
+                        GPIO_PUSHPULL | GPIO_PORTA | GPIO_PIN0)
 
 /****************************************************************************
  * Public Function Prototypes
@@ -118,6 +143,13 @@ void tlc5955_set_duty(uint8_t ch, uint16_t value); /* Auto-schedules update */
 int tlc5955_update_sync(void);  /* Immediate update (init/shutdown) */
 #endif
 
+/* Resistor ladder decoder and threshold tables */
+
+uint8_t resistor_ladder_decode(uint16_t adc_value, const uint16_t levels[8]);
+
+extern const uint16_t g_ladder_dev0_levels[8];
+extern const uint16_t g_ladder_dev1_levels[8];
+
 #ifdef CONFIG_STM32_ADC1
 /* ADC DMA scan ranks (index into DMA buffer) */
 
@@ -131,6 +163,14 @@ int tlc5955_update_sync(void);  /* Immediate update (init/shutdown) */
 int stm32_adc_dma_initialize(void);
 uint16_t stm32_adc_read(uint8_t rank);
 int stm32_power_initialize(void);
+#endif
+
+#ifdef CONFIG_BATTERY_GAUGE
+int stm32_battery_gauge_initialize(void);
+#endif
+
+#ifdef CONFIG_BATTERY_CHARGER
+int stm32_battery_charger_initialize(void);
 #endif
 
 #ifdef CONFIG_SCHED_CPULOAD_EXTCLK

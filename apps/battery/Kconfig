@@ -1,0 +1,6 @@
+config APP_BATTERY
+	tristate "Battery test utility"
+	default n
+	---help---
+		Read battery gauge and charger status via NuttX battery
+		framework IOCTL commands (/dev/bat0, /dev/charge0).

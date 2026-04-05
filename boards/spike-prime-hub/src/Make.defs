@@ -37,5 +37,13 @@ CSRCS += stm32_tlc5955.c
 endif
 
 ifeq ($(CONFIG_STM32_ADC1),y)
-CSRCS += stm32_adc_dma.c stm32_power.c
+CSRCS += stm32_adc_dma.c stm32_power.c stm32_resistor_ladder.c
+endif
+
+ifeq ($(CONFIG_BATTERY_GAUGE),y)
+CSRCS += stm32_battery_gauge.c
+endif
+
+ifeq ($(CONFIG_BATTERY_CHARGER),y)
+CSRCS += stm32_battery_charger.c
 endif

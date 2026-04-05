@@ -102,6 +102,27 @@ int stm32_bringup(void)
 
 #ifdef CONFIG_STM32_ADC1
   stm32_adc_dma_initialize();
+#endif
+
+#ifdef CONFIG_BATTERY_GAUGE
+  ret = stm32_battery_gauge_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_battery_gauge_initialize() failed: %d\n",
+             ret);
+    }
+#endif
+
+#ifdef CONFIG_BATTERY_CHARGER
+  ret = stm32_battery_charger_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "ERROR: stm32_battery_charger_initialize() failed: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_STM32_ADC1
   ret = stm32_power_initialize();
   if (ret < 0)
     {

@@ -1,0 +1,10 @@
+include $(APPDIR)/Make.defs
+
+PROGNAME = battery
+PRIORITY = SCHED_PRIORITY_DEFAULT
+STACKSIZE = $(CONFIG_DEFAULT_TASK_STACKSIZE)
+MODULE = $(CONFIG_APP_BATTERY)
+
+MAINSRC = battery_main.c
+
+include $(APPDIR)/Application.mk
