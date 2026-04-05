@@ -245,7 +245,12 @@ static bool read_chg(void)
  *
  * Description:
  *   Enable charging if USB is connected, otherwise disable.
- *   Uses VBUS detection only (no BCD).  Default limit: 500mA.
+ *   Uses VBUS GPIO (PA9) detection.  Default limit: 500mA.
+ *
+ *   Note: USB BCD detection is not implemented.  Full BCD requires
+ *   manipulating the OTG FS GCCFG register which conflicts with the
+ *   NuttX USB driver.  The 500mA default is safe because the MP2639A
+ *   hardware auto-limits current if VBUS voltage drops.
  ****************************************************************************/
 
 static void charger_enable_if_usb(FAR struct spike_charger_s *priv)
