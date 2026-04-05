@@ -58,9 +58,15 @@ class NuttxSerial:
 
     def close(self):
         if self.proc:
+            # fdspawn.close() closes the underlying fd, so mark serial
+            # as closed first to avoid double-close OSError.
+            if self.ser:
+                self.ser.fd = None
+                self.ser.is_open = False
+                self.ser = None
             self.proc.close()
             self.proc = None
-        if self.ser and self.ser.is_open:
+        elif self.ser and self.ser.is_open:
             self.ser.close()
             self.ser = None
         if self.log_file:
@@ -113,7 +119,11 @@ class NuttxSerial:
         """
         self.clean_buffer()
         self.proc.sendline(cmd)
-        time.sleep(0.1)
+        if cmd:
+            # Wait for the command echo (first word only, as long
+            # commands may be wrapped/garbled by the terminal)
+            first_word = cmd.split()[0]
+            self.proc.expect(re.escape(first_word), timeout=timeout)
         self.proc.expect(expected, timeout=timeout)
         return self.proc.before.decode(errors="ignore")
 
@@ -164,8 +174,18 @@ def p(pytestconfig):
     device = pytestconfig.getoption("-D")
     log_path = os.path.join(os.path.dirname(__file__), "logs")
     nuttx = NuttxSerial(device, log_path)
-    # Ensure we have an NSH prompt
-    nuttx.sendCommand("", PROMPT, timeout=5)
+    # Ensure we have an NSH prompt (retry a few times)
+    for attempt in range(3):
+        try:
+            nuttx.clean_buffer()
+            nuttx.proc.send("\r\n")
+            time.sleep(0.1)
+            nuttx.proc.send("\r\n")
+            nuttx.proc.expect(PROMPT, timeout=5)
+            break
+        except Exception:
+            if attempt == 2:
+                raise
     yield nuttx
     nuttx.close()
 
