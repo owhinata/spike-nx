@@ -191,6 +191,17 @@ picocom /dev/tty.usbmodem01
 - **LPF2**: LEGO Power Functions 2。Powered Up デバイスが使用するコネクタ規格・プロトコル規格のコミュニティ通称
 - **LUMP**: LEGO UART Messaging Protocol。Powered Up スマートデバイス (センサー/エンコーダ付きモーター) が Hub と通信する UART プロトコル
 
+## テスト
+
+`tests/` に pexpect + pyserial + pytest ベースの自動テストを配置。シリアル経由で NSH コマンドを実行し出力を検証する。
+
+- 機能を実装したら対応するテストを `tests/` に追加する
+- 既存テストを実行して既存機能が壊れていないことを確認する
+- テスト実行: `.venv/bin/pytest tests/ -m "not slow" -D /dev/tty.usbmodem01`
+- 自動テストのみ: `-m "not slow and not interactive"`
+- OSテスト（ostest, coremark）はカーネル CONFIG 変更時のみ実行
+- テスト依存: `.venv/bin/pip install -r tests/requirements.txt`
+
 ## 注意事項
 
 - NuttX の Kconfig にペリフェラルの定義があっても、実際の MCU にそのハードウェアが存在するとは限らない。Kconfig はチップファミリ単位（例: STM32F4XXX）の粗い分類で、個別チップの差分を反映していないことがある。ペリフェラルの有無は必ずリファレンスマニュアル（データシート）で確認すること。
