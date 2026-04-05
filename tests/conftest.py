@@ -160,8 +160,8 @@ def pytest_addoption(parser):
     parser.addoption(
         "-D",
         action="store",
-        default="/dev/tty.usbmodem01",
-        help="serial device (default: /dev/tty.usbmodem01)",
+        default=os.environ.get("NUTTX_DEVICE", "/dev/tty.usbmodem01"),
+        help="serial device (env: NUTTX_DEVICE, default: /dev/tty.usbmodem01)",
     )
 
 
