@@ -67,8 +67,9 @@ static uint32_t g_btn_press_start;
 static bool center_btn_pressed(void)
 {
   uint16_t val = stm32_adc_read(ADC_RANK_BTN_CENTER);
+  uint8_t flags = resistor_ladder_decode(val, g_ladder_dev0_levels);
 
-  return (val < CENTER_BTN_PRESS_THRESHOLD);
+  return (flags & RLAD_CH1) != 0;
 }
 
 /****************************************************************************
