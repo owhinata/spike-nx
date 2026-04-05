@@ -1,13 +1,13 @@
 /****************************************************************************
- * apps/crashtest/crashtest_main.c
+ * apps/crash/crash_main.c
  *
  * Trigger various crash types to verify panic syslog dump output.
  *
  * Usage:
- *   crashtest assert    - Trigger ASSERT failure
- *   crashtest null      - Null pointer dereference
- *   crashtest divzero   - Division by zero
- *   crashtest stackoverflow - Stack overflow
+ *   crash assert         - Trigger ASSERT failure
+ *   crash null           - Null pointer dereference
+ *   crash divzero        - Division by zero
+ *   crash stackoverflow  - Stack overflow
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -55,11 +55,11 @@ static void crash_stackoverflow(void)
   (void)buf[0];
 }
 
-int crashtest_main(int argc, FAR char *argv[])
+int crash_main(int argc, FAR char *argv[])
 {
   if (argc < 2)
     {
-      printf("Usage: crashtest <type>\n");
+      printf("Usage: crash <type>\n");
       printf("  assert         - ASSERT failure\n");
       printf("  null           - Null pointer dereference\n");
       printf("  divzero        - Division by zero\n");
