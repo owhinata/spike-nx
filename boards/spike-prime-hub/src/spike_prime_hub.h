@@ -114,8 +114,7 @@ void weak_function stm32_usbinitialize(void);
 
 #ifdef CONFIG_STM32_SPI1
 int tlc5955_initialize(void);
-void tlc5955_set_duty(uint8_t ch, uint16_t value);
-int tlc5955_update(void);       /* Deferred update via work queue */
+void tlc5955_set_duty(uint8_t ch, uint16_t value); /* Auto-schedules update */
 int tlc5955_update_sync(void);  /* Immediate update (init/shutdown) */
 #endif
 

@@ -265,14 +265,13 @@ void tlc5955_set_duty(uint8_t ch, uint16_t value)
   g_grayscale[ch * 2 + 1] = value >> 8;
   g_grayscale[ch * 2 + 2] = value & 0xff;
   g_changed = true;
-}
 
-int tlc5955_update(void)
-{
-  /* Schedule deferred SPI transfer on HPWORK queue */
+  /* Schedule deferred SPI transfer. work_queue() ignores duplicate
+   * requests on the same work_s, so multiple set_duty calls are
+   * batched into one SPI transfer (same behavior as pybricks process_poll).
+   */
 
-  return work_queue(HPWORK, &g_update_work, tlc5955_update_worker,
-                    NULL, 0);
+  work_queue(HPWORK, &g_update_work, tlc5955_update_worker, NULL, 0);
 }
 
 int tlc5955_update_sync(void)

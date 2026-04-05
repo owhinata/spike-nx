@@ -64,27 +64,25 @@ Channels are mapped to GS registers in reverse order (CH0→GSB15, CH47→GSR0).
 /* Initialize (called automatically in stm32_bringup) */
 int tlc5955_initialize(void);
 
-/* Set PWM duty for a channel (0=OFF, 0xFFFF=full brightness) */
+/* Set PWM duty for a channel (0=OFF, 0xFFFF=full brightness).
+ * Automatically schedules SPI transfer on HPWORK queue.
+ * Multiple set_duty calls are batched into one SPI transfer.
+ */
 void tlc5955_set_duty(uint8_t ch, uint16_t value);
 
-/* Deferred update: schedule SPI transfer on HPWORK queue */
-int tlc5955_update(void);
-
-/* Immediate update: for init/shutdown use */
+/* Immediate update: for init/shutdown use (when HPWORK not running) */
 int tlc5955_update_sync(void);
 ```
 
 ### Example
 
 ```c
-/* Set center button LED to green */
+/* Set center button LED to green (no update call needed) */
 tlc5955_set_duty(TLC5955_CH_STATUS_TOP_G, 0xffff);
 tlc5955_set_duty(TLC5955_CH_STATUS_BTM_G, 0xffff);
-tlc5955_update();
 
-/* Set Bluetooth LED to blue */
-tlc5955_set_duty(TLC5955_CH_BT_B, 0x8000);
-tlc5955_update();
+/* During initialization, use sync update */
+tlc5955_update_sync();
 ```
 
 ## defconfig
