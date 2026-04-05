@@ -97,6 +97,37 @@ PA9（GPIO）で VBUS を読み取り USB 接続を検出します。VBUS 検出
 
 満充電判定閾値（8190 mV = 4.095V/セル）は指数移動平均（127/128 係数）で算出し、ちらつきを防止します。
 
+## テストアプリ
+
+`battery` コマンドで IOCTL 経由でゲージ・充電器のステータスを読み取ります。
+
+```
+nsh> battery
+=== Battery Gauge (/dev/bat0) ===
+  State:       DISCHARGING
+  Online:      yes
+  Voltage:     8588 mV
+  Current:     39 mA
+  Capacity:    100 %
+  Temperature: 29.184 C
+
+=== Battery Charger (/dev/charge0) ===
+  State:       CHARGING
+  Health:      GOOD
+  USB online:  yes
+  Chip ID:     0x2639
+  Target V:    8400 mV
+```
+
+| コマンド | 説明 |
+|---------|------|
+| `battery` | ゲージ + 充電器の全情報表示 |
+| `battery gauge` | ゲージのみ |
+| `battery charger` | 充電器のみ |
+| `battery monitor [N]` | 1 秒間隔で N 回モニタリング（デフォルト: 10） |
+
+`CONFIG_APP_BATTERY=y` で有効化。
+
 ## ソースファイル
 
 | ファイル | 説明 |

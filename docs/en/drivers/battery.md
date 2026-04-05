@@ -97,6 +97,37 @@ The battery LED (TLC5955 channels 0-2: B/G/R) is updated by the charger driver's
 
 The full-charge threshold (8190 mV = 4.095V per cell) uses an exponential moving average (127/128 coefficient) to avoid flickering.
 
+## Test App
+
+The `battery` command reads gauge and charger status via IOCTL.
+
+```
+nsh> battery
+=== Battery Gauge (/dev/bat0) ===
+  State:       DISCHARGING
+  Online:      yes
+  Voltage:     8588 mV
+  Current:     39 mA
+  Capacity:    100 %
+  Temperature: 29.184 C
+
+=== Battery Charger (/dev/charge0) ===
+  State:       CHARGING
+  Health:      GOOD
+  USB online:  yes
+  Chip ID:     0x2639
+  Target V:    8400 mV
+```
+
+| Command | Description |
+|---------|-------------|
+| `battery` | Show gauge + charger info |
+| `battery gauge` | Gauge only |
+| `battery charger` | Charger only |
+| `battery monitor [N]` | Monitor N times at 1s interval (default: 10) |
+
+Enabled by `CONFIG_APP_BATTERY=y`.
+
 ## Source Files
 
 | File | Description |
