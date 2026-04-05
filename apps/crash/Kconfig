@@ -1,4 +1,4 @@
-config APP_CRASHTEST
+config APP_CRASH
 	tristate "Crash test utility"
 	default n
 	---help---

@@ -65,6 +65,7 @@ nav:
       - development/getting-started.md
       - development/debugging.md
       - development/file-transfer.md
+      - development/apps.md
   - NuttX:
       - nuttx/f413-support.md
       - nuttx/tickless-timer.md

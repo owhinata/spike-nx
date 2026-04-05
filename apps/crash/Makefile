@@ -1,10 +1,10 @@
 include $(APPDIR)/Make.defs
 
-PROGNAME = crashtest
+PROGNAME = crash
 PRIORITY = SCHED_PRIORITY_DEFAULT
 STACKSIZE = $(CONFIG_DEFAULT_TASK_STACKSIZE)
-MODULE = $(CONFIG_APP_CRASHTEST)
+MODULE = $(CONFIG_APP_CRASH)
 
-MAINSRC = crashtest_main.c
+MAINSRC = crash_main.c
 
 include $(APPDIR)/Application.mk
