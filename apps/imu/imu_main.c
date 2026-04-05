@@ -190,6 +190,11 @@ static int imu_daemon(int argc, char *argv[])
   close(accel_fd);
   close(gyro_fd);
 
+  /* Reset module state so status reports clean after stop */
+
+  imu_stationary_init(0, 0, 0, NULL);
+  imu_fusion_init();
+
   g_daemon_running = false;
   printf("imu: daemon stopped\n");
   return 0;
