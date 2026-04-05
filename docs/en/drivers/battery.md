@@ -47,9 +47,18 @@ The /CHG pin is on a resistor ladder shared with the center button (PC4, ADC ran
 
 The charger polls the CHG signal at 4 Hz (250 ms interval) using a 7-sample circular buffer. If more than 2 transitions are detected in the window, a fault condition is reported.
 
-#### USB Detection
+#### USB Detection (BCD)
 
-USB presence is detected by reading VBUS on PA9 (GPIO). When VBUS is present, charging is enabled with a 500 mA current limit. Full USB Battery Charging Detection (BCD) is not implemented because it conflicts with the active CDC/ACM console.
+USB Battery Charging Detection (BCD) identifies the charger type on VBUS rise:
+
+| BCD Type | Current Limit | Description |
+|----------|--------------|-------------|
+| SDP | 500 mA | Standard Downstream Port |
+| CDP | 1.5 A | Charging Downstream Port |
+| DCP | 1.5 A | Dedicated Charging Port |
+| Non-standard | 1.5 A | Non-standard charger |
+
+BCD runs on LPWORK (low-priority work queue) to avoid blocking HPWORK where IMU and button polling run. Detection takes ~300ms and temporarily disables the USB PHY. CDC/ACM reconnects automatically after detection completes.
 
 #### Charge Timeout
 
@@ -149,8 +158,8 @@ Ported from:
 
 | Feature | Pybricks | NuttX Port |
 |---------|----------|------------|
-| USB detection | Full BCD (GCCFG register) | VBUS GPIO only |
-| Default current limit | Based on BCD type | 500 mA fixed |
+| USB detection | Full BCD (Contiki protothread) | Full BCD (NuttX LPWORK) |
+| Default current limit | Based on BCD type | Based on BCD type |
 | Framework | Custom driver API | NuttX battery gauge/charger |
 | Polling | Contiki protothread | NuttX HPWORK queue |
 

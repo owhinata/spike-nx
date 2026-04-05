@@ -47,9 +47,18 @@ SPIKE Prime Hub は 2S Li-ion バッテリーパック（公称 7.2V）と MPS M
 
 充電器は 4 Hz（250 ms 間隔）で CHG 信号をポーリングし、7 サンプルの巡回バッファを使用します。ウィンドウ内で 2 回以上の遷移が検出された場合、障害状態を報告します。
 
-#### USB 検出
+#### USB 検出 (BCD)
 
-PA9（GPIO）で VBUS を読み取り USB 接続を検出します。VBUS 検出時は 500 mA リミットで充電を有効化します。フル USB Battery Charging Detection（BCD）はアクティブな CDC/ACM コンソールと競合するため未実装です。
+VBUS 検出時に USB Battery Charging Detection (BCD) で充電器タイプを識別します:
+
+| BCD タイプ | 電流リミット | 説明 |
+|-----------|-------------|------|
+| SDP | 500 mA | 標準 USB ポート |
+| CDP | 1.5 A | 充電対応 USB ポート |
+| DCP | 1.5 A | 専用充電器 |
+| Non-standard | 1.5 A | 非標準充電器 |
+
+BCD は LPWORK（低優先度ワークキュー）で実行され、HPWORK（IMU・ボタン監視）をブロックしません。検出には約 300ms かかり、その間 USB PHY が一時停止します。検出完了後に CDC/ACM が自動復帰します。
 
 #### 充電タイムアウト
 
@@ -149,8 +158,8 @@ nsh> battery
 
 | 機能 | Pybricks | NuttX 移植版 |
 |------|----------|-------------|
-| USB 検出 | フル BCD（GCCFG レジスタ） | VBUS GPIO のみ |
-| デフォルト電流リミット | BCD タイプに基づく | 500 mA 固定 |
+| USB 検出 | フル BCD（Contiki protothread） | フル BCD（NuttX LPWORK） |
+| デフォルト電流リミット | BCD タイプに基づく | BCD タイプに基づく |
 | フレームワーク | カスタムドライバ API | NuttX battery gauge/charger |
 | ポーリング | Contiki protothread | NuttX HPWORK キュー |
 
