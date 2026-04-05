@@ -14,11 +14,16 @@ apps/
 │   ├── Makefile
 │   ├── Make.defs
 │   └── crash_main.c
-└── imu/             # Example app: IMU sensor fusion
+├── imu/             # Example app: IMU sensor fusion
+│   ├── Kconfig
+│   ├── Makefile
+│   ├── Make.defs
+│   └── imu_main.c
+└── led/             # Example app: LED test (uses board driver API)
     ├── Kconfig
     ├── Makefile
     ├── Make.defs
-    └── imu_main.c
+    └── led_main.c
 ```
 
 ## Required Files
@@ -129,3 +134,11 @@ To call board driver functions (e.g., `tlc5955_set_duty()`) from an app, include
 ```
 
 Board drivers are linked into the kernel, so apps can call them directly (in Flat build mode).
+
+Add the board source include path in the app's `Makefile`:
+
+```makefile
+CFLAGS += ${INCDIR_PREFIX}$(TOPDIR)$(DELIM)..$(DELIM)boards$(DELIM)spike-prime-hub$(DELIM)src
+```
+
+See the `led` app for a working example.

@@ -114,7 +114,25 @@ The SPI1 DMA channel mapping (`DMACHAN_SPI1_RX/TX`) was not defined in NuttX for
 - RX: DMA2 Stream2 Channel 3 (`DMAMAP_SPI1_RX_2`)
 - TX: DMA2 Stream3 Channel 3 (`DMAMAP_SPI1_TX_1`)
 
+## Test App
+
+The `led` NSH command tests all LED features:
+
+```
+led green     - Status LED green (boot default)
+led status    - Cycle status LED: R → G → B → white → off
+led battery   - Cycle battery LED colors
+led bluetooth - Cycle bluetooth LED colors
+led rainbow   - Rainbow animation (HSV hue sweep)
+led blink     - Blink green
+led breathe   - Breathing effect (fade in/out)
+led matrix    - 5x5 matrix: all on → scan → digits 0-9
+led all       - Run all tests
+led off       - All LEDs off
+```
+
 ## Source Files
 
 - `boards/spike-prime-hub/src/stm32_tlc5955.c` — Driver implementation
 - `boards/spike-prime-hub/src/spike_prime_hub.h` — Channel definitions
+- `apps/led/led_main.c` — LED test app
