@@ -56,6 +56,29 @@ gh pr merge <PR番号> --merge --delete-branch
 git remote prune origin
 ```
 
+### Issue 作成
+
+バグや課題を発見したら Issue を作成する。Environment に reproduced at (再現確認リビジョン) を必ず含める。
+
+```bash
+gh issue create --title "short description" --body "$(cat <<'EOF'
+## Summary
+- 症状・問題の説明
+
+## Reproduction
+- 再現手順
+
+## Environment
+- Board: SPIKE Prime Hub (STM32F413)
+- Reproduced at: <commit-hash>
+- 関連する CONFIG 設定
+
+## Notes
+- 調査メモ・仮説
+EOF
+)"
+```
+
 ## ドキュメント
 
 `docs/ja/` と `docs/en/` に同名 `.md` を作成（日英必須）。mkdocs (Material テーマ + i18n) で GitHub Pages に publish。
