@@ -14,11 +14,16 @@ apps/
 │   ├── Makefile
 │   ├── Make.defs
 │   └── crash_main.c
-└── imu/             # アプリ例: IMU sensor fusion
+├── imu/             # アプリ例: IMU sensor fusion
+│   ├── Kconfig
+│   ├── Makefile
+│   ├── Make.defs
+│   └── imu_main.c
+└── led/             # アプリ例: LED テスト (ボードドライバ API 使用)
     ├── Kconfig
     ├── Makefile
     ├── Make.defs
-    └── imu_main.c
+    └── led_main.c
 ```
 
 ## 必要ファイル
@@ -129,3 +134,11 @@ Makefile (top-level)
 ```
 
 ボードドライバはカーネルにリンクされているため、アプリから直接呼び出し可能（Flat ビルドモードの場合）。
+
+アプリの `Makefile` にボードソースのインクルードパスを追加する:
+
+```makefile
+CFLAGS += ${INCDIR_PREFIX}$(TOPDIR)$(DELIM)..$(DELIM)boards$(DELIM)spike-prime-hub$(DELIM)src
+```
+
+実例は `led` アプリを参照。

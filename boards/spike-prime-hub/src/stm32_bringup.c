@@ -88,5 +88,26 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_STM32_SPI1
+  ret = tlc5955_initialize();
+  if (ret == OK)
+    {
+      /* NSH ready: light center button LED green */
+
+      tlc5955_set_duty(TLC5955_CH_STATUS_TOP_G, 0xffff);
+      tlc5955_set_duty(TLC5955_CH_STATUS_BTM_G, 0xffff);
+      tlc5955_update_sync();
+    }
+#endif
+
+#ifdef CONFIG_STM32_ADC1
+  stm32_adc_dma_initialize();
+  ret = stm32_power_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_power_initialize() failed: %d\n", ret);
+    }
+#endif
+
   return ret;
 }

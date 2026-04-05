@@ -12,13 +12,13 @@ Implementation plan for device drivers to control hardware on the SPIKE Prime Hu
 | 2 | LUMP UART Protocol | (internal) | **P0** | UART4/5/7/8/9/10 |
 | 3 | H-Bridge Motor Control | `/dev/legomotor[N]` | **P0** | TIM1/3/4 PWM |
 | 4 | Sensor Data Reading | `/dev/legosensor[N]` | **P1** | LUMP |
-| 5 | TLC5955 LED Driver | `/dev/leds` | **P1** | SPI1 |
-| 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **P1** | I2C2 |
+| 5 | TLC5955 LED Driver | `/dev/leds` | **Done** | SPI1 |
+| 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **Done** | I2C2 |
 | 7 | DAC Audio | `/dev/dac0` | **P1** | DAC1 + TIM6 |
 | 8 | ADC Battery Monitoring | `/dev/adc0` | **P1** | ADC1 (6ch) + DMA2 |
 | 9 | USB CDC/ACM Console | `/dev/ttyACM0` | **Done** | OTG FS |
 | 10 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
-| 11 | Power Management | (board init) | **P0** | PA13/PA14 GPIO |
+| 11 | Power Management | (board init) | **Done** | PA13/PA14 GPIO |
 | 12 | MP2639A Charge Control | (board internal) | **P2** | TIM5 PWM + ADC |
 | 13 | Bluetooth (CC256x) | -- | **P3** | USART2 + DMA |
 
@@ -210,8 +210,8 @@ Phase 1c: LUMP UART                 (Can be parallel with 1b)
 Phase 1d: H-Bridge Motor            (After 1c completion)
     |
 Phase 2a: Sensor Reading            (After 1c completion)
-Phase 2b: TLC5955 LED               (Can be implemented independently)
-Phase 2c: IMU                       (Can be implemented independently, I2C2)
+Phase 2b: TLC5955 LED               (Done)
+Phase 2c: IMU                       (Done)
 Phase 2d: DAC Audio                 (Can be implemented independently, DAC1 + TIM6)
 Phase 2e: ADC Battery               (Can be implemented independently, ADC1 + DMA2)
     |

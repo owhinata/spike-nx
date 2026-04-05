@@ -12,13 +12,13 @@ SPIKE Prime Hub 上で NuttX からハードウェアを制御するためのデ
 | 2 | LUMP UART プロトコル | (内部) | **P0** | UART4/5/7/8/9/10 |
 | 3 | H-Bridge モーター制御 | `/dev/legomotor[N]` | **P0** | TIM1/3/4 PWM |
 | 4 | センサーデータ読取り | `/dev/legosensor[N]` | **P1** | LUMP |
-| 5 | TLC5955 LED ドライバ | `/dev/leds` | **P1** | SPI1 |
-| 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **P1** | I2C2 |
+| 5 | TLC5955 LED ドライバ | `/dev/leds` | **済** | SPI1 |
+| 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **済** | I2C2 |
 | 7 | DAC オーディオ | `/dev/dac0` | **P1** | DAC1 + TIM6 |
 | 8 | ADC バッテリー監視 | `/dev/adc0` | **P1** | ADC1 (6ch) + DMA2 |
 | 9 | USB CDC/ACM コンソール | `/dev/ttyACM0` | **済** | OTG FS |
 | 10 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
-| 11 | 電源管理 | (board 初期化) | **P0** | PA13/PA14 GPIO |
+| 11 | 電源管理 | (board 初期化) | **済** | PA13/PA14 GPIO |
 | 12 | MP2639A 充電制御 | (board 内部) | **P2** | TIM5 PWM + ADC |
 | 13 | Bluetooth (CC256x) | -- | **P3** | USART2 + DMA |
 
@@ -210,8 +210,8 @@ Phase 1c: LUMP UART         (1b と並行可能)
 Phase 1d: H-Bridge モーター (1c 完了後)
     |
 Phase 2a: センサー読取り    (1c 完了後)
-Phase 2b: TLC5955 LED       (独立実装可能)
-Phase 2c: IMU               (独立実装可能, I2C2)
+Phase 2b: TLC5955 LED       (済)
+Phase 2c: IMU               (済)
 Phase 2d: DAC オーディオ    (独立実装可能, DAC1 + TIM6)
 Phase 2e: ADC バッテリー    (独立実装可能, ADC1 + DMA2)
     |

@@ -1,0 +1,6 @@
+config APP_LED
+	tristate "LED test utility"
+	default n
+	---help---
+		Test TLC5955 LED driver: status/battery/BT LEDs, 5x5 matrix,
+		rainbow, blink, and breathing animations.
