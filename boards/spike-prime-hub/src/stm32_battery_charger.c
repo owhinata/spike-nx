@@ -41,6 +41,7 @@
 #include <nuttx/power/battery_ioctl.h>
 
 #include "stm32.h"
+#include "hardware/stm32fxxxxx_otgfs.h"
 #include "spike_prime_hub.h"
 
 #ifdef CONFIG_BATTERY_CHARGER
@@ -115,10 +116,34 @@
  * Private Types
  ****************************************************************************/
 
+/* BCD register bits for STM32F413 GCCFG */
+
+#define OTGFS_GCCFG_BCDEN   (1 << 17)  /* Battery charging detector enable */
+#define OTGFS_GCCFG_DCDEN   (1 << 18)  /* Data contact detection enable */
+#define OTGFS_GCCFG_PDEN    (1 << 19)  /* Primary detection enable */
+#define OTGFS_GCCFG_SDEN    (1 << 20)  /* Secondary detection enable */
+#define OTGFS_GCCFG_DCDET   (1 << 0)   /* Data contact detected (read) */
+#define OTGFS_GCCFG_PDET    (1 << 1)   /* Primary detected (read) */
+#define OTGFS_GCCFG_SDET    (1 << 2)   /* Secondary detected (read) */
+#define OTGFS_GCCFG_PWRDWN  (1 << 16)  /* PHY transceiver power */
+
+/* BCD result types */
+
+#define BCD_NONE              0  /* No USB */
+#define BCD_NONSTANDARD       1  /* Non-standard charger */
+#define BCD_SDP               2  /* Standard Downstream Port (500mA) */
+#define BCD_CDP               3  /* Charging Downstream Port (1.5A) */
+#define BCD_DCP               4  /* Dedicated Charging Port (1.5A) */
+
+/****************************************************************************
+ * Private Types
+ ****************************************************************************/
+
 struct spike_charger_s
 {
   struct battery_charger_dev_s dev;
   struct work_s poll_work;
+  struct work_s bcd_work;             /* BCD detection on LPWORK */
   bool chg_samples[CHG_NUM_SAMPLES];
   uint8_t chg_index;
   int charger_status;
@@ -129,6 +154,8 @@ struct spike_charger_s
   uint8_t led_blink_count;
   int32_t avg_voltage;          /* EMA of battery voltage in mV */
   bool avg_initialized;
+  bool prev_vbus;               /* Previous VBUS state for edge detection */
+  int bcd_result;               /* Last BCD detection result */
 };
 
 /****************************************************************************
@@ -241,30 +268,156 @@ static bool read_chg(void)
 }
 
 /****************************************************************************
+ * Name: bcd_detect_worker
+ *
+ * Description:
+ *   Run USB Battery Charging Detection on LPWORK (non-blocking to HPWORK).
+ *   Ported from pybricks usb_stm32.c / STM32 HAL BCD implementation.
+ *
+ *   Determines USB charger type (SDP/CDP/DCP) and sets ISET accordingly.
+ *   Temporarily powers down the USB PHY (~300ms), then restores it.
+ ****************************************************************************/
+
+static void bcd_detect_worker(FAR void *arg)
+{
+  FAR struct spike_charger_s *priv = (FAR struct spike_charger_s *)arg;
+  uint32_t gccfg;
+  int result;
+
+  if (!vbus_present())
+    {
+      return;
+    }
+
+  /* === ActivateBCD === */
+
+  gccfg = getreg32(STM32_OTGFS_GCCFG);
+  gccfg &= ~(OTGFS_GCCFG_PDEN | OTGFS_GCCFG_SDEN | OTGFS_GCCFG_DCDEN);
+  gccfg &= ~OTGFS_GCCFG_PWRDWN;
+  gccfg |= OTGFS_GCCFG_BCDEN;
+  putreg32(gccfg, STM32_OTGFS_GCCFG);
+
+  /* Phase 1: Data Contact Detection */
+
+  modifyreg32(STM32_OTGFS_GCCFG, 0, OTGFS_GCCFG_DCDEN);
+  up_mdelay(300);
+
+  if (!(getreg32(STM32_OTGFS_GCCFG) & OTGFS_GCCFG_DCDET))
+    {
+      modifyreg32(STM32_OTGFS_GCCFG, OTGFS_GCCFG_DCDEN, 0);
+      result = BCD_NONSTANDARD;
+      goto done;
+    }
+
+  /* Phase 2: Primary Detection */
+
+  modifyreg32(STM32_OTGFS_GCCFG, OTGFS_GCCFG_DCDEN, 0);
+  up_mdelay(50);
+  modifyreg32(STM32_OTGFS_GCCFG, 0, OTGFS_GCCFG_PDEN);
+  up_mdelay(50);
+
+  if (!(getreg32(STM32_OTGFS_GCCFG) & OTGFS_GCCFG_PDET))
+    {
+      modifyreg32(STM32_OTGFS_GCCFG, OTGFS_GCCFG_PDEN, 0);
+      result = BCD_SDP;
+      goto done;
+    }
+
+  /* Phase 3: Secondary Detection */
+
+  modifyreg32(STM32_OTGFS_GCCFG, OTGFS_GCCFG_PDEN, 0);
+  up_mdelay(50);
+  modifyreg32(STM32_OTGFS_GCCFG, 0, OTGFS_GCCFG_SDEN);
+  up_mdelay(50);
+
+  result = (getreg32(STM32_OTGFS_GCCFG) & OTGFS_GCCFG_SDET)
+           ? BCD_DCP : BCD_CDP;
+
+  modifyreg32(STM32_OTGFS_GCCFG, OTGFS_GCCFG_SDEN, 0);
+
+done:
+  /* === DeActivateBCD + Restore GCCFG === */
+
+  modifyreg32(STM32_OTGFS_GCCFG,
+              OTGFS_GCCFG_BCDEN | OTGFS_GCCFG_DCDEN |
+              OTGFS_GCCFG_PDEN | OTGFS_GCCFG_SDEN, 0);
+  modifyreg32(STM32_OTGFS_GCCFG, 0, OTGFS_GCCFG_PWRDWN);
+
+  /* Set ISET based on BCD result */
+
+  priv->bcd_result = result;
+
+  switch (result)
+    {
+      case BCD_SDP:
+        iset_pwm_set_duty(ISET_DUTY_500MA);
+        break;
+      case BCD_CDP:
+      case BCD_DCP:
+      case BCD_NONSTANDARD:
+        iset_pwm_set_duty(ISET_DUTY_1500MA);
+        break;
+      default:
+        iset_pwm_set_duty(ISET_DUTY_OFF);
+        break;
+    }
+
+  syslog(LOG_INFO, "CHG: BCD type=%d\n", result);
+}
+
+/****************************************************************************
+ * Name: handle_vbus_transition
+ *
+ * Description:
+ *   Detect VBUS state transitions in the HPWORK poll.
+ *   On VBUS rise: enable MODE and schedule BCD detection on LPWORK.
+ *   On VBUS drop: disable MODE and ISET.
+ ****************************************************************************/
+
+static void handle_vbus_transition(FAR struct spike_charger_s *priv)
+{
+  bool vbus = vbus_present();
+
+  if (vbus == priv->prev_vbus)
+    {
+      return;
+    }
+
+  if (vbus)
+    {
+      /* VBUS appeared — enable charging with safe default,
+       * then schedule BCD on LPWORK to determine optimal current.
+       */
+
+      iset_pwm_set_duty(ISET_DUTY_500MA);
+      charger_set_mode(priv, true);
+
+      work_queue(LPWORK, &priv->bcd_work,
+                 bcd_detect_worker, priv, MSEC2TICK(500));
+    }
+  else
+    {
+      /* VBUS disappeared — disable charging */
+
+      iset_pwm_set_duty(ISET_DUTY_OFF);
+      charger_set_mode(priv, false);
+      priv->bcd_result = BCD_NONE;
+    }
+
+  priv->prev_vbus = vbus;
+}
+
+/****************************************************************************
  * Name: charger_enable_if_usb
  *
  * Description:
- *   Enable charging if USB is connected, otherwise disable.
- *   Uses VBUS GPIO (PA9) detection.  Default limit: 500mA.
- *
- *   Note: USB BCD detection is not implemented.  Full BCD requires
- *   manipulating the OTG FS GCCFG register which conflicts with the
- *   NuttX USB driver.  The 500mA default is safe because the MP2639A
- *   hardware auto-limits current if VBUS voltage drops.
+ *   Maintain charger MODE pin based on VBUS presence.
+ *   ISET duty is managed by BCD detection and VBUS transition handler.
  ****************************************************************************/
 
 static void charger_enable_if_usb(FAR struct spike_charger_s *priv)
 {
-  if (vbus_present())
-    {
-      iset_pwm_set_duty(ISET_DUTY_500MA);
-      charger_set_mode(priv, true);
-    }
-  else
-    {
-      iset_pwm_set_duty(ISET_DUTY_OFF);
-      charger_set_mode(priv, false);
-    }
+  charger_set_mode(priv, vbus_present());
 }
 
 /****************************************************************************
@@ -379,7 +532,11 @@ static void charger_poll_work(FAR void *arg)
     }
 
 
-  /* Enable/disable charger based on USB presence */
+  /* Detect VBUS transitions and trigger BCD on LPWORK */
+
+  handle_vbus_transition(priv);
+
+  /* Maintain charger MODE pin */
 
   charger_enable_if_usb(priv);
 
@@ -614,15 +771,29 @@ int stm32_battery_charger_initialize(void)
   memset(priv, 0, sizeof(*priv));
   priv->dev.ops = &g_spike_charger_ops;
   priv->charger_status = BATTERY_DISCHARGING;
+  priv->prev_vbus = vbus_present();
 
   /* Initialize ISET PWM (TIM5 CH1) */
 
   iset_pwm_initialize();
 
-  /* Start with charging disabled */
+  /* Start with charging at safe default if USB is already connected */
 
-  charger_set_mode(priv, false);
-  iset_pwm_set_duty(ISET_DUTY_OFF);
+  if (priv->prev_vbus)
+    {
+      iset_pwm_set_duty(ISET_DUTY_500MA);
+      charger_set_mode(priv, true);
+
+      /* Schedule BCD to determine optimal current */
+
+      work_queue(LPWORK, &priv->bcd_work,
+                 bcd_detect_worker, priv, MSEC2TICK(500));
+    }
+  else
+    {
+      charger_set_mode(priv, false);
+      iset_pwm_set_duty(ISET_DUTY_OFF);
+    }
 
 
   /* Register charger device */
