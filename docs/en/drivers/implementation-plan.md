@@ -15,11 +15,11 @@ Implementation plan for device drivers to control hardware on the SPIKE Prime Hu
 | 5 | TLC5955 LED Driver | `/dev/leds` | **Done** | SPI1 |
 | 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **Done** | I2C2 |
 | 7 | DAC Audio | `/dev/dac0` | **P1** | DAC1 + TIM6 |
-| 8 | ADC Battery Monitoring | `/dev/adc0` | **P1** | ADC1 (6ch) + DMA2 |
+| 8 | ADC Battery Monitoring | `/dev/bat0` | **Done** | ADC1 (6ch) + DMA2 |
 | 9 | USB CDC/ACM Console | `/dev/ttyACM0` | **Done** | OTG FS |
 | 10 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
 | 11 | Power Management | (board init) | **Done** | PA13/PA14 GPIO |
-| 12 | MP2639A Charge Control | (board internal) | **P2** | TIM5 PWM + ADC |
+| 12 | MP2639A Charge Control | `/dev/charge0` | **Done** | TIM5 PWM + ADC + BCD |
 | 13 | Bluetooth (CC256x) | -- | **P3** | USART2 + DMA |
 
 ### Priority Definitions
@@ -83,10 +83,12 @@ PA13 (BAT_PWR_EN) and PA14 (PORT_3V3_EN) initialization is already implemented i
 - Speaker enable: PC10 (GPIO HIGH)
 - Sample rate control via TIM6 TRGO, buffer transfer via DMA1_Stream5
 
-#### 2e. ADC Battery Monitoring and Button Input
+#### 2e. ADC Battery Monitoring and Button Input (Done)
 
-- ADC1 6 channels + DMA2_Stream0 for periodic sampling
-- TIM2 trigger to start ADC conversion
+- ADC1 6 channels + DMA2_Stream0 continuous conversion at 1kHz (TIM2 trigger)
+- Battery gauge registered at `/dev/bat0` (NuttX battery_gauge framework)
+- Voltage, current, temperature (NTC), SoC estimation
+- Resistor ladder decoder shared between center button and charger CHG signal
 
 | Channel | Pin | Purpose |
 |---|---|---|
@@ -94,10 +96,10 @@ PA13 (BAT_PWR_EN) and PA14 (PORT_3V3_EN) initialization is already implemented i
 | CH11 | PC1 | Battery voltage (max 9900mV) |
 | CH8 | PB0 | Battery temperature (NTC thermistor) |
 | CH3 | PA3 | USB charge input current |
-| CH14 | PC4 | Charge status (resistor ladder) |
-| CH1 | PA1 | Button pad (multiple buttons detected via resistor ladder) |
+| CH14 | PC4 | Center button + CHG status (resistor ladder) |
+| CH5 | PA1 | Left/Right/BT buttons (resistor ladder) |
 
-**Note**: Hub button input uses an ADC resistor ladder, not GPIO. The pressed button is determined from the voltage level on PA1.
+**Note**: Hub button input uses an ADC resistor ladder, not GPIO. The pressed button is determined from the voltage level via resistor ladder decoder.
 
 ### Phase 3: Storage and Charging (P2)
 
@@ -108,10 +110,15 @@ PA13 (BAT_PWR_EN) and PA14 (PORT_3V3_EN) initialization is already implemented i
 - Uses NuttX MTD driver (`CONFIG_MTD_W25`)
 - Formatted with LittleFS or SmartFS
 
-#### 3b. MP2639A Charge Control
+#### 3b. MP2639A Charge Control (Done)
 
-- Charge current setting: PWM control via TIM5 CH1 (PA0) (96kHz)
-- Charge status monitoring: 8-level detection via ADC resistor ladder (CH14/PC4)
+- Charger registered at `/dev/charge0` (NuttX battery_charger framework)
+- MODE pin: TLC5955 channel 14 (charging enable, active low)
+- ISET: TIM5 CH1 (PA0) PWM at 96kHz (current limit control)
+- CHG status: resistor ladder decoder on ADC CH14 (shared with center button)
+- USB BCD detection on LPWORK: SDP (500mA) / CDP (1.5A) / DCP (1.5A)
+- 4Hz polling: CHG fault detection, charge timeout (60min→30s pause), battery LED
+- Battery LED: red=charging, green=full, green blink=complete, yellow blink=fault
 
 ### Phase 4: Wireless Communication (P3)
 
@@ -190,8 +197,11 @@ boards/spike-prime-hub/src/
   stm32_tlc5955.c       # TLC5955 LED driver
   stm32_lsm6ds3.c       # IMU (LSM6DS3TR-C) initialization
   stm32_audio.c         # DAC audio + speaker control
-  stm32_battery.c       # ADC battery monitoring + button input
-  stm32_charger.c       # MP2639A charge control
+  stm32_adc_dma.c       # ADC1 DMA continuous conversion (6ch, 1kHz)
+  stm32_battery_gauge.c # Battery gauge lower-half (/dev/bat0)
+  stm32_battery_charger.c # MP2639A charger lower-half (/dev/charge0)
+  stm32_resistor_ladder.c # Resistor ladder decoder (buttons + CHG)
+  stm32_power.c         # Center button monitor + power control
 
 drivers/lego/           # NuttX generic drivers
   lump_uart.c           # LUMP UART protocol engine
@@ -213,10 +223,10 @@ Phase 2a: Sensor Reading            (After 1c completion)
 Phase 2b: TLC5955 LED               (Done)
 Phase 2c: IMU                       (Done)
 Phase 2d: DAC Audio                 (Can be implemented independently, DAC1 + TIM6)
-Phase 2e: ADC Battery               (Can be implemented independently, ADC1 + DMA2)
+Phase 2e: ADC Battery               (Done - /dev/bat0)
     |
 Phase 3a: W25Q256 Flash             (Can be implemented independently)
-Phase 3b: MP2639A Charging           (After 2e ADC completion)
+Phase 3b: MP2639A Charging           (Done - /dev/charge0, BCD on LPWORK)
     |
 Phase 4a: Bluetooth                 (Future)
 ```
