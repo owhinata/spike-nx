@@ -122,3 +122,15 @@ Ported from:
 | Default current limit | Based on BCD type | 500 mA fixed |
 | Framework | Custom driver API | NuttX battery gauge/charger |
 | Polling | Contiki protothread | NuttX HPWORK queue |
+
+## STM32F413 OTG FS Fix
+
+The NuttX OTG FS driver originally treated STM32F413 as a legacy F4 variant, incorrectly setting GCCFG bits 18/19 as VBUS sensing (VBUSASEN/VBUSBSEN). On F413, these bits are BCD-related (DCDEN/PDEN), causing USB disconnect/reconnect to fail.
+
+The fix adds F412/F413 to the F446/F469 code path in the NuttX OTG FS driver:
+
+- **GCCFG**: Only `PWRDWN` is set (BCD bits are left untouched)
+- **GOTGCTL**: `BVALOEN | BVALOVAL` forces B-session valid (replaces `NOVBUSSENS`)
+- **SEDET/SRQ**: Session end and session request interrupt handlers are implemented for proper VBUS disconnect/reconnect detection
+
+This change is in the NuttX submodule (`arch/arm/src/stm32/stm32_otgfsdev.c` and `hardware/stm32fxxxxx_otgfs.h`).

@@ -122,3 +122,15 @@ PA9（GPIO）で VBUS を読み取り USB 接続を検出します。VBUS 検出
 | デフォルト電流リミット | BCD タイプに基づく | 500 mA 固定 |
 | フレームワーク | カスタムドライバ API | NuttX battery gauge/charger |
 | ポーリング | Contiki protothread | NuttX HPWORK キュー |
+
+## STM32F413 OTG FS 修正
+
+NuttX の OTG FS ドライバは STM32F413 をレガシー F4 として扱い、GCCFG bits 18/19 に VBUS sensing（VBUSASEN/VBUSBSEN）を設定していた。F413 ではこれらは BCD 用ビット（DCDEN/PDEN）であり、USB ケーブルの抜き差しが失敗する原因となっていた。
+
+NuttX submodule に以下の修正を適用:
+
+- **GCCFG**: `PWRDWN` のみ設定（BCD ビットに触らない）
+- **GOTGCTL**: `BVALOEN | BVALOVAL` で B-session を強制（`NOVBUSSENS` の代替）
+- **SEDET/SRQ**: Session end / Session request 割り込みハンドラを実装
+
+変更ファイル: `arch/arm/src/stm32/stm32_otgfsdev.c`、`hardware/stm32fxxxxx_otgfs.h`
