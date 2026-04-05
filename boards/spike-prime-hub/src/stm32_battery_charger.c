@@ -378,6 +378,7 @@ static void charger_poll_work(FAR void *arg)
       goto reschedule;
     }
 
+
   /* Enable/disable charger based on USB presence */
 
   charger_enable_if_usb(priv);
@@ -622,6 +623,7 @@ int stm32_battery_charger_initialize(void)
 
   charger_set_mode(priv, false);
   iset_pwm_set_duty(ISET_DUTY_OFF);
+
 
   /* Register charger device */
 
