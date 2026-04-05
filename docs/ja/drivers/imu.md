@@ -58,17 +58,12 @@ INT1 (gyro DRDY) 発火
 
 ## 6. NuttX ドライバアーキテクチャ
 
-### カーネル空間
-
-```
-nuttx/drivers/sensors/lsm6dsl_uorb.c   - I2C 制御、バースト読み出し、uORB 登録
-nuttx/include/nuttx/sensors/lsm6dsl_uorb.h - config 構造体、登録 API
-```
-
 ### ボード層
 
 ```
-boards/spike-prime-hub/src/stm32_lsm6dsl.c - I2C2 初期化、INT1 割り込み設定、ドライバ登録
+boards/spike-prime-hub/src/lsm6dsl_uorb.c   - I2C 制御、バースト読み出し、uORB 登録
+boards/spike-prime-hub/src/lsm6dsl_uorb.h   - config 構造体、登録 API
+boards/spike-prime-hub/src/stm32_lsm6dsl.c  - I2C2 初期化、INT1 割り込み設定、ドライバ登録
 ```
 
 ### uORB トピック
@@ -85,7 +80,6 @@ CONFIG_STM32_I2C2=y
 CONFIG_I2C=y
 CONFIG_SCHED_HPWORK=y
 CONFIG_SENSORS=y
-CONFIG_SENSORS_LSM6DSL_UORB=y
 CONFIG_APP_IMU=y
 ```
 
