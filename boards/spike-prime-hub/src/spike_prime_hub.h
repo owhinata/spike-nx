@@ -106,7 +106,7 @@
 
 int stm32_bringup(void);
 
-#ifdef CONFIG_SENSORS_LSM6DSL_UORB
+#ifdef CONFIG_STM32_I2C2
 int stm32_lsm6dsl_initialize(void);
 #endif
 

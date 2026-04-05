@@ -28,8 +28,8 @@ ifeq ($(CONFIG_SYSLOG_REGISTER),y)
 CSRCS += stm32_panic_syslog.c
 endif
 
-ifeq ($(CONFIG_SENSORS_LSM6DSL_UORB),y)
-CSRCS += stm32_lsm6dsl.c
+ifeq ($(CONFIG_STM32_I2C2),y)
+CSRCS += lsm6dsl_uorb.c stm32_lsm6dsl.c
 endif
 
 ifeq ($(CONFIG_STM32_SPI1),y)

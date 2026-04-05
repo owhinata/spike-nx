@@ -23,7 +23,7 @@
 
 #include <nuttx/irq.h>
 #include <nuttx/i2c/i2c_master.h>
-#include <nuttx/sensors/lsm6dsl_uorb.h>
+#include "lsm6dsl_uorb.h"
 
 #include "stm32.h"
 #include "stm32_gpio.h"
