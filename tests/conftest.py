@@ -75,11 +75,23 @@ class NuttxSerial:
 
     def reconnect(self, timeout=15):
         """Close and reopen the serial port (after USB replug / reset)."""
+        # fdspawn owns the underlying fd; mark serial closed first to
+        # avoid double-close OSError.
         if self.proc:
-            self.proc.close()
+            if self.ser:
+                self.ser.fd = None
+                self.ser.is_open = False
+                self.ser = None
+            try:
+                self.proc.close()
+            except Exception:
+                pass
             self.proc = None
-        if self.ser and self.ser.is_open:
-            self.ser.close()
+        elif self.ser and self.ser.is_open:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
             self.ser = None
         # Wait for the device to reappear
         deadline = time.time() + timeout
@@ -96,8 +108,17 @@ class NuttxSerial:
         self.proc = pexpect.fdpexpect.fdspawn(
             self.ser, "wb", maxread=20000, logfile=self.log_file
         )
-        # Wait for NSH prompt after reset
-        self.sendCommand("", PROMPT, timeout=10)
+        # Wait for NSH prompt after reset (use raw expect, not sendCommand)
+        for attempt in range(3):
+            try:
+                self.proc.send("\r\n")
+                time.sleep(0.1)
+                self.proc.send("\r\n")
+                self.proc.expect(PROMPT, timeout=5)
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
 
     # -- command helpers ----------------------------------------------------
 

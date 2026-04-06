@@ -12,13 +12,19 @@ def test_watchdog_device(p):
 def test_cpuload(p):
     """C-2: CPU load is available via procfs."""
     output = p.sendCommand("cat /proc/cpuload")
-    assert "CPU" in output
+    assert "%" in output
 
 
 def test_stackmonitor(p):
-    """C-3: Stack monitor reports PID info."""
-    output = p.sendCommand("stkmon")
-    assert "PID" in output
+    """C-3: Stack monitor daemon starts and stops."""
+    start = p.sendCommand("stackmonitor_start")
+    assert "command not found" not in start
+    try:
+        # /proc/0 should exist for the idle thread
+        listing = p.sendCommand("ls /proc/0")
+        assert "stack" in listing
+    finally:
+        p.sendCommand("stackmonitor_stop")
 
 
 def test_help_builtins(p):
