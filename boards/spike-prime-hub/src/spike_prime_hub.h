@@ -89,11 +89,10 @@
 #endif
 
 /* Sound (DAC1 CH1 / amp enable)
- *   PA4  = DAC1 OUT1 (analog)   -- local pinmap, F413 has no upstream macro
+ *   PA4  = DAC1 OUT1 (analog, upstream GPIO_DAC1_OUT1_0 from pinmap)
  *   PC10 = Amplifier enable (push-pull, active high, CLEAR at boot)
  */
 
-#define GPIO_DAC1_OUT1_F413 (GPIO_ANALOG | GPIO_PORTA | GPIO_PIN4)
 #define GPIO_AMP_EN         (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz | \
                              GPIO_OUTPUT_CLEAR | GPIO_PORTC | GPIO_PIN10)
 

@@ -116,7 +116,7 @@ int stm32_sound_initialize(void)
    * the amplifier enable (speaker muted at boot).
    */
 
-  stm32_configgpio(GPIO_DAC1_OUT1_F413);
+  stm32_configgpio(GPIO_DAC1_OUT1_0);
   stm32_configgpio(GPIO_AMP_EN);
   stm32_gpiowrite(GPIO_AMP_EN, false);
 
