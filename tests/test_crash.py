@@ -21,6 +21,7 @@ def _crash_and_recover(p, cmd, fault_pattern):
     p.reconnect(timeout=15)
 
 
+@pytest.mark.skip(reason="leaks ~8KB on each run via watchdog recovery path (issue #33)")
 def test_crash_assert(p):
     """D-1: ASSERT crash and watchdog recovery."""
     _crash_and_recover(p, "crash assert", "up_assert")

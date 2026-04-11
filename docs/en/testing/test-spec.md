@@ -46,11 +46,12 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 | Category | Count | Automated | Interactive | Skipped |
 |----------|-------|-----------|-------------|---------|
 | A. Boot & Init | 4 | 4 | 0 | 0 |
-| B. Peripherals | 8 | 7 | 1 | 0 |
+| B. Peripherals | 9 | 8 | 1 | 0 |
 | C. System | 6 | 4 | 2 | 0 |
-| D. Crash Handling | 4 | 1 | 0 | 3 ([#25](https://github.com/owhinata/spike-nx/issues/25)) |
+| D. Crash Handling | 4 | 0 | 0 | 4 ([#25](https://github.com/owhinata/spike-nx/issues/25), [#33](https://github.com/owhinata/spike-nx/issues/33)) |
 | E. OS Tests | 2 | 1 | 0 | 1 ([#26](https://github.com/owhinata/spike-nx/issues/26)) |
-| **Total** | **24** | **17** | **3** | **4** |
+| F. Sound | 13 | 9 | 4 | 0 |
+| **Total** | **38** | **27** | **7** | **5** |
 
 ## A. Boot & Initialization (`test_boot.py`)
 
@@ -132,9 +133,16 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 - **Pass criteria**: Contains `6a` (LSM6DS3 address)
 - **Note**: Auto-skipped if `i2c` command not available
 
-### B-8: test_led_all `@interactive`
+### B-8: test_led_smoke
 
-- **Purpose**: LED full pattern test
+- **Purpose**: Smoke test that briefly lights each LED group (status / battery / bluetooth / matrix) to verify the LED driver path and NSH responsiveness
+- **Command**: `led smoke`
+- **Pass criteria**: Output contains `smoke: status`, `smoke: battery`, `smoke: bluetooth`, `smoke: matrix`, `smoke: done`
+- **Duration**: ~0.5 s (each LED lit for 100 ms)
+
+### B-9: test_led_all `@interactive`
+
+- **Purpose**: LED full pattern test (RGB cycle / rainbow / breathe / matrix)
 - **Command**: `led all`
 - **Pass criteria**: `All tests done` + visual confirmation
 - **Timeout**: 120 seconds (includes Matrix LED sequences)
@@ -181,10 +189,11 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 
 Each test triggers a crash → watchdog reset (~3s) → NSH reconnect cycle.
 
-### D-1: test_crash_assert
+### D-1: test_crash_assert `@skip`
 
 - **Command**: `crash assert`
 - **Pass criteria**: `up_assert` → reset → `nsh> ` recovery
+- **Skip reason**: The watchdog recovery path leaks ~8 KB per run ([#33](https://github.com/owhinata/spike-nx/issues/33))
 
 ### D-2: test_crash_null `@skip`
 
@@ -204,11 +213,11 @@ Each test triggers a crash → watchdog reset (~3s) → NSH reconnect cycle.
 - **Pass criteria**: `assert|Fault` → reset → `nsh> ` recovery
 - **Skip reason**: Same as above ([#25](https://github.com/owhinata/spike-nx/issues/25))
 
-## E. OS Tests (`test_ostest.py`) `@slow`
+## E. OS Tests (`test_ostest.py`)
 
-Run only after kernel CONFIG changes. Exclude with `-m "not slow"`.
+`test_ostest` is marked `@slow` and is only run after kernel CONFIG changes (deselect with `-m "not slow"`). `test_coremark` finishes in about 12 seconds and runs in the default suite.
 
-### E-1: test_ostest `@skip`
+### E-1: test_ostest `@slow` `@skip`
 
 - **Command**: `ostest`
 - **Pass criteria**: `Exiting with status 0`
@@ -222,9 +231,102 @@ Run only after kernel CONFIG changes. Exclude with `-m "not slow"`.
 - **Timeout**: 300 seconds
 - **Measured result**: 170.82 iterations/sec (STM32F413, Cortex-M4)
 
+## F. Sound Driver (`test_sound.py`)
+
+Smoke tests for `/dev/tone0`, `/dev/pcm0`, and the `apps/sound` NSH builtin. The automated tests keep audible output to a minimum (one short tone + one short beep); full audible verification lives in the interactive tests.
+
+### F-1: test_sound_devices_present
+
+- **Purpose**: `/dev/tone0` and `/dev/pcm0` are registered at boot
+- **Command**: `ls /dev`
+- **Pass criteria**: Contains `tone0` and `pcm0`
+
+### F-2: test_sound_dmesg_banner
+
+- **Purpose**: bringup syslog contains three sound init lines
+- **Command**: `dmesg`
+- **Pass criteria**: Contains `sound: initialized`, `tone: /dev/tone0 registered`, `pcm: /dev/pcm0 registered`
+
+### F-3: test_sound_usage
+
+- **Purpose**: `sound` with no args prints usage
+- **Command**: `sound`
+- **Pass criteria**: Contains `Usage`, `beep`, `notes`
+
+### F-4: test_tone_single_note
+
+- **Purpose**: Write one quarter note to `/dev/tone0` and verify NSH returns within the expected window (tone-path smoke)
+- **Command**: `echo "C4/4" > /dev/tone0`
+- **Pass criteria**: Elapsed 400-900 ms (120 BPM quarter = 500 ms + release gap)
+
+### F-5: test_sound_beep_default
+
+- **Purpose**: Default `sound beep` (500 Hz / 200 ms) returns within the expected window (PCM-path smoke)
+- **Command**: `sound beep`
+- **Pass criteria**: Elapsed 150-800 ms
+
+### F-6: test_sound_volume_roundtrip
+
+- **Purpose**: Volume SET/GET round-trips through `TONEIOC_VOLUME_*` (silent)
+- **Command**: `sound volume` / `sound volume 30` / `sound volume 75` / restore
+- **Pass criteria**: Each SET value is reflected by the next GET
+
+### F-7: test_sound_off
+
+- **Purpose**: `sound off` returns cleanly even with nothing playing
+- **Command**: `sound off`
+- **Pass criteria**: Output does not contain `failed`
+
+### F-8: test_pcm_short_write_rejected
+
+- **Purpose**: Writing fewer bytes than the PCM header returns `-EINVAL` without panicking (survivor check)
+- **Command**: `echo "abcd" > /dev/pcm0` → `echo alive`
+- **Pass criteria**: Follow-up command returns `alive`
+
+### F-9: test_pcm_bad_magic_rejected
+
+- **Purpose**: A 20-byte garbage header is rejected without panic
+- **Command**: `echo 'XXXXXXXXXXXXXXXXXXXX' > /dev/pcm0` → `echo alive`
+- **Pass criteria**: Follow-up command returns `alive`
+
+### F-I1: test_sound_audible_tone_dev `@interactive`
+
+- **Purpose**: Audible verification for `/dev/tone0`
+- **Command**: `echo "C4/4 E4/4 G4/4 C5/2" > /dev/tone0`
+- **Pass criteria**: Operator hears an ascending C/E/G/C arpeggio
+
+### F-I2: test_sound_audible_pcm_dev `@interactive`
+
+- **Purpose**: Audible verification for `/dev/pcm0` via `sound beep`
+- **Command**: `sound beep 440 400` → `sound beep 880 400`
+- **Pass criteria**: Operator hears 440 Hz then 880 Hz
+
+### F-I3: test_sound_audible_notes_app `@interactive`
+
+- **Purpose**: Audible verification for the `apps/sound` `sound notes` path
+- **Command**: `sound notes "T240 C4/4 E4/4 G4/4 C5/4 G4/4 E4/4 C4/2"`
+- **Pass criteria**: Operator hears an up-and-down C arpeggio
+
+### F-I4: test_sound_audible_volume `@interactive`
+
+- **Purpose**: Volume changes actually affect loudness
+- **Command**: volume 100 → beep → volume 20 → beep → restore
+- **Pass criteria**: The second beep is noticeably quieter than the first
+
+## Test Synchronization (sendCommand)
+
+`NuttxSerial.sendCommand()` in `tests/conftest.py` synchronizes serial output using unique per-call sentinels.
+
+1. Phase 1 — PRE marker: send `echo MKPRE<nonce>` and expect `<pre>\r\nnsh> ` to establish a clean baseline. This absorbs any stale buffer contents.
+2. Phase 2 — real command: after `sendline(cmd)`, expect the line-anchored prompt `\r\nnsh> `. Anchoring on `\r\n` (not a bare `nsh> ` substring) prevents false matches inside command output.
+
+This approach resolves the intermittent echo-sync failures of the previous "first word echo" strategy (issue [#33](https://github.com/owhinata/spike-nx/issues/33)). Only one `sendline` is issued per phase, so NSH never has to process queued input behind a slow/heavy command.
+
 ## Memory Leak Detection
 
 The `free` command is executed before and after each test to compare heap memory. A warning is emitted if free memory decreases by more than 1KB after a test.
+
+Individual tests can opt out of the free measurement with the `@pytest.mark.no_memcheck` marker (the `check_memory_leak` fixture in `conftest.py` skips the measurement when this marker is present).
 
 !!! note
     Tests involving resets (e.g., `test_power_off`) may trigger memory warnings due to differences in initial heap state before and after the reset. This is not a memory leak.

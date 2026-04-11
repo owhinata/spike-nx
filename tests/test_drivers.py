@@ -89,9 +89,16 @@ def test_i2c_scan(p):
     assert "6a" in output
 
 
+def test_led_smoke(p):
+    """B-8: LED smoke — each LED group lights briefly and NSH returns."""
+    output = p.sendCommand("led smoke", timeout=5)
+    for marker in ("status", "battery", "bluetooth", "matrix", "done"):
+        assert f"smoke: {marker}" in output, f"missing '{marker}' line: {output}"
+
+
 @pytest.mark.interactive
 def test_led_all(p):
-    """B-8: LED all-test (requires visual confirmation)."""
+    """B-9: LED all-test (requires visual confirmation)."""
     output = p.sendCommand("led all", timeout=120)
     assert "All tests done" in output
     p.waitUser("Confirm: Did the LEDs light up correctly?")

@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import uuid
 
 import pexpect
 import pexpect.fdpexpect
@@ -132,21 +133,42 @@ class NuttxSerial:
         self.proc.before = b""
         self.proc.after = b""
 
-    def sendCommand(self, cmd, expected=PROMPT, timeout=10):
-        """Send a command and wait for the expected pattern.
+    def sendCommand(self, cmd, timeout=10):
+        """Send a command and return its output.
 
-        Returns the full output text between the command and the matched
-        pattern (i.e. ``self.proc.before``).  Raises on timeout/EOF.
+        Synchronization strategy:
+        1. A per-call PRE marker (``echo MKPRE<nonce>``) is sent to
+           establish a clean baseline past any stale buffer bytes. The
+           nonce makes the match unique; we expect the marker's output
+           line immediately followed by the next NSH prompt.
+        2. The real command is sent, and we match ``\\r\\nnsh> `` —
+           a line-anchored prompt — to capture its output. Anchoring on
+           ``\\r\\n`` before the prompt avoids false matches on a bare
+           ``nsh> `` substring that might appear inside command output.
+
+        Only one ``sendline`` is issued per phase, so NSH never has to
+        process queued input behind a slow/heavy command.
         """
-        self.clean_buffer()
+        nonce = uuid.uuid4().hex[:16]
+        pre = f"MKPRE{nonce}"
+        prompt_re = re.escape(PROMPT)
+
+        # Phase 1: baseline sync. Matching ``<pre>\r\nnsh> `` as one
+        # pattern consumes through the prompt after the PRE output.
+        self.proc.sendline(f"echo {pre}")
+        self.proc.expect(f"{pre}\r\n{prompt_re}", timeout=timeout)
+
+        # Phase 2: send the real command; match line-anchored prompt.
         self.proc.sendline(cmd)
-        if cmd:
-            # Wait for the command echo (first word only, as long
-            # commands may be wrapped/garbled by the terminal)
-            first_word = cmd.split()[0]
-            self.proc.expect(re.escape(first_word), timeout=timeout)
-        self.proc.expect(expected, timeout=timeout)
-        return self.proc.before.decode(errors="ignore")
+        self.proc.expect(f"\r\n{prompt_re}", timeout=timeout)
+        raw = self.proc.before.decode(errors="ignore")
+
+        # ``raw`` is "<cmd_echo>\r\n[<output>]" — strip the cmd echo
+        # line. For no-output commands ``raw`` is just ``<cmd_echo>``
+        # with no trailing ``\r\n``, so we return the empty string.
+        if "\r\n" in raw:
+            return raw.split("\r\n", 1)[1]
+        return ""
 
     def waitUser(self, msg):
         """Pause and wait for user confirmation (interactive tests)."""
@@ -160,7 +182,7 @@ class NuttxSerial:
         Returns dict with keys: ``total``, ``used``, ``free``, ``largest``.
         Values are in bytes.
         """
-        output = self.sendCommand("free", PROMPT)
+        output = self.sendCommand("free")
         result = {}
         for line in output.splitlines():
             if "Umem" in line:
@@ -212,8 +234,11 @@ def p(pytestconfig):
 
 
 @pytest.fixture(autouse=True)
-def check_memory_leak(p):
+def check_memory_leak(request, p):
     """Record memory before/after each test and warn on leaks."""
+    if request.node.get_closest_marker("no_memcheck"):
+        yield
+        return
     before = p.getFree()
     yield
     after = p.getFree()

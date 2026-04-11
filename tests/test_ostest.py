@@ -11,16 +11,15 @@ import pytest
 @pytest.mark.skip(reason="ostest hangs at signest_test (issue #26)")
 def test_ostest(p):
     """E-1: NuttX OS test suite."""
-    # ostest is long-running on this MCU; if expect() returns without
-    # raising, the success pattern was found.
-    p.sendCommand("ostest", "Exiting with status 0", timeout=900)
+    output = p.sendCommand("ostest", timeout=900)
+    assert "Exiting with status 0" in output
 
 
-@pytest.mark.slow
 def test_coremark(p):
     """E-2: CoreMark benchmark."""
-    # Wait for the final "CoreMark 1.0 :" summary line, then collect
-    # everything up to the next prompt.
-    p.sendCommand("coremark", r"CoreMark 1\.0 :", timeout=300)
-    output = p.sendCommand("", timeout=10)
-    print(f"\n--- CoreMark Result ---{output}")
+    output = p.sendCommand("coremark", timeout=300)
+    assert "CoreMark 1.0 :" in output, "coremark summary line missing"
+    for line in output.splitlines():
+        if "CoreMark 1.0" in line:
+            print(f"\n--- CoreMark Result ---\n{line}")
+            break

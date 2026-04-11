@@ -315,6 +315,45 @@ static void test_green(void)
   printf("Status LED: green\n");
 }
 
+static void test_smoke(void)
+{
+  int r;
+  int c;
+
+  /* Light each LED group briefly in turn, then clear everything.
+   * Used by the automated smoke test: proves each output channel is
+   * reachable and that NSH returns control promptly (~0.5 s total).
+   */
+
+  printf("smoke: status\n");
+  set_status_rgb(0, MAX_DUTY, 0);
+  usleep(100000);
+  set_status_rgb(0, 0, 0);
+
+  printf("smoke: battery\n");
+  set_battery_rgb(0, MAX_DUTY, 0);
+  usleep(100000);
+  set_battery_rgb(0, 0, 0);
+
+  printf("smoke: bluetooth\n");
+  set_bt_rgb(0, MAX_DUTY, 0);
+  usleep(100000);
+  set_bt_rgb(0, 0, 0);
+
+  printf("smoke: matrix\n");
+  for (r = 0; r < 5; r++)
+    {
+      for (c = 0; c < 5; c++)
+        {
+          tlc5955_set_duty(g_matrix[r][c], MAX_DUTY);
+        }
+    }
+  usleep(100000);
+  matrix_clear();
+
+  printf("smoke: done\n");
+}
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -332,6 +371,7 @@ int led_main(int argc, FAR char *argv[])
       printf("  blink     - Blink green\n");
       printf("  breathe   - Breathing effect\n");
       printf("  matrix    - 5x5 matrix patterns\n");
+      printf("  smoke     - Quick smoke test (each LED group once)\n");
       printf("  all       - Run all tests\n");
       printf("  off       - All LEDs off\n");
       return 1;
@@ -368,6 +408,10 @@ int led_main(int argc, FAR char *argv[])
   else if (strcmp(argv[1], "matrix") == 0)
     {
       test_matrix();
+    }
+  else if (strcmp(argv[1], "smoke") == 0)
+    {
+      test_smoke();
     }
   else if (strcmp(argv[1], "all") == 0)
     {
