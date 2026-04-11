@@ -1,12 +1,21 @@
 """Category D: Crash handling tests.
 
 Each test triggers a crash, waits for watchdog reset (~3s),
-and verifies NSH prompt recovery.
+and verifies NSH prompt recovery. An autouse fixture reboots the
+board before each test so every crash scenario starts from a clean,
+freshly-booted heap regardless of what the previous test left behind.
 """
 
 import pytest
 
 from conftest import PROMPT
+
+
+@pytest.fixture(autouse=True)
+def _reboot_before_crash(p):
+    """Reboot the board before every crash test (fresh heap / state)."""
+    p.reboot()
+    yield
 
 
 def _crash_and_recover(p, cmd, fault_pattern):
@@ -21,25 +30,25 @@ def _crash_and_recover(p, cmd, fault_pattern):
     p.reconnect(timeout=15)
 
 
-@pytest.mark.skip(reason="leaks ~8KB on each run via watchdog recovery path (issue #33)")
+@pytest.mark.no_memcheck
 def test_crash_assert(p):
     """D-1: ASSERT crash and watchdog recovery."""
     _crash_and_recover(p, "crash assert", "up_assert")
 
 
-@pytest.mark.skip(reason="watchdog does not reset on hard fault (issue #25)")
+@pytest.mark.no_memcheck
 def test_crash_null(p):
     """D-2: NULL pointer dereference crash and recovery."""
     _crash_and_recover(p, "crash null", r"Hard Fault|HardFault")
 
 
-@pytest.mark.skip(reason="watchdog does not reset on hard fault (issue #25)")
+@pytest.mark.no_memcheck
 def test_crash_divzero(p):
     """D-3: Division by zero crash and recovery."""
     _crash_and_recover(p, "crash divzero", "Fault")
 
 
-@pytest.mark.skip(reason="watchdog does not reset on hard fault (issue #25)")
+@pytest.mark.no_memcheck
 def test_crash_stackoverflow(p):
     """D-4: Stack overflow crash and recovery."""
     _crash_and_recover(p, "crash stackoverflow", r"assert|Fault")

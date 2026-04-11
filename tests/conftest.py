@@ -79,6 +79,14 @@ class NuttxSerial:
             self.log_file.close()
             self.log_file = None
 
+    def reboot(self, timeout=15):
+        """Issue NSH ``reboot`` and reconnect after the board resets."""
+        try:
+            self.proc.sendline("reboot")
+        except Exception:
+            pass  # the board may already be mid-reset
+        self.reconnect(timeout=timeout)
+
     def reconnect(self, timeout=15):
         """Close and reopen the serial port (after USB replug / reset)."""
         # fdspawn owns the underlying fd; mark serial closed first to

@@ -48,10 +48,10 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 | A. 起動・初期化 | 4 | 4 | 0 | 0 |
 | B. ペリフェラル | 9 | 8 | 1 | 0 |
 | C. システム | 6 | 4 | 2 | 0 |
-| D. クラッシュ | 4 | 0 | 0 | 4 ([#25](https://github.com/owhinata/spike-nx/issues/25), [#33](https://github.com/owhinata/spike-nx/issues/33)) |
+| D. クラッシュ | 4 | 4 | 0 | 0 |
 | E. OSテスト | 2 | 1 | 0 | 1 ([#26](https://github.com/owhinata/spike-nx/issues/26)) |
 | F. サウンド | 13 | 9 | 4 | 0 |
-| **合計** | **38** | **27** | **7** | **5** |
+| **合計** | **38** | **31** | **7** | **1** |
 
 ## A. 起動・初期化 (`test_boot.py`)
 
@@ -187,31 +187,28 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 
 ## D. クラッシュハンドリング (`test_crash.py`)
 
-各テストはクラッシュ → ウォッチドッグリセット（約 3 秒） → NSH 再接続のサイクル。
+各テストはクラッシュ → ウォッチドッグリセット（約 3 秒） → NSH 再接続のサイクル。`_reboot_before_crash` autouse fixture で各テスト前にも明示的にボードをリブートし、常にクリーンなヒープから開始する。ヒープ比較は `@pytest.mark.no_memcheck` で無効化。
 
-### D-1: test_crash_assert `@skip`
+### D-1: test_crash_assert
 
 - **コマンド**: `crash assert`
 - **判定**: `up_assert` → リセット → `nsh> ` 復帰
-- **スキップ理由**: watchdog recovery 経路で毎回約 8KB のメモリリークが発生する ([#33](https://github.com/owhinata/spike-nx/issues/33))
 
-### D-2: test_crash_null `@skip`
+### D-2: test_crash_null
 
 - **コマンド**: `crash null`
-- **判定**: `Hard Fault` → リセット → `nsh> ` 復帰
-- **スキップ理由**: ハードフォルト時にウォッチドッグリセットが効かず実機ハング ([#25](https://github.com/owhinata/spike-nx/issues/25))
+- **判定**: `Hard Fault` → IWDG リセット → `nsh> ` 復帰
+- **備考**: `CONFIG_WATCHDOG_AUTOMONITOR=y` ([#31](https://github.com/owhinata/spike-nx/issues/31)) により IWDG が起動・ソフトキックされるため、ハードフォルトで割込無効化された後も約 3 秒で IWDG リセットが入り復帰する
 
-### D-3: test_crash_divzero `@skip`
+### D-3: test_crash_divzero
 
 - **コマンド**: `crash divzero`
-- **判定**: `Fault` → リセット → `nsh> ` 復帰
-- **スキップ理由**: 同上 ([#25](https://github.com/owhinata/spike-nx/issues/25))
+- **判定**: `Fault` → IWDG リセット → `nsh> ` 復帰
 
-### D-4: test_crash_stackoverflow `@skip`
+### D-4: test_crash_stackoverflow
 
 - **コマンド**: `crash stackoverflow`
-- **判定**: `assert|Fault` → リセット → `nsh> ` 復帰
-- **スキップ理由**: 同上 ([#25](https://github.com/owhinata/spike-nx/issues/25))
+- **判定**: `assert|Fault` → IWDG リセット → `nsh> ` 復帰
 
 ## E. OS テスト (`test_ostest.py`)
 

@@ -48,10 +48,10 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 | A. Boot & Init | 4 | 4 | 0 | 0 |
 | B. Peripherals | 9 | 8 | 1 | 0 |
 | C. System | 6 | 4 | 2 | 0 |
-| D. Crash Handling | 4 | 0 | 0 | 4 ([#25](https://github.com/owhinata/spike-nx/issues/25), [#33](https://github.com/owhinata/spike-nx/issues/33)) |
+| D. Crash Handling | 4 | 4 | 0 | 0 |
 | E. OS Tests | 2 | 1 | 0 | 1 ([#26](https://github.com/owhinata/spike-nx/issues/26)) |
 | F. Sound | 13 | 9 | 4 | 0 |
-| **Total** | **38** | **27** | **7** | **5** |
+| **Total** | **38** | **31** | **7** | **1** |
 
 ## A. Boot & Initialization (`test_boot.py`)
 
@@ -187,31 +187,28 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 
 ## D. Crash Handling (`test_crash.py`)
 
-Each test triggers a crash → watchdog reset (~3s) → NSH reconnect cycle.
+Each test triggers a crash → watchdog reset (~3 s) → NSH reconnect cycle. The `_reboot_before_crash` autouse fixture also reboots the board *before* each test so every scenario starts from a clean heap regardless of what the previous test left behind. Heap comparison is disabled with `@pytest.mark.no_memcheck`.
 
-### D-1: test_crash_assert `@skip`
+### D-1: test_crash_assert
 
 - **Command**: `crash assert`
 - **Pass criteria**: `up_assert` → reset → `nsh> ` recovery
-- **Skip reason**: The watchdog recovery path leaks ~8 KB per run ([#33](https://github.com/owhinata/spike-nx/issues/33))
 
-### D-2: test_crash_null `@skip`
+### D-2: test_crash_null
 
 - **Command**: `crash null`
-- **Pass criteria**: `Hard Fault` → reset → `nsh> ` recovery
-- **Skip reason**: Watchdog does not reset on hard fault — board hangs ([#25](https://github.com/owhinata/spike-nx/issues/25))
+- **Pass criteria**: `Hard Fault` → IWDG reset → `nsh> ` recovery
+- **Note**: `CONFIG_WATCHDOG_AUTOMONITOR=y` ([#31](https://github.com/owhinata/spike-nx/issues/31)) keeps IWDG running and software-kicked, so after a hard fault disables interrupts the IWDG resets the board after ~3 s and the test recovers.
 
-### D-3: test_crash_divzero `@skip`
+### D-3: test_crash_divzero
 
 - **Command**: `crash divzero`
-- **Pass criteria**: `Fault` → reset → `nsh> ` recovery
-- **Skip reason**: Same as above ([#25](https://github.com/owhinata/spike-nx/issues/25))
+- **Pass criteria**: `Fault` → IWDG reset → `nsh> ` recovery
 
-### D-4: test_crash_stackoverflow `@skip`
+### D-4: test_crash_stackoverflow
 
 - **Command**: `crash stackoverflow`
-- **Pass criteria**: `assert|Fault` → reset → `nsh> ` recovery
-- **Skip reason**: Same as above ([#25](https://github.com/owhinata/spike-nx/issues/25))
+- **Pass criteria**: `assert|Fault` → IWDG reset → `nsh> ` recovery
 
 ## E. OS Tests (`test_ostest.py`)
 
