@@ -37,7 +37,35 @@
 #define TARGET_SR       50000
 #define MIN_SR          1000
 #define MAX_SR          100000
-#define AMPLITUDE       0x3f00  /* ~half of 0x7fff, pleasant volume */
+
+/* pybricks-compatible volume curve at 10% steps (same table used by
+ * the kernel tune parser).  Maps volume [0..100] to amplitude [0..0x7fff].
+ */
+
+static const uint16_t g_volume_curve[11] =
+{
+  0,    943,   2130,   3624,   5505,   7873,
+  10851,  14607,  19331,  25280,  32767
+};
+
+static uint16_t amplitude_from_volume(int volume)
+{
+  if (volume < 0)
+    {
+      volume = 0;
+    }
+
+  if (volume > 100)
+    {
+      volume = 100;
+    }
+
+  int idx = volume / 10;
+  int rem = volume - idx * 10;
+  uint32_t lo = g_volume_curve[idx];
+  uint32_t hi = (idx < 10) ? g_volume_curve[idx + 1] : g_volume_curve[10];
+  return (uint16_t)(lo + ((hi - lo) * rem) / 10);
+}
 
 /****************************************************************************
  * Private: waveform construction
@@ -53,7 +81,8 @@ struct pcm_blob_s
  * sample rate.  Returns blob total size in bytes.
  */
 
-static size_t build_square(struct pcm_blob_s *blob, uint32_t freq_hz)
+static size_t build_square(struct pcm_blob_s *blob, uint32_t freq_hz,
+                            uint16_t amplitude)
 {
   if (freq_hz == 0)
     {
@@ -84,8 +113,8 @@ static size_t build_square(struct pcm_blob_s *blob, uint32_t freq_hz)
       sr = MAX_SR;
     }
 
-  uint16_t low  = 0x8000 - AMPLITUDE;
-  uint16_t high = 0x8000 + AMPLITUDE;
+  uint16_t low  = 0x8000 - amplitude;
+  uint16_t high = 0x8000 + amplitude;
   uint32_t half = n / 2;
 
   for (uint32_t i = 0; i < half; i++)
@@ -114,15 +143,28 @@ static size_t build_square(struct pcm_blob_s *blob, uint32_t freq_hz)
 
 static int cmd_beep(uint32_t freq_hz, uint32_t dur_ms)
 {
-  struct pcm_blob_s blob;
-  size_t            total = build_square(&blob, freq_hz);
-
-  int fd = open(PCM_DEV, O_WRONLY);
+  int fd = open(PCM_DEV, O_RDWR);
   if (fd < 0)
     {
       fprintf(stderr, "sound: open(%s) failed: %d\n", PCM_DEV, errno);
       return 1;
     }
+
+  /* Query the shared board volume so that `sound volume N` affects
+   * /dev/pcm0 playback the same way it affects /dev/tone0.  The raw
+   * PCM layer deliberately does not scale user samples, so apps/sound
+   * bakes the amplitude into the waveform here.
+   */
+
+  int volume = 100;
+  if (ioctl(fd, TONEIOC_VOLUME_GET, (unsigned long)(uintptr_t)&volume) < 0)
+    {
+      volume = 100;
+    }
+
+  struct pcm_blob_s blob;
+  size_t            total = build_square(&blob, freq_hz,
+                                         amplitude_from_volume(volume));
 
   ssize_t w = write(fd, &blob, total);
   if (w < 0)
