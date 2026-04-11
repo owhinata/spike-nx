@@ -48,8 +48,8 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 | A. 起動・初期化 | 4 | 4 | 0 | 0 |
 | B. ペリフェラル | 8 | 7 | 1 | 0 |
 | C. システム | 6 | 4 | 2 | 0 |
-| D. クラッシュ | 4 | 1 | 0 | 3 (#25) |
-| E. OSテスト | 2 | 1 | 0 | 1 (#26) |
+| D. クラッシュ | 4 | 1 | 0 | 3 ([#25](https://github.com/owhinata/spike-nx/issues/25)) |
+| E. OSテスト | 2 | 1 | 0 | 1 ([#26](https://github.com/owhinata/spike-nx/issues/26)) |
 | **合計** | **24** | **17** | **3** | **4** |
 
 ## A. 起動・初期化 (`test_boot.py`)
@@ -190,19 +190,19 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 
 - **コマンド**: `crash null`
 - **判定**: `Hard Fault` → リセット → `nsh> ` 復帰
-- **スキップ理由**: ハードフォルト時にウォッチドッグリセットが効かず実機ハング (#25)
+- **スキップ理由**: ハードフォルト時にウォッチドッグリセットが効かず実機ハング ([#25](https://github.com/owhinata/spike-nx/issues/25))
 
 ### D-3: test_crash_divzero `@skip`
 
 - **コマンド**: `crash divzero`
 - **判定**: `Fault` → リセット → `nsh> ` 復帰
-- **スキップ理由**: 同上 (#25)
+- **スキップ理由**: 同上 ([#25](https://github.com/owhinata/spike-nx/issues/25))
 
 ### D-4: test_crash_stackoverflow `@skip`
 
 - **コマンド**: `crash stackoverflow`
 - **判定**: `assert|Fault` → リセット → `nsh> ` 復帰
-- **スキップ理由**: 同上 (#25)
+- **スキップ理由**: 同上 ([#25](https://github.com/owhinata/spike-nx/issues/25))
 
 ## E. OS テスト (`test_ostest.py`) `@slow`
 
@@ -213,7 +213,7 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 - **コマンド**: `ostest`
 - **判定**: `Exiting with status 0`
 - **タイムアウト**: 900 秒
-- **スキップ理由**: signest_test（nested signal handler test）でハング (#26)
+- **スキップ理由**: signest_test（nested signal handler test）でハング ([#26](https://github.com/owhinata/spike-nx/issues/26))
 
 ### E-2: test_coremark
 

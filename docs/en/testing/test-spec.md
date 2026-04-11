@@ -48,8 +48,8 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 | A. Boot & Init | 4 | 4 | 0 | 0 |
 | B. Peripherals | 8 | 7 | 1 | 0 |
 | C. System | 6 | 4 | 2 | 0 |
-| D. Crash Handling | 4 | 1 | 0 | 3 (#25) |
-| E. OS Tests | 2 | 1 | 0 | 1 (#26) |
+| D. Crash Handling | 4 | 1 | 0 | 3 ([#25](https://github.com/owhinata/spike-nx/issues/25)) |
+| E. OS Tests | 2 | 1 | 0 | 1 ([#26](https://github.com/owhinata/spike-nx/issues/26)) |
 | **Total** | **24** | **17** | **3** | **4** |
 
 ## A. Boot & Initialization (`test_boot.py`)
@@ -190,19 +190,19 @@ Each test triggers a crash → watchdog reset (~3s) → NSH reconnect cycle.
 
 - **Command**: `crash null`
 - **Pass criteria**: `Hard Fault` → reset → `nsh> ` recovery
-- **Skip reason**: Watchdog does not reset on hard fault — board hangs (#25)
+- **Skip reason**: Watchdog does not reset on hard fault — board hangs ([#25](https://github.com/owhinata/spike-nx/issues/25))
 
 ### D-3: test_crash_divzero `@skip`
 
 - **Command**: `crash divzero`
 - **Pass criteria**: `Fault` → reset → `nsh> ` recovery
-- **Skip reason**: Same as above (#25)
+- **Skip reason**: Same as above ([#25](https://github.com/owhinata/spike-nx/issues/25))
 
 ### D-4: test_crash_stackoverflow `@skip`
 
 - **Command**: `crash stackoverflow`
 - **Pass criteria**: `assert|Fault` → reset → `nsh> ` recovery
-- **Skip reason**: Same as above (#25)
+- **Skip reason**: Same as above ([#25](https://github.com/owhinata/spike-nx/issues/25))
 
 ## E. OS Tests (`test_ostest.py`) `@slow`
 
@@ -213,7 +213,7 @@ Run only after kernel CONFIG changes. Exclude with `-m "not slow"`.
 - **Command**: `ostest`
 - **Pass criteria**: `Exiting with status 0`
 - **Timeout**: 900 seconds
-- **Skip reason**: Hangs at signest_test (nested signal handler test) (#26)
+- **Skip reason**: Hangs at signest_test (nested signal handler test) ([#26](https://github.com/owhinata/spike-nx/issues/26))
 
 ### E-2: test_coremark
 
