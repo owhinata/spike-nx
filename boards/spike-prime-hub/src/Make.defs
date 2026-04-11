@@ -2,7 +2,7 @@
 # boards/spike-prime-hub/src/Make.defs
 ############################################################################
 
-CSRCS = stm32_boot.c stm32_bringup.c
+CSRCS = stm32_boot.c stm32_bringup.c stm32_sound.c stm32_tone.c stm32_pcm.c
 
 ifeq ($(CONFIG_ARCH_BUTTONS),y)
 CSRCS += stm32_buttons.c
