@@ -203,6 +203,51 @@ Enabled with `CONFIG_APP_SOUND=y`.
 
 `sound beep` is the canonical diagnostic path for `/dev/pcm0` since the raw PCM device cannot be driven from `echo` (it expects a binary header).
 
+## Feature comparison with pybricks
+
+The low-level layer of this driver is a 1:1 equivalent of pybricks `pbdrv_sound_start(data, length, sample_rate)`.  pybricks' high-level API (`Speaker.beep` / `Speaker.play_notes` / `Speaker.volume`) lives in MicroPython; this project re-implements the equivalent functionality in the kernel and an NSH builtin.
+
+### Shared behavior
+
+- **Audio chain**: DAC1 CH1 (PA4) → external amplifier (PC10) → speaker.  Identical to pybricks.
+- **Cyclic DMA playback**: one period of the waveform loops until stop (buffer = single period, stop is explicit).
+- **Waveform**: 128–256 sample square wave, centered on the midpoint.
+- **Volume curve**: pybricks' `(10^(v/100) − 1) / 9 * INT16_MAX` precomputed in a 10 %-step lookup table (same exponential curve).
+- **TIM6 as the sample trigger**: same basic timer as pybricks; no general-purpose timer is consumed.
+- **Volume changes apply on the next note**: the currently playing waveform keeps its amplitude.
+- **No file playback**: neither pybricks nor this driver supports streaming long WAV/RSF content.
+
+### Features this driver has that pybricks does not
+
+| Feature | This driver | pybricks |
+|---------|-------------|----------|
+| Tune playback from a shell | `echo "C4/4" > /dev/tone0` drives the speaker directly | Requires a MicroPython runtime |
+| In-kernel tune parser | `stm32_tone.c` parses `"C4/4 D#5/8. R/4 G4/4_"` inside the kernel | Parsed in Python on the MicroPython side |
+| Single-call binary PCM ABI | `struct pcm_write_hdr_s` (version/hdr_size/flags) delivered in one `write()` | Direct C function call (internal API only, no ABI) |
+| Forward-compatible version field | `version` / `hdr_size` allow new fields to be appended later | None (internal C API only) |
+| Multi-process ownership tracking | `filep`-based owner + `open_count` gate takeover and cleanup | Single MicroPython runtime, no multi-process concept |
+| Mid-playback interruption | 20 ms `nxsig_usleep` slices + `atomic_bool stop_flag` driven by `TONEIOC_STOP` / `Ctrl-C` / a concurrent `pcm0` write | `beep()` blocks for the full duration (no mid-note stop) |
+| Startup pop suppression | DAC enabled → 2 ms settling delay → AMP_EN HIGH | `HAL_DAC_Start_DMA` followed immediately by AMP HIGH (no delay) |
+| Automatic `close()` stop | Stops only when owner matches; safe across fork/dup | Not applicable (single-process MicroPython) |
+| `TONEIOC_*` ioctl space | Board-local `_BOARDIOC()` codes, no clash with upstream ioctl spaces | N/A |
+| NSH diagnostic commands | `sound beep`, `sound notes`, `sound volume`, `sound off`, `sound selftest` | Needs a pybricks-micropython script |
+
+### Features pybricks has that this driver does not
+
+| Feature | pybricks | This driver |
+|---------|----------|-------------|
+| MicroPython bindings | `hub.speaker.beep(500, 100)` and friends | No Python runtime on NuttX |
+| Non-blocking beep completion | `pb_type_Speaker_beep_test_completion` integrates with the cooperative scheduler | `write()` + `usleep` is synchronous (Ctrl-C and ioctl still interrupt) |
+| Python `play_notes()` generator | Runs as a `notes_generator` and can continue alongside other tasks | `/dev/tone0` write is a single blocking call |
+| Always-on sample timer | `pbdrv_sound_init` starts TIM6 once and leaves it running | `TIM6.CEN` is toggled 0→1 for every playback |
+| DMA zero-copy buffer | The caller's buffer is handed straight to the DMA engine | `/dev/pcm0` copies the user payload into a kernel BSS buffer (FLAT/PROTECTED safety) |
+
+### Keeping compatibility in mind
+
+- **The low-level API is 1:1 with pybricks `pbdrv_sound_start`**, so future interoperability (running pybricks on top of this driver, or porting pybricks' tune generator on top of this one) stays straightforward.
+- **The waveform format and DAC register layout are identical**, so sending a pybricks sample buffer (`INT16_MAX` center) through `/dev/pcm0` only needs a `0x8000` offset.
+- **`TONEIOC_*` lives in a board-local ioctl space**, which leaves room for a future pybricks-compatible higher-level API in a separate space (e.g. `SNDIOC_*`) without collisions.
+
 ## Known limitations
 
 - **FLAT build only**.  `CONFIG_BUILD_PROTECTED` would need a `copyin()` helper for user pointers.
@@ -212,9 +257,36 @@ Enabled with `CONFIG_APP_SOUND=y`.
 
 ## Design notes
 
-The original v3 design layered NuttX `tone_register()` on top of `stm32_oneshot` + TIM10, but it failed once we discovered that STM32F413 `TIM10/11/13/14` do not support one-pulse mode (`CR1.OPM`); see [issue #27](https://github.com/owhinata/spike-nx/issues/27), [#28](https://github.com/owhinata/spike-nx/issues/28), and [#30](https://github.com/owhinata/spike-nx/issues/30).  Every OPM-capable timer (TIM1/2–5/8/9/12) is already reserved for pybricks-equivalent functionality.
+### First attempt: NuttX `tone_register()` over a oneshot timer
 
-Starting from v4 Option B (in-kernel tune parser + synchronous `nxsig_usleep`), the design converged through four Codex review rounds on: dual char devices, a single-call PCM ABI, ownership-based `close()`, per-note mutex release, and an atomic `stop_flag`.
+The initial design reused NuttX's stock `drivers/audio/tone.c` (`tone_register()`) by presenting DAC1 as a PWM lower-half and delegating note-length timing to a `oneshot_lowerhalf_s` built on `stm32_oneshot`.
+
+That approach was abandoned after discovering that **no oneshot timer is available on the F413**:
+
+- `stm32_oneshot` drives one-pulse mode by writing `CR1 = CEN | ARPE | OPM`, but the STM32F413 `TIM10/11/13/14` do not support the `CR1.OPM` bit at all (see RM0430 §19.5.1).  The code compiles but never fires.
+- Every OPM-capable timer (`TIM1/2/3/4/5/8/9/12`) is already reserved for pybricks-equivalent functionality:
+    - `TIM1/3/4` — motor PWM (three pairs)
+    - `TIM2` — ADC DMA trigger (1 kHz)
+    - `TIM5` — battery charger ISET PWM
+    - `TIM8` — Bluetooth 32 kHz clock
+    - `TIM9` — NuttX `CONFIG_STM32_TICKLESS_TIMER`
+    - `TIM12` — TLC5955 GSCLK (9.6 MHz)
+- That forced note-length timing **off of any additional oneshot timer**.
+
+Related issues: [#27](https://github.com/owhinata/spike-nx/issues/27), [#28](https://github.com/owhinata/spike-nx/issues/28), [#30](https://github.com/owhinata/spike-nx/issues/30).
+
+### Converging on the current design
+
+Following pybricks' approach, the kernel layer was trimmed down to "take a waveform buffer plus a sample rate and stream it via circular DMA", and note-length timing was moved to synchronous blocking inside `nxsig_usleep`.  That eliminated the oneshot dependency entirely and let the whole sound path run off `TIM6` alone.
+
+Several Codex review rounds then settled the remaining details:
+
+1. **Two parallel char devices** — `/dev/tone0` for tune strings and `/dev/pcm0` for pybricks-compatible raw PCM, so NSH `echo` diagnostics and a single-call binary ABI are both available.
+2. **Single-call PCM ABI** (`struct pcm_write_hdr_s`) — removes the order dependency of a hypothetical `SETRATE` + `write()` pair and leaves room for extension via `version` / `hdr_size`.
+3. **Ownership-based `close()`** — the current `filep` is tracked as the owner; playback only stops when the same fd closes, so fork/dup cannot silence another process by accident.
+4. **Per-note mutex release + `atomic_bool stop_flag`** — `tone_write` drops the lock between slices so `TONEIOC_STOP`, `Ctrl-C`, and a concurrent `pcm0` write all interrupt playback within 20 ms.
+5. **Restricted `stop_flag` clearing** — only `tone_write` clears it at entry; `pcm_write` does not, so it cannot accidentally cancel a pending tone interrupt.
+6. **Start order: `TIM6 + DAC enable` → 2 ms settling delay → `AMP_EN HIGH`** — lets the DAC output reach its midpoint before the amplifier is unmuted, suppressing startup pops.
 
 ## Source references
 
