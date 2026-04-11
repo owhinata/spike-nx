@@ -280,7 +280,33 @@ int main(int argc, FAR char *argv[])
           return 1;
         }
 
-      return cmd_notes(argv[2]);
+      /* Join argv[2..argc-1] with spaces so NSH argument splitting does
+       * not drop everything after the first whitespace when the tune is
+       * passed without quotes (or when NSH strips quotes).
+       */
+
+      char buf[256];
+      size_t pos = 0;
+
+      for (int i = 2; i < argc && pos < sizeof(buf) - 1; i++)
+        {
+          size_t len = strlen(argv[i]);
+          if (i > 2 && pos < sizeof(buf) - 1)
+            {
+              buf[pos++] = ' ';
+            }
+
+          if (pos + len >= sizeof(buf))
+            {
+              len = sizeof(buf) - 1 - pos;
+            }
+
+          memcpy(buf + pos, argv[i], len);
+          pos += len;
+        }
+
+      buf[pos] = '\0';
+      return cmd_notes(buf);
     }
 
   if (strcmp(cmd, "volume") == 0)
