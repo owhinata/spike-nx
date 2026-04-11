@@ -200,7 +200,7 @@ picocom /dev/tty.usbmodem01
 - テスト実行: `.venv/bin/pytest tests/ -m "not slow" -D /dev/tty.usbmodem01`
 - 自動テストのみ: `-m "not slow and not interactive"`
 - OSテスト（ostest, coremark）はカーネル CONFIG 変更時のみ実行
-- テスト依存: `.venv/bin/pip install -r tests/requirements.txt`
+- テスト依存: `.venv/bin/pip install -r requirements.txt`
 
 ## 注意事項
 

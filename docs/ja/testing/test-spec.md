@@ -13,38 +13,44 @@ SPIKE Prime Hub NuttX プロジェクトの自動テスト環境。pexpect + pys
 ### テスト依存のインストール
 
 ```bash
-.venv/bin/pip install -r tests/requirements.txt
+.venv/bin/pip install -r requirements.txt
 ```
 
 ## 実行方法
 
+シリアルデバイスは `-D` オプションまたは環境変数 `NUTTX_DEVICE` で指定する。
+デフォルトは `/dev/tty.usbmodem01`。
+
 ```bash
-# 全テスト（slow 除外）
-.venv/bin/pytest tests/ -m "not slow" -D /dev/tty.usbmodem01
+# 環境変数で設定（推奨: .zshrc 等に追加）
+export NUTTX_DEVICE=/dev/tty.usbmodem01
 
-# 自動テストのみ（interactive も除外）
-.venv/bin/pytest tests/ -m "not slow and not interactive" -D /dev/tty.usbmodem01
+# 自動テストのみ（推奨、普段はこれ）
+.venv/bin/pytest tests/ -m "not slow and not interactive"
 
-# slow 含む全テスト（カーネル CONFIG 変更時）
-.venv/bin/pytest tests/ -D /dev/tty.usbmodem01
+# 自動 + interactive（目視・操作あり）
+.venv/bin/pytest tests/ -m "not slow"
+
+# 全テスト（slow 含む、カーネル CONFIG 変更時）
+.venv/bin/pytest tests/
 
 # 特定カテゴリのみ
-.venv/bin/pytest tests/test_drivers.py -D /dev/tty.usbmodem01
+.venv/bin/pytest tests/test_drivers.py
 
 # 特定テストのみ
-.venv/bin/pytest tests/test_drivers.py::test_battery_gauge -D /dev/tty.usbmodem01
+.venv/bin/pytest tests/test_drivers.py::test_battery_gauge
 ```
 
 ## テスト一覧
 
-| カテゴリ | 件数 | 完全自動 | 操作待ち |
-|----------|------|----------|----------|
-| A. 起動・初期化 | 4 | 4 | 0 |
-| B. ペリフェラル | 8 | 7 | 1 |
-| C. システム | 6 | 4 | 2 |
-| D. クラッシュ | 4 | 4 | 0 |
-| E. OSテスト | 2 | 2 | 0 |
-| **合計** | **24** | **21** | **3** |
+| カテゴリ | 件数 | 完全自動 | 操作待ち | スキップ |
+|----------|------|----------|----------|----------|
+| A. 起動・初期化 | 4 | 4 | 0 | 0 |
+| B. ペリフェラル | 8 | 7 | 1 | 0 |
+| C. システム | 6 | 4 | 2 | 0 |
+| D. クラッシュ | 4 | 1 | 0 | 3 (#25) |
+| E. OSテスト | 2 | 1 | 0 | 1 (#26) |
+| **合計** | **24** | **17** | **3** | **4** |
 
 ## A. 起動・初期化 (`test_boot.py`)
 
@@ -111,25 +117,27 @@ SPIKE Prime Hub NuttX プロジェクトの自動テスト環境。pexpect + pys
     1. CPU 負荷記録（fusion 前）
     2. `imu start` — デーモン起動
     3. 3 秒待機
-    4. `imu status` — `running: yes` 確認
-    5. `imu accel` — Z 軸 ≈ 9807 mm/s² 確認
-    6. `imu gyro` — 全軸 ≈ 0 確認
-    7. `imu upside` — 向き確認
-    8. CPU 負荷記録（fusion 中）
-    9. `imu stop` — デーモン停止
-- **判定**: ステータス・加速度 Z 軸 (8000-12000)・停止成功
+    4. `imu status` — `running:` + `yes` 確認
+    5. `imu accel` — Z 軸の絶対値 8000-12000 mm/s² 確認
+    6. `imu gyro` — `gyro:` を含む
+    7. `imu upside` — `up side:` を含む
+    8. CPU 負荷記録（fusion 中、約 15%）
+    9. `imu stop` — デーモン停止（try/finally で確実に停止）
+- **判定**: ステータス・加速度 Z 軸・停止成功
 
 ### B-7: test_i2c_scan
 
 - **目的**: I2C バス上の IMU 検出
 - **コマンド**: `i2c dev -b 2 0x03 0x77`
 - **判定**: `6a` を含む（LSM6DS3 アドレス）
+- **備考**: `i2c` コマンド未登録時は自動スキップ
 
 ### B-8: test_led_all `@interactive`
 
 - **目的**: LED の全パターン点灯
 - **コマンド**: `led all`
 - **判定**: `All tests done` + 目視確認
+- **タイムアウト**: 120 秒（Matrix LED シーケンスを含む）
 
 ## C. システムサービス (`test_system.py`)
 
@@ -143,13 +151,13 @@ SPIKE Prime Hub NuttX プロジェクトの自動テスト環境。pexpect + pys
 
 - **目的**: CPU 負荷情報の取得
 - **コマンド**: `cat /proc/cpuload`
-- **判定**: `CPU` を含む
+- **判定**: `%` を含む
 
 ### C-3: test_stackmonitor
 
-- **目的**: スタックモニターの動作
-- **コマンド**: `stkmon`
-- **判定**: `PID` を含む
+- **目的**: スタックモニターデーモンの起動・停止
+- **コマンド**: `stackmonitor_start` / `stackmonitor_stop`
+- **判定**: コマンドが見つかること、`/proc/0` に `stack` エントリが存在
 
 ### C-4: test_help_builtins
 
@@ -178,47 +186,45 @@ SPIKE Prime Hub NuttX プロジェクトの自動テスト環境。pexpect + pys
 - **コマンド**: `crash assert`
 - **判定**: `up_assert` → リセット → `nsh> ` 復帰
 
-### D-2: test_crash_null
+### D-2: test_crash_null `@skip`
 
 - **コマンド**: `crash null`
 - **判定**: `Hard Fault` → リセット → `nsh> ` 復帰
+- **スキップ理由**: ハードフォルト時にウォッチドッグリセットが効かず実機ハング (#25)
 
-### D-3: test_crash_divzero
+### D-3: test_crash_divzero `@skip`
 
 - **コマンド**: `crash divzero`
 - **判定**: `Fault` → リセット → `nsh> ` 復帰
+- **スキップ理由**: 同上 (#25)
 
-### D-4: test_crash_stackoverflow
+### D-4: test_crash_stackoverflow `@skip`
 
 - **コマンド**: `crash stackoverflow`
 - **判定**: `assert|Fault` → リセット → `nsh> ` 復帰
+- **スキップ理由**: 同上 (#25)
 
 ## E. OS テスト (`test_ostest.py`) `@slow`
 
 カーネル CONFIG 変更時のみ実行。通常は `-m "not slow"` で除外。
 
-### E-1: test_ostest
+### E-1: test_ostest `@skip`
 
 - **コマンド**: `ostest`
 - **判定**: `Exiting with status 0`
-- **タイムアウト**: 300 秒
+- **タイムアウト**: 900 秒
+- **スキップ理由**: signest_test（nested signal handler test）でハング (#26)
 
 ### E-2: test_coremark
 
 - **コマンド**: `coremark`
-- **判定**: `CoreMark 1.0` を含む
-- **タイムアウト**: 120 秒
+- **判定**: `CoreMark 1.0 :` を含む
+- **タイムアウト**: 300 秒
+- **実測結果**: 170.82 iterations/sec (STM32F413, Cortex-M4)
 
 ## メモリリーク検出
 
 各テストの前後で `free` コマンドを実行し、ヒープメモリの空き容量を比較する。テスト後に 1KB 以上の減少がある場合は警告を出力する。
 
-## テスト結果記録テンプレート
-
-```
-日付: YYYY-MM-DD
-コミット: <hash>
-テスト対象: <カテゴリ>
-結果: PASS / FAIL
-備考: <特記事項>
-```
+!!! note
+    `test_power_off` 等リセットを伴うテストでは、リセット前後のヒープ初期状態の差分で警告が出ることがあるが、メモリリークではない。

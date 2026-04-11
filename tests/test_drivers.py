@@ -92,6 +92,6 @@ def test_i2c_scan(p):
 @pytest.mark.interactive
 def test_led_all(p):
     """B-8: LED all-test (requires visual confirmation)."""
-    output = p.sendCommand("led all", timeout=30)
+    output = p.sendCommand("led all", timeout=120)
     assert "All tests done" in output
     p.waitUser("Confirm: Did the LEDs light up correctly?")

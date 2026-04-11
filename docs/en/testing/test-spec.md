@@ -13,38 +13,44 @@ Automated test environment for the SPIKE Prime Hub NuttX project. Uses pexpect +
 ### Installing Test Dependencies
 
 ```bash
-.venv/bin/pip install -r tests/requirements.txt
+.venv/bin/pip install -r requirements.txt
 ```
 
 ## Running Tests
 
-```bash
-# All tests (excluding slow)
-.venv/bin/pytest tests/ -m "not slow" -D /dev/tty.usbmodem01
+The serial device can be specified via the `-D` option or the `NUTTX_DEVICE` environment variable.
+Default is `/dev/tty.usbmodem01`.
 
-# Automated tests only (excluding interactive)
-.venv/bin/pytest tests/ -m "not slow and not interactive" -D /dev/tty.usbmodem01
+```bash
+# Set via environment variable (recommended: add to .zshrc)
+export NUTTX_DEVICE=/dev/tty.usbmodem01
+
+# Automated tests only (recommended for regular use)
+.venv/bin/pytest tests/ -m "not slow and not interactive"
+
+# Automated + interactive (visual/manual operation)
+.venv/bin/pytest tests/ -m "not slow"
 
 # All tests including slow (after kernel CONFIG changes)
-.venv/bin/pytest tests/ -D /dev/tty.usbmodem01
+.venv/bin/pytest tests/
 
 # Specific category
-.venv/bin/pytest tests/test_drivers.py -D /dev/tty.usbmodem01
+.venv/bin/pytest tests/test_drivers.py
 
 # Specific test
-.venv/bin/pytest tests/test_drivers.py::test_battery_gauge -D /dev/tty.usbmodem01
+.venv/bin/pytest tests/test_drivers.py::test_battery_gauge
 ```
 
 ## Test Summary
 
-| Category | Count | Automated | Interactive |
-|----------|-------|-----------|-------------|
-| A. Boot & Init | 4 | 4 | 0 |
-| B. Peripherals | 8 | 7 | 1 |
-| C. System | 6 | 4 | 2 |
-| D. Crash Handling | 4 | 4 | 0 |
-| E. OS Tests | 2 | 2 | 0 |
-| **Total** | **24** | **21** | **3** |
+| Category | Count | Automated | Interactive | Skipped |
+|----------|-------|-----------|-------------|---------|
+| A. Boot & Init | 4 | 4 | 0 | 0 |
+| B. Peripherals | 8 | 7 | 1 | 0 |
+| C. System | 6 | 4 | 2 | 0 |
+| D. Crash Handling | 4 | 1 | 0 | 3 (#25) |
+| E. OS Tests | 2 | 1 | 0 | 1 (#26) |
+| **Total** | **24** | **17** | **3** | **4** |
 
 ## A. Boot & Initialization (`test_boot.py`)
 
@@ -111,25 +117,27 @@ Automated test environment for the SPIKE Prime Hub NuttX project. Uses pexpect +
     1. Record CPU load (before fusion)
     2. `imu start` — start daemon
     3. Wait 3 seconds
-    4. `imu status` — verify `running: yes`
-    5. `imu accel` — Z-axis approx. 9807 mm/s²
-    6. `imu gyro` — all axes approx. 0
-    7. `imu upside` — check orientation
-    8. Record CPU load (during fusion)
-    9. `imu stop` — stop daemon
-- **Pass criteria**: Status OK, Z-axis in range (8000-12000), stop succeeds
+    4. `imu status` — verify `running:` + `yes`
+    5. `imu accel` — Z-axis absolute value 8000-12000 mm/s²
+    6. `imu gyro` — contains `gyro:`
+    7. `imu upside` — contains `up side:`
+    8. Record CPU load (during fusion, ~15%)
+    9. `imu stop` — stop daemon (try/finally ensures cleanup)
+- **Pass criteria**: Status OK, Z-axis in range, stop succeeds
 
 ### B-7: test_i2c_scan
 
 - **Purpose**: Detect IMU on I2C bus
 - **Command**: `i2c dev -b 2 0x03 0x77`
 - **Pass criteria**: Contains `6a` (LSM6DS3 address)
+- **Note**: Auto-skipped if `i2c` command not available
 
 ### B-8: test_led_all `@interactive`
 
 - **Purpose**: LED full pattern test
 - **Command**: `led all`
 - **Pass criteria**: `All tests done` + visual confirmation
+- **Timeout**: 120 seconds (includes Matrix LED sequences)
 
 ## C. System Services (`test_system.py`)
 
@@ -143,13 +151,13 @@ Automated test environment for the SPIKE Prime Hub NuttX project. Uses pexpect +
 
 - **Purpose**: CPU load info available
 - **Command**: `cat /proc/cpuload`
-- **Pass criteria**: Contains `CPU`
+- **Pass criteria**: Contains `%`
 
 ### C-3: test_stackmonitor
 
-- **Purpose**: Stack monitor operation
-- **Command**: `stkmon`
-- **Pass criteria**: Contains `PID`
+- **Purpose**: Stack monitor daemon starts and stops
+- **Command**: `stackmonitor_start` / `stackmonitor_stop`
+- **Pass criteria**: Command found, `/proc/0` contains `stack` entry
 
 ### C-4: test_help_builtins
 
@@ -178,47 +186,45 @@ Each test triggers a crash → watchdog reset (~3s) → NSH reconnect cycle.
 - **Command**: `crash assert`
 - **Pass criteria**: `up_assert` → reset → `nsh> ` recovery
 
-### D-2: test_crash_null
+### D-2: test_crash_null `@skip`
 
 - **Command**: `crash null`
 - **Pass criteria**: `Hard Fault` → reset → `nsh> ` recovery
+- **Skip reason**: Watchdog does not reset on hard fault — board hangs (#25)
 
-### D-3: test_crash_divzero
+### D-3: test_crash_divzero `@skip`
 
 - **Command**: `crash divzero`
 - **Pass criteria**: `Fault` → reset → `nsh> ` recovery
+- **Skip reason**: Same as above (#25)
 
-### D-4: test_crash_stackoverflow
+### D-4: test_crash_stackoverflow `@skip`
 
 - **Command**: `crash stackoverflow`
 - **Pass criteria**: `assert|Fault` → reset → `nsh> ` recovery
+- **Skip reason**: Same as above (#25)
 
 ## E. OS Tests (`test_ostest.py`) `@slow`
 
 Run only after kernel CONFIG changes. Exclude with `-m "not slow"`.
 
-### E-1: test_ostest
+### E-1: test_ostest `@skip`
 
 - **Command**: `ostest`
 - **Pass criteria**: `Exiting with status 0`
-- **Timeout**: 300 seconds
+- **Timeout**: 900 seconds
+- **Skip reason**: Hangs at signest_test (nested signal handler test) (#26)
 
 ### E-2: test_coremark
 
 - **Command**: `coremark`
-- **Pass criteria**: Contains `CoreMark 1.0`
-- **Timeout**: 120 seconds
+- **Pass criteria**: Contains `CoreMark 1.0 :`
+- **Timeout**: 300 seconds
+- **Measured result**: 170.82 iterations/sec (STM32F413, Cortex-M4)
 
 ## Memory Leak Detection
 
 The `free` command is executed before and after each test to compare heap memory. A warning is emitted if free memory decreases by more than 1KB after a test.
 
-## Test Result Template
-
-```
-Date: YYYY-MM-DD
-Commit: <hash>
-Test target: <category>
-Result: PASS / FAIL
-Notes: <remarks>
-```
+!!! note
+    Tests involving resets (e.g., `test_power_off`) may trigger memory warnings due to differences in initial heap state before and after the reset. This is not a memory leak.
