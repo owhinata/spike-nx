@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import time
 import uuid
 
@@ -35,9 +36,10 @@ PROMPT = "nsh> "
 # NuttxSerial — lightweight wrapper around pexpect + pyserial
 # ---------------------------------------------------------------------------
 class NuttxSerial:
-    def __init__(self, device, log_path):
+    def __init__(self, device, log_path, show_serial=False):
         self.device = device
         self.log_path = log_path
+        self.show_serial = show_serial
         self.ser = None
         self.proc = None
         self.log_file = None
@@ -56,6 +58,9 @@ class NuttxSerial:
         self.proc = pexpect.fdpexpect.fdspawn(
             self.ser, "wb", maxread=20000, logfile=self.log_file
         )
+        if self.show_serial:
+            # Tee bytes read from the serial port to stdout (live view).
+            self.proc.logfile_read = sys.stdout.buffer
 
     def close(self):
         if self.proc:
@@ -109,6 +114,8 @@ class NuttxSerial:
         self.proc = pexpect.fdpexpect.fdspawn(
             self.ser, "wb", maxread=20000, logfile=self.log_file
         )
+        if self.show_serial:
+            self.proc.logfile_read = sys.stdout.buffer
         # Wait for NSH prompt after reset (use raw expect, not sendCommand)
         for attempt in range(3):
             try:
@@ -206,6 +213,13 @@ def pytest_addoption(parser):
         default=os.environ.get("NUTTX_DEVICE", "/dev/tty.usbmodem01"),
         help="serial device (env: NUTTX_DEVICE, default: /dev/tty.usbmodem01)",
     )
+    parser.addoption(
+        "--show-serial",
+        "-S",
+        action="store_true",
+        default=False,
+        help="tee NSH serial I/O to stdout (still logged to tests/logs/)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +229,9 @@ def pytest_addoption(parser):
 def p(pytestconfig):
     """Session-scoped NuttX serial connection."""
     device = pytestconfig.getoption("-D")
+    show_serial = pytestconfig.getoption("--show-serial")
     log_path = os.path.join(os.path.dirname(__file__), "logs")
-    nuttx = NuttxSerial(device, log_path)
+    nuttx = NuttxSerial(device, log_path, show_serial=show_serial)
     # Ensure we have an NSH prompt (retry a few times)
     for attempt in range(3):
         try:
