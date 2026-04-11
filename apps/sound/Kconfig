@@ -1,0 +1,6 @@
+config APP_SOUND
+	tristate "Sound test utility"
+	default n
+	---help---
+		Play square-wave tones, tune strings, and control volume on the
+		SPIKE Prime Hub speaker via /dev/tone0 and /dev/pcm0.

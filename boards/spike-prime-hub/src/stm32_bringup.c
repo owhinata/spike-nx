@@ -130,5 +130,23 @@ int stm32_bringup(void)
     }
 #endif
 
+  ret = stm32_sound_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_sound_initialize() failed: %d\n", ret);
+    }
+
+  ret = stm32_tone_register();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_tone_register() failed: %d\n", ret);
+    }
+
+  ret = stm32_pcm_register();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_pcm_register() failed: %d\n", ret);
+    }
+
   return ret;
 }
