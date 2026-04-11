@@ -63,6 +63,7 @@ nav:
       - drivers/led.md
       - drivers/battery.md
       - drivers/power.md
+      - drivers/sound.md
   - 開発ガイド:
       - development/getting-started.md
       - development/debugging.md
