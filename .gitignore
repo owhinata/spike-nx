@@ -26,6 +26,11 @@ apps/**/.built
 apps/**/.depend
 apps/**/Make.dep
 
+# Test artifacts
+tests/logs/
+tests/__pycache__/
+.pytest_cache/
+
 # ELF build artifacts
 .elf-build/
 nuttx/nuttx-export

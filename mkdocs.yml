@@ -46,6 +46,7 @@ plugins:
             ドライバ: Drivers
             開発ガイド: Development
             NuttX: NuttX
+            テスト: Testing
 
 nav:
   - Home: index.md
@@ -71,6 +72,8 @@ nav:
       - nuttx/f413-support.md
       - nuttx/tickless-timer.md
       - nuttx/watchdog.md
+  - テスト:
+      - testing/test-spec.md
 
 markdown_extensions:
   - admonition
