@@ -14,7 +14,7 @@ Implementation plan for device drivers to control hardware on the SPIKE Prime Hu
 | 4 | Sensor Data Reading | `/dev/legosensor[N]` | **P1** | LUMP |
 | 5 | TLC5955 LED Driver | `/dev/leds` | **Done** | SPI1 |
 | 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **Done** | I2C2 |
-| 7 | DAC Audio | `/dev/dac0` | **P1** | DAC1 + TIM6 |
+| 7 | DAC Audio | `/dev/tone0` + `/dev/pcm0` | **Done** | DAC1 + DMA1 + TIM6 |
 | 8 | ADC Battery Monitoring | `/dev/bat0` | **Done** | ADC1 (6ch) + DMA2 |
 | 9 | USB CDC/ACM Console | `/dev/ttyACM0` | **Done** | OTG FS |
 | 10 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
@@ -67,21 +67,28 @@ PA13 (BAT_PWR_EN) and PA14 (PORT_3V3_EN) initialization is already implemented i
 - Mode switching via ioctl, data retrieval via read()
 - Supported: Color Sensor (Type 61), Ultrasonic Sensor (Type 62), Force Sensor (Type 63)
 
-#### 2b. TLC5955 LED Driver
+#### 2b. TLC5955 LED Driver (Done)
 
 - Control 48ch 16-bit PWM LED driver via SPI1
 - 5x5 LED matrix (48ch used out of RGB x 25 = 75ch)
 
-#### 2c. IMU (LSM6DS3TR-C)
+#### 2c. IMU (LSM6DS3TR-C) (Done)
 
 - Via I2C2, address 0x6A, INT1 DRDY interrupt
 - Axis sign correction: X=-1, Y=+1, Z=-1
 
-#### 2d. DAC Audio
+#### 2d. DAC Audio (Done)
 
-- Analog audio signal output via DAC1 CH1 (PA4)
-- Speaker enable: PC10 (GPIO HIGH)
-- Sample rate control via TIM6 TRGO, buffer transfer via DMA1_Stream5
+- Hardware path: DAC1 CH1 (PA4) -> amplifier enable (PC10) -> speaker
+- TIM6 TRGO drives the sample rate, DMA1 Stream 5 Channel 7 loops samples into `DAC1_DHR12L1`
+- Low-level layer (`stm32_sound.c`): `stm32_sound_play_pcm/stop_pcm` — 1:1 equivalent of pybricks `pbdrv_sound_start`, idempotent stop
+- Two char devices sit on top of the low-level layer:
+    - **`/dev/tone0`**: in-kernel pybricks tune string parser (`"T120 C4/4 D#5/8. R/4 G4/4_"`).  Slice-based `nxsig_usleep` (20 ms) + `atomic_bool stop_flag` allow mid-playback interruption; drivable straight from `echo`.
+    - **`/dev/pcm0`**: single-call raw PCM ABI (`struct pcm_write_hdr_s` v1).  `magic/version/hdr_size/flags/sample_rate/sample_count` header followed by `uint16_t` samples in one `write()`.
+- ioctl space: `TONEIOC_VOLUME_SET/GET/STOP` defined in `arch/board/board_sound.h` via `_BOARDIOC()` to avoid collisions with upstream `AUDIOIOC_*`/`SNDIOC_*`
+- `apps/sound` NSH builtin provides `beep` / `notes` / `volume` / `off` / `selftest`
+- STM32F413 workarounds: upstream Kconfig does not `select STM32_HAVE_DAC1`, so the RCC DAC1 clock is enabled directly; `stm32f413xx_pinmap.h` has no DAC1 OUT1 macro, so a board-local `GPIO_DAC1_OUT1_F413` is defined
+- Full details: [`docs/en/drivers/sound.md`](sound.md)
 
 #### 2e. ADC Battery Monitoring and Button Input (Done)
 
@@ -195,15 +202,28 @@ boards/spike-prime-hub/src/
   stm32_legoport.c      # I/O Port Manager (DCM)
   stm32_legomotor.c     # H-Bridge motor control
   stm32_tlc5955.c       # TLC5955 LED driver
-  stm32_lsm6ds3.c       # IMU (LSM6DS3TR-C) initialization
-  stm32_audio.c         # DAC audio + speaker control
+  stm32_lsm6dsl.c       # IMU (LSM6DS3TR-C) initialization
+  lsm6dsl_uorb.c        # IMU uORB publisher
+  stm32_sound.c         # DAC1 low-level PCM playback (stm32_sound_play_pcm/stop_pcm)
+  stm32_sound.h         # Board-internal shared state (g_sound: lock/owner/mode/volume/stop_flag)
+  stm32_tone.c          # /dev/tone0 (in-kernel pybricks tune parser)
+  stm32_pcm.c           # /dev/pcm0 (single-call raw PCM ABI v1)
   stm32_adc_dma.c       # ADC1 DMA continuous conversion (6ch, 1kHz)
   stm32_battery_gauge.c # Battery gauge lower-half (/dev/bat0)
   stm32_battery_charger.c # MP2639A charger lower-half (/dev/charge0)
   stm32_resistor_ladder.c # Resistor ladder decoder (buttons + CHG)
   stm32_power.c         # Center button monitor + power control
 
-drivers/lego/           # NuttX generic drivers
+boards/spike-prime-hub/include/
+  board_sound.h         # Public ABI: struct pcm_write_hdr_s + TONEIOC_*
+
+apps/sound/             # NSH builtin "sound" (beep/tone/notes/volume/off/selftest)
+  sound_main.c
+  Kconfig
+  Makefile
+  Make.defs
+
+drivers/lego/           # NuttX generic drivers (not yet implemented)
   lump_uart.c           # LUMP UART protocol engine
   lump_uart.h
   legodev.h             # Device type definitions
@@ -222,7 +242,7 @@ Phase 1d: H-Bridge Motor            (After 1c completion)
 Phase 2a: Sensor Reading            (After 1c completion)
 Phase 2b: TLC5955 LED               (Done)
 Phase 2c: IMU                       (Done)
-Phase 2d: DAC Audio                 (Can be implemented independently, DAC1 + TIM6)
+Phase 2d: DAC Audio                 (Done - /dev/tone0 + /dev/pcm0 + apps/sound)
 Phase 2e: ADC Battery               (Done - /dev/bat0)
     |
 Phase 3a: W25Q256 Flash             (Can be implemented independently)
