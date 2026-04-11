@@ -202,6 +202,39 @@ picocom /dev/tty.usbmodem01
 - OSテスト（ostest, coremark）はカーネル CONFIG 変更時のみ実行
 - テスト依存: `.venv/bin/pip install -r requirements.txt`
 
+### `tests/conftest.py` を使ったアドホックデバッグ
+
+実機で NSH コマンドを叩きながら挙動を確認したいときは、`tests/conftest.py` の `NuttxSerial` ヘルパーを Python から直接呼ぶのが一番速い。pytest を介さないので出力がそのままチャット / ターミナルに流れる。
+
+```python
+import sys, time
+sys.path.insert(0, 'tests')
+from conftest import NuttxSerial, PROMPT
+
+s = NuttxSerial('/dev/tty.usbmodem01', 'tests/logs')
+try:
+    s.proc.sendline('')           # 最初のプロンプト待ち
+    s.proc.expect(PROMPT, timeout=5)
+
+    out = s.sendCommand('ls /dev')
+    print(out)
+
+    # dmesg は一度読み取ると drain されるので、起動ログを見たいときは
+    # reboot 直後に取得する
+    out = s.sendCommand('dmesg')
+    print(out)
+finally:
+    s.close()
+```
+
+**`sendCommand()` を必ず使う** — 生の `s.proc.send('cmd\r\n') + s.proc.expect(PROMPT)` はプロンプトマッチが壊れて `before` が空文字列になる。`sendCommand` はコマンドエコーの先頭単語 → プロンプトの順に待つので、出力の回収を確実にできる。
+
+よくあるミスと対策:
+- **`dmesg` が空に見える**: RAMLOG は read で drain されるので、直前の接続で既に読まれている可能性。`reboot` した直後に読むか、実機を電源再投入する。
+- **`free` 出力の ValueError**: `conftest.getFree()` が現在の NuttX `free` 出力フォーマットと合っておらず、`check_memory_leak` フィクスチャがテスト失敗後にパースエラーを出すことがある。本体テストがすでに失敗しているときに後から出る二次エラーなので無視して良い。
+- **NSH のクォート挙動**: `cmd "a b c"` の引用符は NSH が argv に分割する段階で外される場合がある。`apps/*_main.c` 側で `argv[2..argc-1]` を自前で join する必要がある。
+- **シリアル接続後の最初の 1 行が空振る**: USB CDC の取りこぼしが起きやすいので `sendline('')` を 1〜2 回送ってから `expect(PROMPT)` するとプロンプトに同期できる。
+
 ## 注意事項
 
 - NuttX の Kconfig にペリフェラルの定義があっても、実際の MCU にそのハードウェアが存在するとは限らない。Kconfig はチップファミリ単位（例: STM32F4XXX）の粗い分類で、個別チップの差分を反映していないことがある。ペリフェラルの有無は必ずリファレンスマニュアル（データシート）で確認すること。
