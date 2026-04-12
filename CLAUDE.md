@@ -235,6 +235,16 @@ finally:
 - **NSH のクォート挙動**: `cmd "a b c"` の引用符は NSH が argv に分割する段階で外される場合がある。`apps/*_main.c` 側で `argv[2..argc-1]` を自前で join する必要がある。
 - **シリアル接続後の最初の 1 行が空振る**: USB CDC の取りこぼしが起きやすいので `sendline('')` を 1〜2 回送ってから `expect(PROMPT)` するとプロンプトに同期できる。
 
+## Upstream リポジトリへの操作制限
+
+以下の upstream リポジトリに対して `gh` コマンドによる書き込み操作（create, comment, close, merge, edit, delete 等）を行ってはならない。読み取り操作（view, list）は許可する。
+
+- `apache/nuttx`
+- `apache/nuttx-apps`
+- `pybricks/pybricks-micropython`
+
+`gh` コマンドは常に `--repo owhinata/spike-nx` を明示すること。`.claude/settings.json` の PreToolUse フックで書き込み操作は自動ブロックされる。
+
 ## 注意事項
 
 - NuttX の Kconfig にペリフェラルの定義があっても、実際の MCU にそのハードウェアが存在するとは限らない。Kconfig はチップファミリ単位（例: STM32F4XXX）の粗い分類で、個別チップの差分を反映していないことがある。ペリフェラルの有無は必ずリファレンスマニュアル（データシート）で確認すること。

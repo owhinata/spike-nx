@@ -1,9 +1,29 @@
 {
+  "permissions": {
+    "allow": [
+      "mcp__codex__codex",
+      "mcp__codex__codex-reply"
+    ]
+  },
   "mcpServers": {
     "codex": {
       "type": "stdio",
       "command": "codex",
       "args": ["mcp-server"]
     }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command' | { read -r cmd; if echo \"$cmd\" | grep -qE '\\bgh\\b'; then if echo \"$cmd\" | grep -qE 'apache/nuttx(-apps)?|pybricks/pybricks-micropython'; then if echo \"$cmd\" | grep -qE '(create|comment|close|reopen|edit|delete|merge|review|transfer|pin|unpin|lock|unlock|-X (POST|PUT|PATCH|DELETE)|--method (POST|PUT|PATCH|DELETE))'; then echo '{\"decision\":\"block\",\"reason\":\"Upstream repo への書き込み操作はブロックされています。\"}'; exit 2; fi; fi; fi; }",
+            "statusMessage": "Checking gh upstream write..."
+          }
+        ]
+      }
+    ]
   }
 }
