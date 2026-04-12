@@ -6,45 +6,21 @@ import uuid
 
 import pexpect
 import pexpect.fdpexpect
-import pexpect.spawnbase
 import pytest
 import serial
 
 # ---------------------------------------------------------------------------
-# ANSI escape code removal (split-safe monkey-patch)
+# ANSI escape code removal — applied to final output only, NOT in the
+# pexpect read path.  Stripping in read_nonblocking corrupts data when
+# multi-byte escapes are split across USB CDC packets (issue #34).
 # ---------------------------------------------------------------------------
-_ANSI_RE = re.compile(rb"(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]")
-_ANSI_PARTIAL_RE = re.compile(rb"(\x9B|\x1B\[)[0-?]*[ -\/]*$")
-_original_read_nonblocking = pexpect.spawnbase.SpawnBase.read_nonblocking
+_ANSI_RE = re.compile(r"(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]")
 
 
-def _clean_read_nonblocking(self, size=1, timeout=None):
-    """Strip ANSI escapes from serial data, buffering partial sequences.
+def _strip_ansi(text):
+    """Remove ANSI escape sequences from final output text."""
+    return _ANSI_RE.sub("", text)
 
-    The upstream NuttX CI monkey-patch strips per-read, which corrupts
-    data when a multi-byte escape (e.g. ``\\x1b[K``) is split across
-    USB CDC packets.  This version accumulates a residual buffer on the
-    spawn instance so partial trailing escapes are held until the next
-    read completes them.
-    """
-    buf = getattr(self, "_ansi_buf", b"")
-    buf += _original_read_nonblocking(self, size, timeout)
-
-    # Strip all complete ANSI sequences.
-    buf = _ANSI_RE.sub(b"", buf)
-
-    # If the tail looks like the start of an incomplete sequence,
-    # hold it back for the next call.
-    m = _ANSI_PARTIAL_RE.search(buf)
-    if m:
-        self._ansi_buf = buf[m.start():]
-        return buf[:m.start()]
-
-    self._ansi_buf = b""
-    return buf
-
-
-pexpect.spawnbase.SpawnBase.read_nonblocking = _clean_read_nonblocking
 
 # ---------------------------------------------------------------------------
 # NSH prompt pattern
@@ -161,6 +137,8 @@ class NuttxSerial:
             except Exception:
                 if attempt == 2:
                     raise
+        self.proc.sendline("set +e")
+        self.proc.expect(PROMPT, timeout=5)
 
     # -- command helpers ----------------------------------------------------
 
@@ -177,32 +155,50 @@ class NuttxSerial:
     def sendCommand(self, cmd, timeout=10):
         """Send a command and return its output.
 
-        Synchronization strategy:
-        1. A per-call PRE marker (``echo MKPRE<nonce>``) is sent to
-           establish a clean baseline past any stale buffer bytes.
-           The unique nonce prevents false matches on stale data.
-        2. A 10 ms pause lets USB CDC flush trailing bytes.
-        3. The real command is sent, and we match ``\\r\\nnsh> `` —
-           a line-anchored prompt — to capture its output.
+        Sends ``<cmd> ; echo __MK<nonce>__`` as a single NSH line so
+        the unique POST marker appears immediately after the command
+        finishes.  We then read raw bytes until the marker is seen.
+        This avoids prompt-based synchronization entirely — the
+        ``nsh> `` prompt is never used as a delimiter, eliminating
+        false matches on stale prompt fragments.
         """
-        nonce = uuid.uuid4().hex[:16]
-        pre = f"MKPRE{nonce}"
-        prompt_re = re.escape(PROMPT)
+        nonce = uuid.uuid4().hex[:8]
+        marker = f"__MK{nonce}__"
 
-        self.proc.sendline(f"echo {pre}")
-        self.proc.expect(f"{pre}\r\n{prompt_re}", timeout=timeout)
+        if cmd:
+            line = f"{cmd} ; echo {marker}"
+        else:
+            line = f"echo {marker}"
 
-        # Brief pause so USB CDC can flush any trailing bytes before
-        # Phase 2 starts (see issue #34).
-        time.sleep(0.01)
-
-        self.proc.sendline(cmd)
-        self.proc.expect(f"\r\n{prompt_re}", timeout=timeout)
+        self.proc.sendline(line)
+        # Match the marker on its own output line.  The command echo
+        # also contains the marker text but inline with "; echo ", so
+        # the \r\n prefix distinguishes the real output.  Optional
+        # ANSI escapes (\x1b[...X) may appear between \r\n and the
+        # marker (NSH readline clear-to-EOL).
+        _ansi = "\x1b\\[[0-9;]*[A-Za-z]"
+        self.proc.expect(
+            f"\r\n(?:{_ansi})*{re.escape(marker)}",
+            timeout=timeout,
+        )
         raw = self.proc.before.decode(errors="ignore")
 
+        # Strip the command echo line (everything up to first \r\n).
         if "\r\n" in raw:
-            return raw.split("\r\n", 1)[1]
-        return ""
+            raw = raw.split("\r\n", 1)[1]
+        else:
+            return ""
+
+        # Strip the trailing "echo __MK...__" echo and prompt that
+        # may follow the marker.  The marker output is on its own
+        # line, so everything before the last "\r\n" is real output.
+        # But expect already consumed the marker itself, so raw ends
+        # just before it.  Find and remove the trailing echo line
+        # "echo __MK...__\r\n" if present.
+        echo_prefix = f"echo {marker}"
+        lines = raw.split("\r\n")
+        lines = [l for l in lines if echo_prefix not in l]
+        return _strip_ansi("\r\n".join(lines))
 
     def waitUser(self, msg):
         """Pause and wait for user confirmation (interactive tests)."""
@@ -250,6 +246,10 @@ def p(pytestconfig):
         except Exception:
             if attempt == 2:
                 raise
+    # Disable "exit on error" so that "; echo MARKER" always runs
+    # even when the preceding command returns non-zero.
+    nuttx.proc.sendline("set +e")
+    nuttx.proc.expect(PROMPT, timeout=5)
     yield nuttx
     nuttx.close()
 
