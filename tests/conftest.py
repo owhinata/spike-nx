@@ -173,6 +173,13 @@ class NuttxSerial:
         self.proc.sendline(f"echo {pre}")
         self.proc.expect(f"{pre}\r\n{prompt_re}", timeout=timeout)
 
+        # Let USB CDC flush any trailing bytes that arrived after the
+        # match point.  Without this pause, Phase 2's ``\r\nnsh> ``
+        # can false-match on residual prompt fragments in the pexpect
+        # buffer, producing empty output (~27% flake rate at 0 ms,
+        # see issue #34).
+        time.sleep(0.01)
+
         # Phase 2: send the real command; match line-anchored prompt.
         self.proc.sendline(cmd)
         self.proc.expect(f"\r\n{prompt_re}", timeout=timeout)
