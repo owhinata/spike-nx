@@ -30,25 +30,25 @@ def _crash_and_recover(p, cmd, fault_pattern):
     p.reconnect(timeout=15)
 
 
-@pytest.mark.no_memcheck
+
 def test_crash_assert(p):
     """D-1: ASSERT crash and watchdog recovery."""
     _crash_and_recover(p, "crash assert", "up_assert")
 
 
-@pytest.mark.no_memcheck
+
 def test_crash_null(p):
     """D-2: NULL pointer dereference crash and recovery."""
     _crash_and_recover(p, "crash null", r"Hard Fault|HardFault")
 
 
-@pytest.mark.no_memcheck
+
 def test_crash_divzero(p):
     """D-3: Division by zero crash and recovery."""
     _crash_and_recover(p, "crash divzero", "Fault")
 
 
-@pytest.mark.no_memcheck
+
 def test_crash_stackoverflow(p):
     """D-4: Stack overflow crash and recovery."""
     _crash_and_recover(p, "crash stackoverflow", r"assert|Fault")

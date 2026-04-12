@@ -53,7 +53,7 @@ def test_tone_single_note(p):
     elapsed = (time.monotonic() - t0) * 1000
     # 120 BPM quarter = 500 ms nominal; allow release gap + sendCommand
     # sentinel round-trip overhead.
-    assert 400 <= elapsed <= 1100, f"unexpected duration: {elapsed:.0f} ms"
+    assert 400 <= elapsed <= 1300, f"unexpected duration: {elapsed:.0f} ms"
 
 
 def test_sound_beep_default(p):

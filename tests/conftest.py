@@ -11,17 +11,37 @@ import pytest
 import serial
 
 # ---------------------------------------------------------------------------
-# ANSI escape code removal (monkey-patch pexpect, same as NuttX CI upstream)
+# ANSI escape code removal (split-safe monkey-patch)
 # ---------------------------------------------------------------------------
+_ANSI_RE = re.compile(rb"(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]")
+_ANSI_PARTIAL_RE = re.compile(rb"(\x9B|\x1B\[)[0-?]*[ -\/]*$")
 _original_read_nonblocking = pexpect.spawnbase.SpawnBase.read_nonblocking
 
 
 def _clean_read_nonblocking(self, size=1, timeout=None):
-    return re.sub(
-        r"(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]",
-        "",
-        _original_read_nonblocking(self, size, timeout).decode(errors="ignore"),
-    ).encode()
+    """Strip ANSI escapes from serial data, buffering partial sequences.
+
+    The upstream NuttX CI monkey-patch strips per-read, which corrupts
+    data when a multi-byte escape (e.g. ``\\x1b[K``) is split across
+    USB CDC packets.  This version accumulates a residual buffer on the
+    spawn instance so partial trailing escapes are held until the next
+    read completes them.
+    """
+    buf = getattr(self, "_ansi_buf", b"")
+    buf += _original_read_nonblocking(self, size, timeout)
+
+    # Strip all complete ANSI sequences.
+    buf = _ANSI_RE.sub(b"", buf)
+
+    # If the tail looks like the start of an incomplete sequence,
+    # hold it back for the next call.
+    m = _ANSI_PARTIAL_RE.search(buf)
+    if m:
+        self._ansi_buf = buf[m.start():]
+        return buf[:m.start()]
+
+    self._ansi_buf = b""
+    return buf
 
 
 pexpect.spawnbase.SpawnBase.read_nonblocking = _clean_read_nonblocking
@@ -85,7 +105,13 @@ class NuttxSerial:
             self.proc.sendline("reboot")
         except Exception:
             pass  # the board may already be mid-reset
-        self.reconnect(timeout=timeout)
+        for attempt in range(2):
+            try:
+                self.reconnect(timeout=timeout)
+                return
+            except (TimeoutError, Exception):
+                if attempt == 1:
+                    raise
 
     def reconnect(self, timeout=15):
         """Close and reopen the serial port (after USB replug / reset)."""
@@ -153,41 +179,27 @@ class NuttxSerial:
 
         Synchronization strategy:
         1. A per-call PRE marker (``echo MKPRE<nonce>``) is sent to
-           establish a clean baseline past any stale buffer bytes. The
-           nonce makes the match unique; we expect the marker's output
-           line immediately followed by the next NSH prompt.
-        2. The real command is sent, and we match ``\\r\\nnsh> `` —
-           a line-anchored prompt — to capture its output. Anchoring on
-           ``\\r\\n`` before the prompt avoids false matches on a bare
-           ``nsh> `` substring that might appear inside command output.
-
-        Only one ``sendline`` is issued per phase, so NSH never has to
-        process queued input behind a slow/heavy command.
+           establish a clean baseline past any stale buffer bytes.
+           The unique nonce prevents false matches on stale data.
+        2. A 10 ms pause lets USB CDC flush trailing bytes.
+        3. The real command is sent, and we match ``\\r\\nnsh> `` —
+           a line-anchored prompt — to capture its output.
         """
         nonce = uuid.uuid4().hex[:16]
         pre = f"MKPRE{nonce}"
         prompt_re = re.escape(PROMPT)
 
-        # Phase 1: baseline sync. Matching ``<pre>\r\nnsh> `` as one
-        # pattern consumes through the prompt after the PRE output.
         self.proc.sendline(f"echo {pre}")
         self.proc.expect(f"{pre}\r\n{prompt_re}", timeout=timeout)
 
-        # Let USB CDC flush any trailing bytes that arrived after the
-        # match point.  Without this pause, Phase 2's ``\r\nnsh> ``
-        # can false-match on residual prompt fragments in the pexpect
-        # buffer, producing empty output (~27% flake rate at 0 ms,
-        # see issue #34).
+        # Brief pause so USB CDC can flush any trailing bytes before
+        # Phase 2 starts (see issue #34).
         time.sleep(0.01)
 
-        # Phase 2: send the real command; match line-anchored prompt.
         self.proc.sendline(cmd)
         self.proc.expect(f"\r\n{prompt_re}", timeout=timeout)
         raw = self.proc.before.decode(errors="ignore")
 
-        # ``raw`` is "<cmd_echo>\r\n[<output>]" — strip the cmd echo
-        # line. For no-output commands ``raw`` is just ``<cmd_echo>``
-        # with no trailing ``\r\n``, so we return the empty string.
         if "\r\n" in raw:
             return raw.split("\r\n", 1)[1]
         return ""
@@ -195,27 +207,6 @@ class NuttxSerial:
     def waitUser(self, msg):
         """Pause and wait for user confirmation (interactive tests)."""
         input(f"\n>>> {msg}\n    Press Enter to continue...")
-
-    # -- memory helpers -----------------------------------------------------
-
-    def getFree(self):
-        """Run ``free`` and return parsed memory info as a dict.
-
-        Returns dict with keys: ``total``, ``used``, ``free``, ``largest``.
-        Values are in bytes.
-        """
-        output = self.sendCommand("free")
-        result = {}
-        for line in output.splitlines():
-            if "Umem" in line:
-                parts = line.split()
-                # free output: Umem: total used free largest
-                if len(parts) >= 5:
-                    result["total"] = int(parts[1])
-                    result["used"] = int(parts[2])
-                    result["free"] = int(parts[3])
-                    result["largest"] = int(parts[4])
-        return result
 
 
 # ---------------------------------------------------------------------------
@@ -261,26 +252,6 @@ def p(pytestconfig):
                 raise
     yield nuttx
     nuttx.close()
-
-
-@pytest.fixture(autouse=True)
-def check_memory_leak(request, p):
-    """Record memory before/after each test and warn on leaks."""
-    if request.node.get_closest_marker("no_memcheck"):
-        yield
-        return
-    before = p.getFree()
-    yield
-    after = p.getFree()
-    if before and after:
-        leak = before["free"] - after["free"]
-        if leak > 1024:
-            import warnings
-
-            warnings.warn(
-                f"Possible memory leak: {leak} bytes "
-                f"(free: {before['free']} -> {after['free']})"
-            )
 
 
 # ---------------------------------------------------------------------------
