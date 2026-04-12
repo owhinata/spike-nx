@@ -24,6 +24,8 @@
 #include <stdbool.h>
 #include <debug.h>
 
+#include <arch/board/board.h>
+
 #include "stm32.h"
 #include "stm32_dma.h"
 #include "stm32_tim.h"
@@ -177,13 +179,19 @@ int stm32_adc_dma_initialize(void)
   g_tim2 = stm32_tim_init(2);
   DEBUGASSERT(g_tim2 != NULL);
 
-  STM32_TIM_SETMODE(g_tim2, STM32_TIM_MODE_UP);
-  STM32_TIM_SETCLOCK(g_tim2, ADC_TIM2_TRIGGER_HZ);
+  /* SETCLOCK sets PSC for the requested tick rate and also starts the
+   * timer.  We use the full 96 MHz input clock (PSC=0) and divide by
+   * ARR+1 instead, because 96 MHz / 1 kHz = 96000 which overflows the
+   * 16-bit PSC register.  TRGO master mode has no abstraction.
+   */
+
+  STM32_TIM_SETCLOCK(g_tim2, STM32_APB1_TIM2_CLKIN);
   STM32_TIM_DISABLE(g_tim2);
 
   modifyreg32(STM32_TIM2_CR2, GTIM_CR2_MMS_MASK, GTIM_CR2_MMS_UPDATE);
 
-  STM32_TIM_SETPERIOD(g_tim2, 0);
+  STM32_TIM_SETPERIOD(g_tim2,
+                       (STM32_APB1_TIM2_CLKIN / ADC_TIM2_TRIGGER_HZ) - 1);
   STM32_TIM_ENABLE(g_tim2);
 
   syslog(LOG_INFO, "ADC: DMA continuous conversion started "
