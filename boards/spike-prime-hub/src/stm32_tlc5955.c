@@ -7,7 +7,7 @@
  * Hardware:
  *   SPI1: MOSI=PA7, MISO=PA6, SCK=PA5 (AF5), 24 MHz (DMA)
  *   LAT:  PA15 (GPIO output, latch on HIGH->LOW edge)
- *   GSCLK: TIM12 CH2 = PB15, 9.6 MHz PWM
+ *   GSCLK: TIM12 CH2 = PB15, ~8.7 MHz PWM
  *
  * Update method:
  *   tlc5955_set_duty() sets data and marks changed.
@@ -28,6 +28,7 @@
 
 #include "stm32.h"
 #include "stm32_spi.h"
+#include "stm32_tim.h"
 #include "spike_prime_hub.h"
 
 #ifdef CONFIG_STM32_SPI1
@@ -44,30 +45,14 @@
 
 #define TLC5955_NUM_CH        48
 
-/* TIM12 base address and registers for GSCLK generation */
+/* GSCLK: TIM12 CH2 at full APB1 timer clock / (ARR+1) = 96 MHz / 11.
+ * PB15 AF9 = TIM12_CH2.
+ */
 
-#define STM32_TIM12_BASE      0x40001800
-#define TIM_CR1_OFFSET        0x00
-#define TIM_EGR_OFFSET        0x14
-#define TIM_CCMR1_OFFSET      0x18
-#define TIM_CCER_OFFSET       0x20
-#define TIM_PSC_OFFSET        0x28
-#define TIM_ARR_OFFSET        0x2c
-#define TIM_CCR2_OFFSET       0x38
-
-#define TIM_CR1_CEN           (1 << 0)
-#define TIM_EGR_UG            (1 << 0)
-#define TIM_CCMR1_OC2M_PWM1  (6 << 12)
-#define TIM_CCMR1_OC2PE       (1 << 11)
-#define TIM_CCER_CC2E         (1 << 4)
-
-/* GSCLK: 96 MHz / 1 / 10 = 9.6 MHz (same as pybricks) */
-
-#define TIM12_PSC             0
-#define TIM12_ARR             10
-#define TIM12_CCR2            5
-
-/* PB15 AF9 = TIM12_CH2 (GSCLK output) */
+#define GSCLK_TIM             12
+#define GSCLK_CH              2
+#define GSCLK_ARR             10
+#define GSCLK_CCR             5
 
 #define GPIO_GSCLK            (GPIO_ALT | GPIO_AF9 | GPIO_SPEED_50MHz | \
                                GPIO_PUSHPULL | GPIO_PORTB | GPIO_PIN15)
@@ -200,17 +185,18 @@ static void tlc5955_update_worker(FAR void *arg)
 
 static void tlc5955_gsclk_start(void)
 {
-  modifyreg32(STM32_RCC_APB1ENR, 0, RCC_APB1ENR_TIM12EN);
+  struct stm32_tim_dev_s *tim;
+
   stm32_configgpio(GPIO_GSCLK);
 
-  putreg16(TIM12_PSC, STM32_TIM12_BASE + TIM_PSC_OFFSET);
-  putreg16(TIM12_ARR, STM32_TIM12_BASE + TIM_ARR_OFFSET);
-  putreg16(TIM_CCMR1_OC2M_PWM1 | TIM_CCMR1_OC2PE,
-           STM32_TIM12_BASE + TIM_CCMR1_OFFSET);
-  putreg16(TIM12_CCR2, STM32_TIM12_BASE + TIM_CCR2_OFFSET);
-  putreg16(TIM_CCER_CC2E, STM32_TIM12_BASE + TIM_CCER_OFFSET);
-  putreg16(TIM_CR1_CEN, STM32_TIM12_BASE + TIM_CR1_OFFSET);
-  putreg16(TIM_EGR_UG, STM32_TIM12_BASE + TIM_EGR_OFFSET);
+  tim = stm32_tim_init(GSCLK_TIM);
+  DEBUGASSERT(tim != NULL);
+
+  STM32_TIM_SETMODE(tim, STM32_TIM_MODE_UP);
+  STM32_TIM_SETPERIOD(tim, GSCLK_ARR);
+  STM32_TIM_SETCHANNEL(tim, GSCLK_CH, STM32_TIM_CH_OUTPWM);
+  STM32_TIM_SETCOMPARE(tim, GSCLK_CH, GSCLK_CCR);
+  STM32_TIM_ENABLE(tim);
 }
 
 /****************************************************************************
