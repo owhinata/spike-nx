@@ -24,6 +24,8 @@
 #include <stdbool.h>
 #include <debug.h>
 
+#include <nuttx/irq.h>
+
 #include <arch/board/board.h>
 
 #include "stm32.h"
@@ -62,7 +64,8 @@
  * Channel selection is handled internally by stm32_dmachannel().
  */
 
-#define ADC_DMA_SCR  (DMA_SCR_MSIZE_16BITS | \
+#define ADC_DMA_SCR  (DMA_SCR_PRIMED       | \
+                      DMA_SCR_MSIZE_16BITS | \
                       DMA_SCR_PSIZE_16BITS | \
                       DMA_SCR_MINC         | \
                       DMA_SCR_CIRC)
@@ -162,6 +165,15 @@ int stm32_adc_dma_initialize(void)
 
   g_dma = stm32_dmachannel(DMAMAP_ADC1_1);
   DEBUGASSERT(g_dma != NULL);
+
+#ifdef CONFIG_ARCH_IRQPRIO
+  /* ADC DMA at lower priority than sound (0xB0 vs 0x80), matching
+   * pybricks DMA_PRIORITY_MEDIUM / NVIC base=7.
+   */
+
+  up_prioritize_irq(STM32_IRQ_DMA2S0,
+                     NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
+#endif
 
   stm32_dmasetup(g_dma,
                  STM32_ADC1_BASE + STM32_ADC_DR_OFFSET,

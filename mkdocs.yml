@@ -54,6 +54,7 @@ nav:
       - hardware/hub-overview.md
       - hardware/pin-mapping.md
       - hardware/peripherals.md
+      - hardware/dma-irq.md
   - ドライバ:
       - drivers/architecture.md
       - drivers/implementation-plan.md
