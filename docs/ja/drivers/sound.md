@@ -13,10 +13,7 @@ SPIKE Prime Hub の内蔵スピーカーを NuttX から鳴らすためのボー
 | 波形中心 | `0x8000` | 12 bit 左詰めの対称中央値 |
 | 最大サンプルレート | 100 kHz | ドライバ側で検証 |
 
-STM32F413 の NuttX 上流 Kconfig は `STM32_HAVE_DAC1` を select しておらず、`stm32f413xx_pinmap.h` も DAC1 OUT1 マクロを持たないため、以下を**ボードローカル**で補っている:
-
-- RCC `DAC1EN` / `TIM6EN` / `DMA1EN` を直接 enable
-- `GPIO_DAC1_OUT1_F413` を `GPIO_ANALOG | PORTA | PIN4` として board 側に定義
+NuttX 上流の F413 Kconfig に `STM32_HAVE_DAC1` select と pinmap の `GPIO_DAC1_OUT1_0` マクロを追加済み ([#27](https://github.com/owhinata/spike-nx/issues/27), [#28](https://github.com/owhinata/spike-nx/issues/28))。DMA1 と TIM6 は NuttX 抽象 API (`stm32_dmachannel()` / `stm32_tim_init()`) 経由で制御しており、DAC1 の RCC clock enable のみ直接レジスタアクセスが残る。
 
 ## レイヤ構成
 
@@ -30,7 +27,7 @@ apps/sound (NSH builtin)
         \         /
          v       v
   stm32_sound_play_pcm / stop_pcm / set_volume
-    DAC1 / DMA1 S5 / TIM6 (register direct)
+    DAC1 (register direct) / DMA1 S5 (NuttX DMA API) / TIM6 (NuttX TIM API)
 ```
 
 - **低レベル層 (`stm32_sound.c`)** — `stm32_sound_play_pcm(data, length, sample_rate)` / `stm32_sound_stop_pcm()` を提供。呼出側が `g_sound.lock` を保持した状態で呼ぶ前提。
@@ -64,22 +61,21 @@ struct sound_state_s
 **start** (`stm32_sound_play_pcm`):
 
 1. critical section に入る
-2. TIM6 `CEN = 0`
-3. DMA1 Stream5 disable → `EN = 0` を待って HIFCR で flag clear
-4. DMA1 S5 を再設定 (`PAR = DHR12L1`, `M0AR = data`, `NDTR = length`, `SCR = CHSEL7 | PRIHI | MSIZE16 | PSIZE16 | MINC | CIRC | DIR_M2P | EN`)
-5. DAC1 CR: `DMAEN1 | TSEL1_TIM6 | TEN1 | EN1`
-6. TIM6 `PSC = 0`, `ARR = 96000000 / sample_rate - 1`, `EGR = UG`, `CEN = 1`
-7. critical section を出る
-8. **2 ms セトリング待ち** (`nxsig_usleep`) ― DAC 出力が中央値に到達するのを待ってからアンプを有効化
-9. AMP_EN = HIGH
+2. `STM32_TIM_DISABLE(g_tim6)` — タイマ停止
+3. `stm32_dmastop()` + `stm32_dmasetup()` + `stm32_dmastart()` — DMA1 S5 を再設定 (circular, 16-bit, M2P)
+4. DAC1 CR: `DMAEN1 | TSEL1_TIM6 | TEN1 | EN1` (直接レジスタ)
+5. `STM32_TIM_SETPERIOD()` + `STM32_TIM_ENABLE()` — ARR 設定 + UG + CEN
+6. critical section を出る
+7. **2 ms セトリング待ち** (`nxsig_usleep`) ― DAC 出力が中央値に到達するのを待ってからアンプを有効化
+8. AMP_EN = HIGH
 
 **stop** (`stm32_sound_stop_pcm`):
 
 1. AMP_EN = LOW ― 先にアンプを遮断してポップを防ぐ
 2. critical section に入る
-3. TIM6 `CEN = 0`
-4. DMA1 S5 disable + flag clear
-5. DAC1 `CR = 0`
+3. `STM32_TIM_DISABLE(g_tim6)` — タイマ停止
+4. `stm32_dmastop()` — DMA 停止
+5. DAC1 `CR = 0` (直接レジスタ)
 6. critical section を出る
 
 ## `/dev/tone0` (tune 文字列)

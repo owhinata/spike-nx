@@ -87,7 +87,7 @@ PA13 (BAT_PWR_EN) and PA14 (PORT_3V3_EN) initialization is already implemented i
     - **`/dev/pcm0`**: single-call raw PCM ABI (`struct pcm_write_hdr_s` v1).  `magic/version/hdr_size/flags/sample_rate/sample_count` header followed by `uint16_t` samples in one `write()`.
 - ioctl space: `TONEIOC_VOLUME_SET/GET/STOP` defined in `arch/board/board_sound.h` via `_BOARDIOC()` to avoid collisions with upstream `AUDIOIOC_*`/`SNDIOC_*`
 - `apps/sound` NSH builtin provides `beep` / `notes` / `volume` / `off` / `selftest`
-- STM32F413 workarounds: upstream Kconfig does not `select STM32_HAVE_DAC1`, so the RCC DAC1 clock is enabled directly; `stm32f413xx_pinmap.h` has no DAC1 OUT1 macro, so a board-local `GPIO_DAC1_OUT1_F413` is defined
+- STM32F413 upstream fixes: `STM32_HAVE_DAC1` select and `GPIO_DAC1_OUT1_0` pinmap macro added to owhinata/nuttx fork ([#27](https://github.com/owhinata/spike-nx/issues/27), [#28](https://github.com/owhinata/spike-nx/issues/28)). DMA/TIM migrated to NuttX abstraction APIs ([#29](https://github.com/owhinata/spike-nx/issues/29)); only DAC1 RCC clock enable remains as direct register access
 - Full details: [`docs/en/drivers/sound.md`](sound.md)
 
 #### 2e. ADC Battery Monitoring and Button Input (Done)

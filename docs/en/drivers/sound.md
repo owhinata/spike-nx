@@ -13,10 +13,7 @@ Board-local drivers that drive the SPIKE Prime Hub's built-in speaker from NuttX
 | Waveform center | `0x8000` | Symmetric midpoint for 12-bit left-aligned DAC |
 | Max sample rate | 100 kHz | Enforced by the driver |
 
-Upstream NuttX Kconfig for the STM32F413 does **not** `select STM32_HAVE_DAC1`, and `stm32f413xx_pinmap.h` has no DAC1 OUT1 macros.  The board layer therefore:
-
-- enables the RCC `DAC1EN` / `TIM6EN` / `DMA1EN` bits directly, and
-- defines its own `GPIO_DAC1_OUT1_F413` (`GPIO_ANALOG | PORTA | PIN4`).
+The owhinata/nuttx fork now includes `STM32_HAVE_DAC1` select and `GPIO_DAC1_OUT1_0` pinmap macro for the F413 ([#27](https://github.com/owhinata/spike-nx/issues/27), [#28](https://github.com/owhinata/spike-nx/issues/28)).  DMA1 and TIM6 are managed through NuttX abstraction APIs (`stm32_dmachannel()` / `stm32_tim_init()`); only the DAC1 RCC clock enable remains as direct register access.
 
 ## Layered architecture
 
@@ -30,7 +27,7 @@ apps/sound (NSH builtin)
         \         /
          v       v
   stm32_sound_play_pcm / stop_pcm / set_volume
-    DAC1 / DMA1 S5 / TIM6 (direct register access)
+    DAC1 (register direct) / DMA1 S5 (NuttX DMA API) / TIM6 (NuttX TIM API)
 ```
 
 - **Low-level layer (`stm32_sound.c`)** — provides `stm32_sound_play_pcm(data, length, sample_rate)` and `stm32_sound_stop_pcm()`.  Callers must hold `g_sound.lock`.
@@ -64,22 +61,21 @@ struct sound_state_s
 **start** (`stm32_sound_play_pcm`):
 
 1. Enter critical section.
-2. TIM6 `CEN = 0`.
-3. Disable DMA1 Stream 5, wait for `EN = 0`, clear HIFCR flags.
-4. Reconfigure DMA1 S5 (`PAR = DHR12L1`, `M0AR = data`, `NDTR = length`, `SCR = CHSEL7 | PRIHI | MSIZE16 | PSIZE16 | MINC | CIRC | DIR_M2P | EN`).
-5. DAC1 CR: `DMAEN1 | TSEL1_TIM6 | TEN1 | EN1`.
-6. TIM6 `PSC = 0`, `ARR = 96000000 / sample_rate - 1`, `EGR = UG`, `CEN = 1`.
-7. Leave critical section.
-8. **2 ms settling delay** via `nxsig_usleep` so the DAC can reach its midpoint before the amplifier is unmuted.
-9. AMP_EN = HIGH.
+2. `STM32_TIM_DISABLE(g_tim6)` — stop timer.
+3. `stm32_dmastop()` + `stm32_dmasetup()` + `stm32_dmastart()` — reconfigure DMA1 S5 (circular, 16-bit, M2P).
+4. DAC1 CR: `DMAEN1 | TSEL1_TIM6 | TEN1 | EN1` (direct register).
+5. `STM32_TIM_SETPERIOD()` + `STM32_TIM_ENABLE()` — set ARR + UG + CEN.
+6. Leave critical section.
+7. **2 ms settling delay** via `nxsig_usleep` so the DAC can reach its midpoint before the amplifier is unmuted.
+8. AMP_EN = HIGH.
 
 **stop** (`stm32_sound_stop_pcm`):
 
 1. AMP_EN = LOW — mute first to avoid pops.
 2. Enter critical section.
-3. TIM6 `CEN = 0`.
-4. Disable DMA1 S5 and clear flags.
-5. DAC1 `CR = 0`.
+3. `STM32_TIM_DISABLE(g_tim6)` — stop timer.
+4. `stm32_dmastop()` — stop DMA.
+5. DAC1 `CR = 0` (direct register).
 6. Leave critical section.
 
 ## `/dev/tone0` tune string format

@@ -90,7 +90,7 @@ CONFIG_STM32_ADC1=y
 | 項目 | pybricks | NuttX |
 |------|----------|-------|
 | 電源 OFF トリガー | 中央ボタン 2 秒長押し | 同一 |
-| ADC 読み取り | HAL ADC + DMA + TIM2 トリガー | レジスタ直接操作 DMA + TIM2 トリガー |
+| ADC 読み取り | HAL ADC + DMA + TIM2 トリガー | ADC: レジスタ直接操作、DMA + TIM2: NuttX 抽象 API |
 | ADC スキャンレート | 1 kHz (6 チャネル) | 1 kHz (6 チャネル) |
 | ボタンポーリング | Contiki イベントループ (50ms) | HPWORK キュー (50ms) |
 | USB 接続時の電源 OFF | 電源は切れない (op-amp 依存) | PA13 LOW 後リセット |

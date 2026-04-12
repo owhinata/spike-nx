@@ -90,7 +90,7 @@ CONFIG_STM32_ADC1=y
 | Item | pybricks | NuttX |
 |------|----------|-------|
 | Power off trigger | Center button 2s long press | Same |
-| ADC reading | HAL ADC + DMA + TIM2 trigger | Direct register DMA + TIM2 trigger |
+| ADC reading | HAL ADC + DMA + TIM2 trigger | ADC: direct register, DMA + TIM2: NuttX abstraction API |
 | ADC scan rate | 1 kHz (6 channels) | 1 kHz (6 channels) |
 | Button polling | Contiki event loop (50ms) | HPWORK queue (50ms) |
 | Power off with USB | Power stays on (op-amp dependent) | PA13 LOW then reset |

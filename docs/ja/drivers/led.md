@@ -104,7 +104,7 @@ CONFIG_STM32_DMA2=y
 | 項目 | pybricks | NuttX |
 |------|----------|-------|
 | SPI 転送 | HAL SPI + DMA (非同期) | NuttX SPI ドライバ + DMA (同期) |
-| GSCLK | TIM12 CH2 (HAL PWM) | TIM12 CH2 (レジスタ直接操作) |
+| GSCLK | TIM12 CH2 (HAL PWM) | TIM12 CH2 (NuttX TIM API) |
 | LAT | HAL GPIO | stm32_gpiowrite() |
 | 更新方式 | Contiki プロトスレッド + changed フラグ | HPWORK キュー + changed フラグ |
 | Control Latch | 同一パラメータ | 同一パラメータ |

@@ -104,7 +104,7 @@ Use `tlc5955_update_sync()` when immediate update is needed (during initializati
 | Item | pybricks | NuttX |
 |------|----------|-------|
 | SPI transfer | HAL SPI + DMA (async) | NuttX SPI driver + DMA (sync) |
-| GSCLK | TIM12 CH2 (HAL PWM) | TIM12 CH2 (direct register) |
+| GSCLK | TIM12 CH2 (HAL PWM) | TIM12 CH2 (NuttX TIM API) |
 | LAT | HAL GPIO | stm32_gpiowrite() |
 | Update method | Contiki protothread + changed flag | HPWORK queue + changed flag |
 | Control latch | Same parameters | Same parameters |
