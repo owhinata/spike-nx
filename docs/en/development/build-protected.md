@@ -88,7 +88,7 @@ The owhinata fork (`f413-support-12.13.0` branch) carries these three commits:
 
 | Item | Action | Reason |
 |---|---|---|
-| `CONFIG_APP_LED` disabled | Tracked separately | `led_main.c` calls `tlc5955_set_duty()` directly — needs refactor to a `/dev/rgbled`-style char driver |
+| `CONFIG_APP_LED` enabled | Fixed by Issue #39 (2026-04-19) | Refactored to use the `/dev/rgbled0` char driver (ioctl) so the user blob can drive TLC5955 |
 | `CONFIG_ARCH_PERF_EVENTS` disabled | Tracked separately | `nuttx-apps/testing/ostest/perf_gettime.c` calls `perf_gettime()` which has no syscall proxy |
 
 ## Build
@@ -119,7 +119,7 @@ dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx/nuttx_user.bin
 | `free` Kmem | ✅ 62 536 B |
 | CoreMark 2000 iter | ✅ **170.46 iter/sec** |
 | `sleep 10` (watchdog interaction) | ✅ Returns after 10.0 s, no watchdog fire |
-| `pytest -m "not slow and not interactive"` | ✅ **28 passed**, 2 expected failures (LED-related, derived from `APP_LED` being disabled) |
+| `pytest -m "not slow and not interactive"` | ✅ **30 passed** (LED tests also pass after Issue #39 re-enabled `APP_LED`) |
 | Crash tests (assert / null deref / divzero / stack overflow) | ✅ 4/4 |
 | Driver tests (battery / IMU / I2C) | ✅ 6/6 |
 | Sound tests | ✅ 9/9 |
@@ -128,7 +128,6 @@ dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx/nuttx_user.bin
 ## Known follow-ups
 
 - **`ostest` aborts mid-run** ([#38](https://github.com/owhinata/spike-nx/issues/38)): launching `ostest` causes the serial port to drop and the board to reset. `sleep 10` is fine, so this is not a simple watchdog fire — more likely a specific subtest hits an assertion or HardFault that triggers the `BOARD_RESET_ON_ASSERT=2` reset. The same test passes on `stm32f413-discovery/knsh`, so an interaction with SPIKE-Hub-specific peripherals (battery / IMU / sound) during init is suspected.
-- **APP_LED refactor** ([#39](https://github.com/owhinata/spike-nx/issues/39)): replace the `tlc5955_set_duty()` direct call with a `/dev/rgbled`-style char driver.
 - **ARCH_PERF_EVENTS syscall** ([#40](https://github.com/owhinata/spike-nx/issues/40)): register `perf_gettime()` as a syscall, or rewrite the ostest helper on top of `clock_gettime`.
 
 ## References

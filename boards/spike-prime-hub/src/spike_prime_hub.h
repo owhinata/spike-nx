@@ -13,6 +13,7 @@
 #include <nuttx/compiler.h>
 #include <stdint.h>
 #include <arch/stm32/chip.h>
+#include <arch/board/board_rgbled.h>
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -53,22 +54,10 @@
 #define GPIO_TLC5955_LAT  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
                            GPIO_OUTPUT_CLEAR | GPIO_PORTA | GPIO_PIN15)
 
-/* TLC5955 channel IDs (48 channels total) */
-
-#define TLC5955_NUM_CHANNELS  48
-
-#define TLC5955_CH_BATTERY_B       0
-#define TLC5955_CH_BATTERY_G       1
-#define TLC5955_CH_BATTERY_R       2
-#define TLC5955_CH_STATUS_TOP_B    3
-#define TLC5955_CH_STATUS_TOP_G    4
-#define TLC5955_CH_STATUS_TOP_R    5
-#define TLC5955_CH_STATUS_BTM_B    6
-#define TLC5955_CH_STATUS_BTM_G    7
-#define TLC5955_CH_STATUS_BTM_R    8
-#define TLC5955_CH_BT_B            18
-#define TLC5955_CH_BT_G            19
-#define TLC5955_CH_BT_R            20
+/* TLC5955 channel IDs (TLC5955_NUM_CHANNELS, TLC5955_CH_*) are defined in
+ * <arch/board/board_rgbled.h>, included above so both kernel-space and
+ * user-space code share the same layout.
+ */
 
 /* USB OTG FS
  *   PA9  = OTG_FS_VBUS
@@ -117,10 +106,6 @@
 #define CENTER_BTN_ADC_CH         14
 #define CENTER_BTN_PRESS_THRESHOLD 3200
 
-/* TLC5955 charger MODE channel (ch14 active low: duty=0 enables charging) */
-
-#define TLC5955_CH_CHARGER_MODE   14
-
 /* Battery charger ISET PWM (TIM5 CH1, PA0, AF2)
  *
  * Note: PA0 is also defined as GPIO_BTN_USER for the Bluetooth button,
@@ -149,6 +134,7 @@ void weak_function stm32_usbinitialize(void);
 int tlc5955_initialize(void);
 void tlc5955_set_duty(uint8_t ch, uint16_t value); /* Auto-schedules update */
 int tlc5955_update_sync(void);  /* Immediate update (init/shutdown) */
+int stm32_rgbled_register(void);  /* /dev/rgbled0 char device */
 #endif
 
 /* Resistor ladder decoder and threshold tables */

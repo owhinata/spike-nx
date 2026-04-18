@@ -56,7 +56,40 @@ Channels are mapped to GS registers in reverse order (CH0→GSB15, CH47→GSR0).
 | 3 | CH26 | CH27 | CH32 | CH34 | CH22 |
 | 4 | CH25 | CH40 | CH30 | CH35 | CH9 |
 
-## API
+## Userspace API (`/dev/rgbled0`)
+
+Under `CONFIG_BUILD_PROTECTED=y`, user blobs cannot resolve kernel symbols directly. TLC5955 is accessed via the char device `/dev/rgbled0` using ioctl (Issue #39).
+
+```c
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <arch/board/board_rgbled.h>
+
+int fd = open("/dev/rgbled0", O_RDWR);
+
+/* Set one channel's duty */
+struct rgbled_duty_s d = { .channel = TLC5955_CH_STATUS_TOP_G,
+                           .value   = 0xffff };
+ioctl(fd, RGBLEDIOC_SETDUTY, (unsigned long)&d);
+
+/* Set all 48 channels at once (arg is the uint16_t duty value) */
+ioctl(fd, RGBLEDIOC_SETALL, 0);         /* all off */
+
+/* Force immediate SPI sync (bypass HPWORK deferred batch) */
+ioctl(fd, RGBLEDIOC_UPDATE, 0);
+```
+
+| ioctl | arg type | Description |
+|-------|----------|-------------|
+| `RGBLEDIOC_SETDUTY` | `struct rgbled_duty_s *` | Set `channel` (0..47) to `value` (0..0xffff) |
+| `RGBLEDIOC_SETALL` | `uint16_t` (arg itself) | Apply the same duty to all 48 channels |
+| `RGBLEDIOC_UPDATE` | 0 | Call `tlc5955_update_sync()` for immediate flush |
+
+`board_rgbled.h` also exports `TLC5955_NUM_CHANNELS` and the `TLC5955_CH_*` constants (previously defined in `spike_prime_hub.h`).
+
+## Kernel-Internal API
+
+`stm32_bringup` and other in-kernel code may call the TLC5955 functions directly:
 
 ```c
 #include "spike_prime_hub.h"
@@ -72,17 +105,9 @@ void tlc5955_set_duty(uint8_t ch, uint16_t value);
 
 /* Immediate update: for init/shutdown use (when HPWORK not running) */
 int tlc5955_update_sync(void);
-```
 
-### Example
-
-```c
-/* Set center button LED to green (no update call needed) */
-tlc5955_set_duty(TLC5955_CH_STATUS_TOP_G, 0xffff);
-tlc5955_set_duty(TLC5955_CH_STATUS_BTM_G, 0xffff);
-
-/* During initialization, use sync update */
-tlc5955_update_sync();
+/* Register /dev/rgbled0 (called automatically in stm32_bringup) */
+int stm32_rgbled_register(void);
 ```
 
 ## defconfig
@@ -133,6 +158,7 @@ led off       - All LEDs off
 
 ## Source Files
 
-- `boards/spike-prime-hub/src/stm32_tlc5955.c` — Driver implementation
-- `boards/spike-prime-hub/src/spike_prime_hub.h` — Channel definitions
-- `apps/led/led_main.c` — LED test app
+- `boards/spike-prime-hub/src/stm32_tlc5955.c` — Driver implementation (SPI + HPWORK)
+- `boards/spike-prime-hub/src/stm32_rgbled.c` — `/dev/rgbled0` char driver (thin ioctl wrapper)
+- `boards/spike-prime-hub/include/board_rgbled.h` — Channel constants + ioctl ABI (shared by user/kernel)
+- `apps/led/led_main.c` — LED test app (ioctl-based)

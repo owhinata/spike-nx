@@ -153,6 +153,12 @@ int stm32_bringup(void)
       tlc5955_set_duty(TLC5955_CH_STATUS_BTM_G, 0xffff);
       tlc5955_update_sync();
     }
+
+  ret = stm32_rgbled_register();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_rgbled_register() failed: %d\n", ret);
+    }
 #endif
 
 #ifdef CONFIG_STM32_ADC1
