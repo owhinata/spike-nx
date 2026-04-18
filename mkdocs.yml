@@ -70,6 +70,7 @@ nav:
       - development/debugging.md
       - development/file-transfer.md
       - development/apps.md
+      - development/build-protected.md
   - NuttX:
       - nuttx/f413-support.md
       - nuttx/tickless-timer.md
