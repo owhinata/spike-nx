@@ -305,6 +305,54 @@ BASEPRI を 0x30 程度に引き下げれば、pybricks 絶対値 (IMU 0x30、So
   - 選択肢 C1 (BASEPRI を 0x30 等に引き下げ) を発動して 0x30–0xF0 の 13 レベルに広げる
 - 新しい peripheral IRQ を追加する際は、pybricks の相対順序を確認して ε 枠内に配置 (`stm32_bringup.c` の該当ブロックに追記) する。
 
+## ワークキュースレッド優先度 (HPWORK / LPWORK)
+
+ISR が `work_queue(HPWORK, ...)` / `work_queue(LPWORK, ...)` で deferred 処理を投げる先のカーネルスレッド優先度。NVIC 優先度とは**完全に別軸**(NVIC は数値が小さいほど高、NuttX scheduler は数値が大きいほど高)で、両者の関係性は「ISR が defer したあとは、その work が thread 文脈で何優先度の隣人と CPU を取り合うか」だけ。
+
+### 採用値
+
+| Worker | NuttX PRI (1-255) | 設定 |
+|---|---|---|
+| `hpwork` | 224 (RR) | `CONFIG_SCHED_HPWORKPRIORITY=224` (NuttX 既定) |
+| `lpwork` | **176** (RR) | `CONFIG_SCHED_LPWORKPRIORITY=176` (本プロジェクトで明示指定) |
+| `lpwork` 上限 (PI 昇格時) | 176 | `CONFIG_SCHED_LPWORKPRIOMAX=176` (NuttX 既定) |
+
+`SCHED_PRIORITY_DEFAULT = 100` (`<sys/types.h>`) なので、`nsh_main` / `imu` / `sound` / `coremark` 等の builtin app は基本 PRI=100 で走る。
+
+### LPWORK を 100 → 176 に引き上げた理由
+
+NuttX 既定の `LPWORKPRIORITY=100` だと user app と同じ優先度になり、
+
+- ユーザアプリが CPU を使い切っている間 `lpwork` が `RR_INTERVAL=200ms` の time-slice に晒される
+- BCD 検出のような時間非クリティカルな defer なら問題ないが、将来 ISR が時間敏感な作業を LPWORK へ流すと user-space CPU 負荷で遅延する
+
+を避けたい。176 は `LPWORKPRIOMAX` の既定値で、HPWORK (224) と user app (100) の中間。これにより:
+
+- LPWORK は user app を **常に preempt** する (低レイテンシな defer)
+- HPWORK (224) は引き続き LPWORK を preempt できる (時間最優先の defer は HPWORK へ)
+- 元々 PI で 176 まで昇格しうる設計だったので、ベースを 176 に固定しても挙動の上限は変わらない
+
+### ドライバの defer 振り分け
+
+| 発生源 | NVIC IRQ | defer 先 | 理由 |
+|---|---|---|---|
+| TIM9 (tickless tick) | 0x80 | — | tick handler 直で完了 |
+| LSM6DSL DRDY (I2C2 / EXTI4) | 0x90 | **HPWORK** (224) | センサ DRDY → 直近の thread 経路で読出し |
+| Sound DAC DMA1_S5 | 0xA0 | (DMA half/full cb 直, work 不経由) | リング buf 補充を ISR 内で完結 |
+| USB OTG FS | 0xB0 | (driver 内部処理) | — |
+| ADC DMA2_S0 | 0xD0 | (cb 直 → battery driver) | — |
+| TLC5955 SPI1 + DMA2_S2/S3 | 0xD0 | **HPWORK** (224) | LED frame sync 2ms cadence を保つ |
+| Battery charger poll | (timer) | **HPWORK** (224) | VBUS 状態の周期監視 |
+| Battery charger BCD detect | (HPWORK 内で再 schedule) | **LPWORK** (176) | BCD は blocking I2C も含む heavy 処理を user 帯から切り離す |
+| Power button monitor | (timer) | **HPWORK** (224) | 周期 poll |
+| PendSV / SysTick | 0xF0 | — | — |
+
+### 検証ポイント
+
+- `nsh> ps` で `hpwork` PRI=224 / `lpwork` PRI=176 を確認
+- LPWORK 引き上げは Issue #37 (BUILD_PROTECTED) のフォロー作業として `boards/spike-prime-hub/configs/usbnsh/defconfig` に追加(別構成 `nsh` defconfig には未反映 — 必要なら同様に追加)
+- 既存の Issue #36 (NVIC) と Issue #37 (BUILD_PROTECTED) のいずれにも回帰なし。`pytest -m "not slow and not interactive"` で動作確認
+
 ## 将来の拡張
 
 Motor / Bluetooth / Flash 実装時に追加すべき DMA/IRQ 設定は、pybricks の割当をそのまま踏襲する。pybricks では Bluetooth が最高優先度 (NVIC 1, DMA VERY_HIGH) だが、NuttX では BASEPRI 制約のため NVIC 0x80 に制限される可能性がある。この制約が BT 通信品質に影響するかは実装時に検証が必要。上記 Issue #36 の検討も同時期に再開する。

@@ -305,6 +305,54 @@ Replace `up_irq_save()` from a BASEPRI-based to a `__disable_irq()`-based implem
   - Activate option C1 (lower BASEPRI to e.g. 0x30) to widen the usable band to 0x30–0xF0 (13 levels).
 - When adding a new peripheral IRQ, consult the pybricks relative ordering and place it in the appropriate ε slot by appending to the `stm32_bringup.c` epsilon block.
 
+## Work-queue thread priorities (HPWORK / LPWORK)
+
+When an ISR defers processing through `work_queue(HPWORK, ...)` or `work_queue(LPWORK, ...)`, the work runs in a kernel thread at one of two priorities. These thread priorities live on a **separate axis** from NVIC priorities (NVIC: lower number = higher; NuttX scheduler: higher number = higher). The only relationship that matters is who the deferred work has to share CPU time with after the ISR has returned.
+
+### Chosen values
+
+| Worker | NuttX PRI (1-255) | Setting |
+|---|---|---|
+| `hpwork` | 224 (RR) | `CONFIG_SCHED_HPWORKPRIORITY=224` (NuttX default) |
+| `lpwork` | **176** (RR) | `CONFIG_SCHED_LPWORKPRIORITY=176` (explicit override) |
+| `lpwork` PI ceiling | 176 | `CONFIG_SCHED_LPWORKPRIOMAX=176` (NuttX default) |
+
+`SCHED_PRIORITY_DEFAULT = 100` (`<sys/types.h>`), so `nsh_main` / `imu` / `sound` / `coremark` and other builtin apps run at PRI=100 by default.
+
+### Why LPWORK was raised from 100 to 176
+
+With NuttX's default `LPWORKPRIORITY=100`, LPWORK shares a priority with user apps, which causes:
+
+- The LPWORK thread time-slices against any CPU-hungry user app at the `RR_INTERVAL=200 ms` quantum
+- BCD detection and other non-time-critical defers tolerate this, but the moment any future ISR offloads time-sensitive work to LPWORK, user-space CPU load directly delays it
+
+176 is the existing `LPWORKPRIOMAX` ceiling and sits between HPWORK (224) and user apps (100). With this change:
+
+- LPWORK **always preempts** user apps (low-latency defer)
+- HPWORK (224) still preempts LPWORK (the most time-critical defers stay on HPWORK)
+- The effective ceiling already reached 176 through priority inheritance, so pinning the base to 176 does not change the upper bound
+
+### Driver defer routing
+
+| Source | NVIC IRQ | Defer target | Reason |
+|---|---|---|---|
+| TIM9 (tickless tick) | 0x80 | — | Handled inside the tick handler |
+| LSM6DSL DRDY (I2C2 / EXTI4) | 0x90 | **HPWORK** (224) | Pull sensor sample on the highest-priority worker |
+| Sound DAC DMA1_S5 | 0xA0 | (DMA half/full callback, no work queue) | Ring-buffer refill stays inside the ISR |
+| USB OTG FS | 0xB0 | (driver-internal) | — |
+| ADC DMA2_S0 | 0xD0 | (callback into battery driver) | — |
+| TLC5955 SPI1 + DMA2_S2/S3 | 0xD0 | **HPWORK** (224) | Maintain 2 ms LED frame-sync cadence |
+| Battery charger poll | (timer) | **HPWORK** (224) | Periodic VBUS state monitor |
+| Battery charger BCD detect | (re-scheduled from HPWORK) | **LPWORK** (176) | BCD includes blocking I2C — push it off the HPWORK band |
+| Power button monitor | (timer) | **HPWORK** (224) | Periodic poll |
+| PendSV / SysTick | 0xF0 | — | — |
+
+### Verification points
+
+- `nsh> ps` shows `hpwork` PRI=224 and `lpwork` PRI=176
+- The LPWORK bump was added to `boards/spike-prime-hub/configs/usbnsh/defconfig` as a follow-up to Issue #37 (BUILD_PROTECTED). It is **not** propagated to the alternate `nsh` defconfig — extend it there too if needed.
+- No regression against Issue #36 (NVIC) or Issue #37 (BUILD_PROTECTED). Verified with `pytest -m "not slow and not interactive"`.
+
 ## Future Expansion
 
 When implementing Motor / Bluetooth / Flash, follow the pybricks DMA/IRQ allocation directly. Note that pybricks sets Bluetooth to NVIC level 1 (DMA VERY_HIGH), but NuttX's BASEPRI constraint may force it to 0x80. Whether this impacts BT communication quality must be verified at implementation time. The Issue #36 discussion above should be re-opened concurrently.
