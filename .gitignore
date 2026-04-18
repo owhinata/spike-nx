@@ -17,6 +17,10 @@ boards/*/src/*.o
 boards/*/src/*.a
 boards/*/src/.depend
 boards/*/src/Make.dep
+boards/*/kernel/*.o
+boards/*/kernel/*.elf
+boards/*/kernel/.depend
+boards/*/kernel/Make.dep
 
 # Apps build artifacts
 apps/Kconfig
