@@ -166,14 +166,9 @@ int stm32_adc_dma_initialize(void)
   g_dma = stm32_dmachannel(DMAMAP_ADC1_1);
   DEBUGASSERT(g_dma != NULL);
 
-#ifdef CONFIG_ARCH_IRQPRIO
-  /* ADC DMA at lower priority than sound (0xB0 vs 0x80), matching
-   * pybricks DMA_PRIORITY_MEDIUM / NVIC base=7.
+  /* NVIC priority for STM32_IRQ_DMA2S0 is assigned centrally in
+   * stm32_bringup.c (see "Issue #36 epsilon plan" block).
    */
-
-  up_prioritize_irq(STM32_IRQ_DMA2S0,
-                     NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
-#endif
 
   stm32_dmasetup(g_dma,
                  STM32_ADC1_BASE + STM32_ADC_DR_OFFSET,

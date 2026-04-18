@@ -117,13 +117,9 @@ int stm32_sound_initialize(void)
   g_dma = stm32_dmachannel(DMAMAP_DAC1_CH1);
   DEBUGASSERT(g_dma != NULL);
 
-#ifdef CONFIG_ARCH_IRQPRIO
-  /* Sound DMA at NuttX default priority (0x80) — highest among board
-   * peripherals, matching pybricks DMA_PRIORITY_HIGH / NVIC base=4.
+  /* NVIC priority for STM32_IRQ_DMA1S5 is assigned centrally in
+   * stm32_bringup.c (see "Issue #36 epsilon plan" block).
    */
-
-  up_prioritize_irq(STM32_IRQ_DMA1S5, NVIC_SYSH_PRIORITY_DEFAULT);
-#endif
 
   /* TIM6: basic up-counter, full-speed prescaler (PSC=0). */
 

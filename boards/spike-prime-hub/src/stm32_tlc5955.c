@@ -224,6 +224,10 @@ int tlc5955_initialize(void)
       return -ENODEV;
     }
 
+  /* NVIC priorities for STM32_IRQ_SPI1 / DMA2S2 / DMA2S3 are assigned
+   * centrally in stm32_bringup.c (see "Issue #36 epsilon plan" block).
+   */
+
   SPI_LOCK(g_spi, true);
   SPI_SETMODE(g_spi, SPIDEV_MODE0);
   SPI_SETBITS(g_spi, 8);

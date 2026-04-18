@@ -13,6 +13,7 @@
 #include <debug.h>
 #include <errno.h>
 
+#include <nuttx/arch.h>
 #include <nuttx/fs/fs.h>
 #include <nuttx/i2c/i2c_master.h>
 
@@ -36,6 +37,60 @@
 int stm32_bringup(void)
 {
   int ret = OK;
+
+#ifdef CONFIG_ARCH_IRQPRIO
+  /* Issue #36 epsilon plan: board-wide NVIC priority assignment.
+   *
+   * Every peripheral IRQ is compressed into the 0x80-0xF0 band so that
+   * it stays at or below NuttX BASEPRI (0x80) and can therefore safely
+   * call NuttX APIs (nxsem_post, etc.) from its ISR. The relative
+   * ordering mirrors the pybricks design:
+   *
+   *   0x80  TIM9 tickless tick          (kept at default)
+   *   0x90  IMU I2C2 ER/EV + EXTI4
+   *   0xA0  Sound DAC DMA1_S5
+   *   0xB0  USB OTG FS
+   *   0xD0  ADC DMA2_S0
+   *   0xD0  TLC5955 SPI1 + DMA2_S2/S3
+   *   0xF0  PendSV, SysTick
+   *
+   * See docs/{ja,en}/hardware/dma-irq.md "Resolution: Issue #36" for
+   * the full rationale and the staged rollout (steps 1-6) that verified
+   * Issue #36 does not recur.
+   */
+
+  /* step 1: system handlers */
+  up_prioritize_irq(STM32_IRQ_PENDSV,  NVIC_SYSH_PRIORITY_MIN);
+  up_prioritize_irq(STM32_IRQ_SYSTICK, NVIC_SYSH_PRIORITY_MIN);
+
+  /* step 2: TLC5955 SPI1 + DMA */
+  up_prioritize_irq(STM32_IRQ_SPI1,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_DMA2S2,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_DMA2S3,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
+
+  /* step 3: ADC DMA */
+  up_prioritize_irq(STM32_IRQ_DMA2S0,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
+
+  /* step 4: USB OTG FS */
+  up_prioritize_irq(STM32_IRQ_OTGFS,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
+
+  /* step 5: Sound DAC DMA (DMA1 Stream5) */
+  up_prioritize_irq(STM32_IRQ_DMA1S5,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 2 * NVIC_SYSH_PRIORITY_STEP);
+
+  /* step 6: IMU LSM6DS3TR-C — I2C2 event/error + EXTI4 (INT1 DRDY) */
+  up_prioritize_irq(STM32_IRQ_I2C2EV,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_I2C2ER,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_EXTI4,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+#endif
 
 #ifdef CONFIG_STM32_IWDG
   stm32_iwdginitialize("/dev/watchdog0", STM32_LSI_FREQUENCY);
