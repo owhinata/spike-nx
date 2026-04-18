@@ -10,7 +10,7 @@ The Docker container handles everything (submodule init, Docker image build, con
 make
 ```
 
-The output artifact is `nuttx/nuttx.bin`.
+The build produces a kernel blob `nuttx/nuttx.bin` (~139 KB) and a user blob `nuttx/nuttx_user.bin` (~146 KB). The default `usbnsh` configuration is BUILD_PROTECTED, so both blobs must be flashed to the device.
 
 ### Kconfig Configuration
 
@@ -46,16 +46,20 @@ make distclean
 
 ### Flash Command
 
+The default `usbnsh` configuration is BUILD_PROTECTED, so flash the kernel blob at `0x08008000` and the user blob at `0x08080000`:
+
 ```bash
-dfu-util -d 0694:0008 -a 0 -s 0x08008000:leave -D nuttx/nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08008000 -D nuttx/nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx/nuttx_user.bin
 ```
 
 | Option | Description |
 |---|---|
 | `-d 0694:0008` | VID/PID of the SPIKE Prime Hub |
 | `-a 0` | Alternate interface 0 (internal flash) |
-| `-s 0x08008000:leave` | Start address + exit DFU mode |
-| `-D nuttx/nuttx.bin` | Binary to download |
+| `-s 0x08008000` | Kernel blob start address (right after the 32 KB LEGO bootloader) |
+| `-s 0x08080000:leave` | User blob start address (2^n aligned) + exit DFU after writing |
+| `-D nuttx/nuttx.bin` / `-D nuttx/nuttx_user.bin` | Binary to download |
 
 On macOS, install with `brew install dfu-util`.
 

@@ -176,7 +176,9 @@ make distclean
 
 ```bash
 # DFU モード: USB 抜く → Bluetooth ボタン押したまま USB 接続 → 5秒待って離す
-dfu-util -d 0694:0008 -a 0 -s 0x08008000:leave -D nuttx/nuttx.bin
+# usbnsh (既定) は BUILD_PROTECTED なので kernel + user の 2 段書き込み
+dfu-util -d 0694:0008 -a 0 -s 0x08008000 -D nuttx/nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx/nuttx_user.bin
 ```
 
 ### シリアル接続

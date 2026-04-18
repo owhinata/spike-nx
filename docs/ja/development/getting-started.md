@@ -10,7 +10,7 @@ Docker コンテナがすべてを処理する (submodule init, Docker image bui
 make
 ```
 
-成果物は `nuttx/nuttx.bin`。
+成果物は kernel blob `nuttx/nuttx.bin` (~139 KB) と user blob `nuttx/nuttx_user.bin` (~146 KB)。既定構成 `usbnsh` は BUILD_PROTECTED なので両方を実機に書き込む。
 
 ### Kconfig 設定
 
@@ -46,16 +46,20 @@ make distclean
 
 ### 書込みコマンド
 
+`usbnsh` 既定構成は BUILD_PROTECTED なので、kernel blob を `0x08008000` に、user blob を `0x08080000` に書き込む 2 段構成:
+
 ```bash
-dfu-util -d 0694:0008 -a 0 -s 0x08008000:leave -D nuttx/nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08008000 -D nuttx/nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx/nuttx_user.bin
 ```
 
 | オプション | 意味 |
 |---|---|
 | `-d 0694:0008` | SPIKE Prime Hub の VID/PID |
 | `-a 0` | alternate interface 0 (内蔵フラッシュ) |
-| `-s 0x08008000:leave` | 開始アドレス + DFU モード終了 |
-| `-D nuttx/nuttx.bin` | ダウンロードするバイナリ |
+| `-s 0x08008000` | kernel blob 開始アドレス (LEGO bootloader 32K の直後) |
+| `-s 0x08080000:leave` | user blob 開始アドレス (2^n 整列) + 書込み後 DFU 終了 |
+| `-D nuttx/nuttx.bin` / `-D nuttx/nuttx_user.bin` | ダウンロードするバイナリ |
 
 macOS では `brew install dfu-util` でインストール。
 

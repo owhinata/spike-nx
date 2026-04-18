@@ -73,10 +73,11 @@ brew install dfu-util  # 初回のみ
 
 1. Hub の USB を抜く
 2. Bluetooth ボタンを押したまま USB 接続、5秒待って離す（DFU モード）
-3. 書き込み:
+3. 書き込み (`usbnsh` 既定構成は BUILD_PROTECTED なので kernel + user の 2 段書き込み):
 
 ```bash
-dfu-util -d 0694:0008 -a 0 -s 0x08008000:leave -D nuttx/nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08008000 -D nuttx/nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx/nuttx_user.bin
 ```
 
 ### シリアル接続

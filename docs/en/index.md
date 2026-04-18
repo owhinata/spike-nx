@@ -18,10 +18,11 @@ brew install dfu-util  # first time only
 
 1. Unplug the Hub's USB cable
 2. Hold the Bluetooth button, plug in USB, wait 5 seconds, then release (DFU mode)
-3. Flash:
+3. Flash (the default `usbnsh` config is BUILD_PROTECTED, so flash both kernel and user blobs):
 
 ```bash
-dfu-util -d 0694:0008 -a 0 -s 0x08008000:leave -D nuttx/nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08008000 -D nuttx/nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx/nuttx_user.bin
 ```
 
 ### Serial Connection

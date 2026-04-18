@@ -144,8 +144,9 @@ NuttX only requires `FLASH ORIGIN = 0x08008000` in the linker script for VTOR to
 dfu-util -l
 # -> [0694:0008] Internal Flash
 
-# Flash firmware
-dfu-util -d 0694:0008 -a 0 -s 0x08008000:leave -D nuttx.bin
+# Flash firmware (BUILD_PROTECTED requires both kernel and user blobs)
+dfu-util -d 0694:0008 -a 0 -s 0x08008000 -D nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx_user.bin
 ```
 
 ### Limitations

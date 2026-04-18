@@ -144,8 +144,9 @@ NuttX はリンカスクリプトで `FLASH ORIGIN = 0x08008000` を設定する
 dfu-util -l
 # → [0694:0008] Internal Flash
 
-# ファームウェア書込み
-dfu-util -d 0694:0008 -a 0 -s 0x08008000:leave -D nuttx.bin
+# ファームウェア書込み (BUILD_PROTECTED は kernel + user の 2 段書き込み)
+dfu-util -d 0694:0008 -a 0 -s 0x08008000 -D nuttx.bin
+dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx_user.bin
 ```
 
 ### 制限事項
