@@ -7,7 +7,7 @@
  ****************************************************************************/
 
 #include <string.h>
-#include <nuttx/clock.h>
+#include <time.h>
 
 #include "imu_stationary.h"
 
@@ -61,7 +61,10 @@ static inline bool is_bounded(int16_t diff, int16_t threshold)
 
 static uint32_t get_time_us(void)
 {
-  return (uint32_t)(clock_systime_ticks() * USEC_PER_TICK);
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint32_t)((uint64_t)ts.tv_sec * 1000000U +
+                    (uint32_t)ts.tv_nsec / 1000U);
 }
 
 static void reset_buffer(void)

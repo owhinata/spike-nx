@@ -7,7 +7,7 @@
 
 #include <math.h>
 #include <string.h>
-#include <nuttx/clock.h>
+#include <time.h>
 
 #include "imu_fusion.h"
 #include "imu_geometry.h"
@@ -81,7 +81,10 @@ static uint32_t g_stationary_time_last;
 
 static uint32_t get_time_ms(void)
 {
-  return (uint32_t)(clock_systime_ticks() * USEC_PER_TICK / 1000);
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint32_t)((uint64_t)ts.tv_sec * 1000U +
+                    (uint32_t)ts.tv_nsec / 1000000U);
 }
 
 static void update_heading_projection(void)
