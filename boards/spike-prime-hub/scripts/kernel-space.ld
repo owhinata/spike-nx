@@ -1,16 +1,28 @@
 /****************************************************************************
- * boards/spike-prime-hub/scripts/ld.script
+ * boards/spike-prime-hub/scripts/kernel-space.ld
  *
- * STM32F413VGT6 SPIKE Prime Hub:
- *   Flash: 992K @ 0x08008000 (after 32K LEGO bootloader)
- *   SRAM:  320K @ 0x20000000
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.  The
+ * ASF licenses this file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the
+ * License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ *
  ****************************************************************************/
 
-MEMORY
-{
-  flash (rx) : ORIGIN = 0x08008000, LENGTH = 992K
-  sram (rwx) : ORIGIN = 0x20000000, LENGTH = 320K
-}
+/* NOTE:  This depends on the memory.ld script having been included prior to
+ * this script.
+ */
 
 OUTPUT_ARCH(arm)
 ENTRY(_stext)
@@ -31,36 +43,36 @@ SECTIONS
         *(.gcc_except_table)
         *(.gnu.linkonce.r.*)
         _etext = ABSOLUTE(.);
-    } > flash
+    } > kflash
 
     .init_section : ALIGN(4) {
         _sinit = ABSOLUTE(.);
         KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
         KEEP(*(.init_array EXCLUDE_FILE(*crtbegin.o *crtbegin?.o *crtend.o *crtend?.o) .ctors))
         _einit = ABSOLUTE(.);
-    } > flash
+    } > kflash
 
     .ARM.extab : ALIGN(4) {
         *(.ARM.extab*)
-    } > flash
+    } > kflash
 
     .ARM.exidx : ALIGN(4) {
         __exidx_start = ABSOLUTE(.);
         *(.ARM.exidx*)
         __exidx_end = ABSOLUTE(.);
-    } > flash
+    } > kflash
 
     .tdata : {
         _stdata = ABSOLUTE(.);
         *(.tdata .tdata.* .gnu.linkonce.td.*);
         _etdata = ABSOLUTE(.);
-    } > flash
+    } > kflash
 
     .tbss : {
         _stbss = ABSOLUTE(.);
         *(.tbss .tbss.* .gnu.linkonce.tb.* .tcommon);
         _etbss = ABSOLUTE(.);
-    } > flash
+    } > kflash
 
     _eronly = ABSOLUTE(.);
 
@@ -71,7 +83,7 @@ SECTIONS
         CONSTRUCTORS
         . = ALIGN(4);
         _edata = ABSOLUTE(.);
-    } > sram AT > flash
+    } > ksram AT > kflash
 
     .bss : ALIGN(4) {
         _sbss = ABSOLUTE(.);
@@ -80,7 +92,7 @@ SECTIONS
         *(COMMON)
         . = ALIGN(4);
         _ebss = ABSOLUTE(.);
-    } > sram
+    } > ksram
 
     /* Stabs debugging sections. */
 
