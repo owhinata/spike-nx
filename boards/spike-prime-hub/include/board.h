@@ -173,4 +173,36 @@
 #define DMACHAN_SPI2_RX   DMAMAP_SPI2_RX     /* DMA1 Stream3 Ch0 */
 #define DMACHAN_SPI2_TX   DMAMAP_SPI2_TX     /* DMA1 Stream4 Ch0 */
 
+/* USART2: CC2564C Bluetooth HCI UART (Issue #47)
+ *   PD5 = USART2_TX  (AF7)
+ *   PD6 = USART2_RX  (AF7)
+ *   PD3 = USART2_CTS (AF7, hardware flow control)
+ *   PD4 = USART2_RTS (AF7, hardware flow control)
+ */
+
+#define GPIO_USART2_TX    GPIO_USART2_TX_2    /* PD5 */
+#define GPIO_USART2_RX    GPIO_USART2_RX_2    /* PD6 */
+#define GPIO_USART2_CTS   GPIO_USART2_CTS_2   /* PD3 */
+#define GPIO_USART2_RTS   GPIO_USART2_RTS_2   /* PD4 */
+
+/* USART2 DMA channel mapping for Bluetooth (board-local, BT-dedicated).
+ * Per RM0430 Rev 9 Table 30 (DMA1 request mapping) there are two USART2_RX
+ * mappings on STM32F413 (CHSEL 4-bit extension): S5/Ch4 (NuttX default via
+ * DMAMAP_USART2_RX) and S7/Ch6 (multiplexed entry).  We choose S7/Ch6 so
+ * the BT driver does not collide with code that relies on the default map.
+ * TX S6/Ch4 matches the NuttX default and pybricks Prime Hub platform.
+ */
+
+#define DMACHAN_USART2_BT_TX  DMAMAP_USART2_TX                        /* DMA1 S6 Ch4 */
+#define DMACHAN_USART2_BT_RX  STM32_DMA_MAP(DMA1, DMA_STREAM7, DMA_CHAN6) /* DMA1 S7 Ch6 */
+
+/* TIM8 CH4: CC2564C 32.768 kHz slow clock (BT sleep clock)
+ *   PC9 = TIM8_CH4 (AF3)
+ *
+ * PWM at 32.768 kHz, 50% duty cycle (PSC=0, ARR=2929, CCR4=1465) from
+ * APB2=96 MHz.  Must be stable before nSHUTD goes high.
+ */
+
+#define GPIO_TIM8_CH4_BT_SLOWCLK  GPIO_TIM8_CH4_0   /* PC9 */
+
 #endif /* __BOARDS_SPIKE_PRIME_HUB_INCLUDE_BOARD_H */

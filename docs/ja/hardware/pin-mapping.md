@@ -97,12 +97,16 @@ SPI モード: CPOL=0, CPHA=0 (Mode 0), MSB first。
 
 ## Bluetooth (CC2564C)
 
-| 信号 | ピン | 備考 |
-|---|---|---|
-| TX | PD5 | USART2 |
-| RX | PD6 | USART2 |
-| CTS | PD3 | ハードウェアフロー制御必須 |
-| RTS | PD4 | ハードウェアフロー制御必須 |
+| 信号 | ピン | AF | 備考 |
+|---|---|---|---|
+| TX | PD5 | AF7 | USART2 TX |
+| RX | PD6 | AF7 | USART2 RX |
+| CTS | PD3 | AF7 | ハードウェアフロー制御必須 |
+| RTS | PD4 | AF7 | ハードウェアフロー制御必須 |
+| nSHUTD | PA2 | GPIO | CC2564C chip enable (Active HIGH、初期 LOW で reset 保持) |
+| SLOWCLK | PC9 | AF3 | TIM8 CH4 → 32.768 kHz 50% duty (sleep clock、nSHUTD HIGH 前に安定化) |
+
+DMA: TX = DMA1 Stream 6 Channel 4, RX = DMA1 Stream 7 Channel 6 (RM0430 Table 30、F413 固有の多重マッピング #2 を BT 専用に使用)。NVIC 優先度 0xA0 (Issue #50 予約枠)。
 
 ---
 
@@ -131,4 +135,5 @@ SPI モード: CPOL=0, CPHA=0 (Mode 0), MSB first。
 | TIM1 | モーター (ポート A, B) | CH1-CH4 | 96 MHz (APB2) |
 | TIM3 | モーター (ポート E, F) | CH1-CH4 | 96 MHz (APB1x2) |
 | TIM4 | モーター (ポート C, D) | CH1-CH4 | 96 MHz (APB1x2) |
+| TIM8 | Bluetooth 32.768 kHz slow clock | CH4 → PC9 | 96 MHz (APB2) → 32.764 kHz 出力 |
 | TIM12 | TLC5955 GSCLK | CH2 | 96 MHz → 9.6 MHz 出力 |

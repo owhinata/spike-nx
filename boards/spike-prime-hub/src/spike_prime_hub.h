@@ -74,6 +74,18 @@
 #define GPIO_W25_CS       (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
                            GPIO_OUTPUT_SET | GPIO_PORTB | GPIO_PIN12)
 
+/* CC2564C Bluetooth nSHUTD (chip enable, active HIGH)
+ *   PA2 = BT_nSHUTD  (GPIO output, drive LOW at boot to keep chip in reset
+ *                     until stm32_bluetooth_initialize() brings it up)
+ *
+ * Note: PA2 is also defined as GPIO_USART2_TX_1 in the pinmap, but this
+ * board uses USART2_TX_2 (PD5) for the HCI UART to the BT controller, so
+ * PA2 is free for nSHUTD control.
+ */
+
+#define GPIO_BT_NSHUTD    (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz | \
+                           GPIO_OUTPUT_CLEAR | GPIO_PORTA | GPIO_PIN2)
+
 /* procfs */
 
 #ifdef CONFIG_FS_PROCFS

@@ -97,12 +97,16 @@ Device address: **0x6A**
 
 ## Bluetooth (CC2564C)
 
-| Signal | Pin | Notes |
-|---|---|---|
-| TX | PD5 | USART2 |
-| RX | PD6 | USART2 |
-| CTS | PD3 | Hardware flow control required |
-| RTS | PD4 | Hardware flow control required |
+| Signal | Pin | AF | Notes |
+|---|---|---|---|
+| TX | PD5 | AF7 | USART2 TX |
+| RX | PD6 | AF7 | USART2 RX |
+| CTS | PD3 | AF7 | Hardware flow control required |
+| RTS | PD4 | AF7 | Hardware flow control required |
+| nSHUTD | PA2 | GPIO | CC2564C chip enable (active HIGH, driven LOW at boot to hold reset) |
+| SLOWCLK | PC9 | AF3 | TIM8 CH4 -> 32.768 kHz 50% duty (sleep clock, stable before nSHUTD HIGH) |
+
+DMA: TX = DMA1 Stream 6 Channel 4, RX = DMA1 Stream 7 Channel 6 (RM0430 Table 30; F413-specific multiplexed mapping #2 dedicated to Bluetooth). NVIC priority 0xA0 (Issue #50 reserved slot).
 
 ---
 
@@ -131,4 +135,5 @@ Device address: **0x6A**
 | TIM1 | Motors (Port A, B) | CH1-CH4 | 96 MHz (APB2) |
 | TIM3 | Motors (Port E, F) | CH1-CH4 | 96 MHz (APB1x2) |
 | TIM4 | Motors (Port C, D) | CH1-CH4 | 96 MHz (APB1x2) |
+| TIM8 | Bluetooth 32.768 kHz slow clock | CH4 -> PC9 | 96 MHz (APB2) -> 32.764 kHz output |
 | TIM12 | TLC5955 GSCLK | CH2 | 96 MHz -> 9.6 MHz output |

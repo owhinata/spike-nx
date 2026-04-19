@@ -164,13 +164,26 @@ NuttX 上流の `w25.c` (MTD_W25) は 3byte アドレスのみ (W25Q128 まで) 
 
 | 項目 | 値 |
 |---|---|
-| デバイス | CC2564C (Texas Instruments) |
+| デバイス | CC2564C (Texas Instruments、BR/EDR + BLE デュアルモード) |
 | 接続 | USART2 (TX=PD5, RX=PD6, CTS=PD3, RTS=PD4) |
 | フロー制御 | RTS/CTS ハードウェアフロー制御必須 |
+| DMA | TX: DMA1 Stream6 Ch4, RX: DMA1 Stream7 Ch6 (VERY_HIGH) |
+| NVIC 優先度 | 0xA0 (USART2 + DMA1 S6 + DMA1 S7、Issue #50 予約枠) |
+| nSHUTD (chip enable) | PA2 (GPIO output、Active HIGH) |
+| 32.768 kHz slow clock | PC9 = TIM8 CH4 (AF3)、CC2564C の sleep clock として必須 |
+
+### 起動シーケンス
+
+1. **32.768 kHz slow clock 供給** — TIM8 CH4 PWM (50% duty) を安定化 (nSHUTD HIGH 前)
+2. **nSHUTD トグル** — LOW → 50 ms → HIGH (chip reset → boot 開始)
+3. **ROM boot 待機** (≈150 ms)
+4. **ファームウェアパッチロード** — 約 6.6 KB の `.bts` init script を HCI コマンドで順送信 (USART2 115200 bps)
+5. **ボーレート切替** — `HCI_VS_Update_UART_HCI_Baud_Rate` (opcode 0xFF36) で 3 Mbps に切替
+6. **HCI stack 開始** — `bt_hcicore.c` 経由で netdev 登録
 
 ### 状態
 
-初期段階では対象外。起動時にファームウェアパッチロード (~7 KB) が必要で、HCI UART Bluetooth スタックの統合が必要。NuttX には `WIRELESS_BLUETOOTH` + `BLUETOOTH_UART` の基盤があり、CC2564 固有の初期化シーケンスも存在する。
+Issue #47 で実装中。`boards/spike-prime-hub/src/stm32_btuart.c` で board-local の `struct btuart_lowerhalf_s` を自前実装し、NuttX generic upper-half (`CONFIG_BLUETOOTH_UART_OTHER`) と組み合わせて `CONFIG_NET_BLUETOOTH` 経路で netdev 登録する方針。
 
 ---
 

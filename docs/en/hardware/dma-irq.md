@@ -15,8 +15,11 @@ Based on RM0430 Table 27/28 (DMA request mapping).
 | S3 | Ch0 | **W25Q256 SPI2 RX** | ✅ Implemented (NuttX SPI) | MEDIUM |
 | S4 | Ch0 | **W25Q256 SPI2 TX** | ✅ Implemented (NuttX SPI) | MEDIUM |
 | S5 | Ch7 | **DAC1 CH1 (Sound)** | ✅ Implemented | **HIGH** |
-| S6 | Ch4 | BT UART2 TX | Not implemented (pybricks reserved) | VERY_HIGH |
-| S7 | Ch6 | BT UART2 RX | Not implemented (pybricks reserved) | VERY_HIGH |
+| S6 | Ch4 | **USART2 TX (CC2564C Bluetooth)** | Scheduled (Issue #47) | VERY_HIGH |
+| S7 | Ch6 | **USART2 RX (CC2564C Bluetooth)** | Scheduled (Issue #47) | VERY_HIGH |
+
+!!! note "Multiplexed USART2_RX mappings (F413-specific)"
+    RM0430 Rev 9 Table 30 defines USART2_RX at two DMA1 slots: S5/Ch4 and S7/Ch6. This is an F413-specific extension (CHSEL is 4 bits, §9.3.4 / Figure 24) that expands the per-stream request mapping to 16 channels. This project dedicates S7/Ch6 to Bluetooth and keeps S5/Ch4 (the NuttX default `DMAMAP_USART2_RX`) free for future reuse.
 
 !!! note "Flash SPI2 DMA priority"
     pybricks runs the Flash SPI2 DMA at `DMA_PRIORITY_HIGH`, but NuttX's `stm32_spi.c` only honors a global `CONFIG_SPI_DMAPRIO` (no per-bus setting).  Raising the global to HIGH would also pull TLC5955 SPI1 DMA up, leaving DMA1 to arbitrate three concurrent HIGH streams (S3/S4/S5) with the Sound DMA — increasing DAC underrun risk.  This project keeps the F4 default MEDIUM (`DMA_SCR_PRIMED`) and reserves HIGH for Sound only.  Full pybricks parity is left for a future NuttX upstream contribution that adds per-bus DMA priority to `stm32_spi.c`.
@@ -146,7 +149,7 @@ Compresses the pybricks **relative** priority order into the 0x80–0xE0 band (b
 |---|---|---|---|---|
 | 0x80 | 8 | TIM9 tickless tick (OS only) | (pybricks SysTick 0xF0) | NuttX default (kept) |
 | **0x90** | **9** | **LUMP UART (future reservation)** | base=0/1 | **pending Issue #43** |
-| **0xA0** | **10** | **Bluetooth UART (reserved)** | base=1 | **pending Issue #47** |
+| **0xA0** | **10** | **Bluetooth UART (USART2 + DMA1 S6/S7)** | base=1 | **pending Issue #47** |
 | 0xB0 | 11 | IMU I2C2 EV/ER + EXTI4 | base=3 | `stm32_bringup.c` (step 6) |
 | 0xC0 | 12 | Sound DAC DMA1_S5 | base=4 (HIGH) | `stm32_bringup.c` (step 5) |
 | 0xD0 | 13 | W25Q256 DMA1_S3/S4 | base=5 | `stm32_bringup.c` (step 7) |
@@ -195,7 +198,7 @@ Separate from NVIC priority, this controls arbitration within a single DMA contr
 | TIM4 | Motor PWM (Port C/D) | Not implemented | 12 kHz PWM |
 | TIM5 | Charger ISET PWM | In defconfig, not implemented | 96 kHz, CH1 |
 | TIM6 | DAC sample rate (TRGO) | ✅ Implemented | Same |
-| TIM8 | BT 32.768 kHz clock | Not implemented | CH4 PWM |
+| TIM8 | BT 32.768 kHz slow clock (CC2564C) | Scheduled (Issue #47) | CH4 PWM (PSC=0, ARR=2929, CCR4=1465, 32.764 kHz) |
 | TIM9 | NuttX tickless timer | ✅ Implemented | (pybricks uses SysTick) |
 | TIM12 | TLC5955 GSCLK | ✅ Implemented | Same (CH2, ~8.7 MHz) |
 

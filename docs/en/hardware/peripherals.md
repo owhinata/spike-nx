@@ -164,13 +164,26 @@ The existing `lsm6dsl.c` (`CONFIG_SENSORS_LSM6DSL`) can be used as a substitute.
 
 | Item | Value |
 |---|---|
-| Device | CC2564C (Texas Instruments) |
+| Device | CC2564C (Texas Instruments, BR/EDR + BLE dual-mode) |
 | Connection | USART2 (TX=PD5, RX=PD6, CTS=PD3, RTS=PD4) |
 | Flow control | RTS/CTS hardware flow control required |
+| DMA | TX: DMA1 Stream6 Ch4, RX: DMA1 Stream7 Ch6 (VERY_HIGH) |
+| NVIC priority | 0xA0 (USART2 + DMA1 S6 + DMA1 S7; Issue #50 reserved slot) |
+| nSHUTD (chip enable) | PA2 (GPIO output, active HIGH) |
+| 32.768 kHz slow clock | PC9 = TIM8 CH4 (AF3); required by CC2564C as sleep clock |
+
+### Boot Sequence
+
+1. **Supply 32.768 kHz slow clock** — Stabilize TIM8 CH4 PWM (50% duty) before driving nSHUTD HIGH.
+2. **nSHUTD toggle** — LOW -> 50 ms -> HIGH (chip reset and boot trigger).
+3. **ROM boot wait** (~150 ms).
+4. **Firmware patch load** — Stream ~6.6 KB of `.bts` init script as HCI commands over USART2 (115200 bps).
+5. **Baud rate switch** — Send `HCI_VS_Update_UART_HCI_Baud_Rate` (opcode 0xFF36) to negotiate 3 Mbps.
+6. **HCI stack up** — Register as netdev via `bt_hcicore.c`.
 
 ### Status
 
-Not targeted during initial bring-up. Requires firmware patch loading (~7 KB) at boot and HCI UART Bluetooth stack integration. NuttX has a foundation with `WIRELESS_BLUETOOTH` + `BLUETOOTH_UART`, and CC2564-specific initialization sequences exist.
+Work in progress under Issue #47. The plan implements a board-local `struct btuart_lowerhalf_s` in `boards/spike-prime-hub/src/stm32_btuart.c` and plugs it into NuttX's generic upper-half (`CONFIG_BLUETOOTH_UART_OTHER`), registering via the `CONFIG_NET_BLUETOOTH` path so `btsak` can drive HCI scans.
 
 ---
 
