@@ -150,4 +150,27 @@
 #define DMACHAN_SPI1_RX   DMAMAP_SPI1_RX_2   /* DMA2 Stream2 Ch3 */
 #define DMACHAN_SPI1_TX   DMAMAP_SPI1_TX_1   /* DMA2 Stream3 Ch3 */
 
+/* SPI2: W25Q256 NOR Flash (32 MB)
+ *   SCK  = PB13 (AF5)
+ *   MISO = PC2  (AF5)
+ *   MOSI = PC3  (AF5)
+ *   /CS  = PB12 (GPIO software NSS, defined in spike_prime_hub.h)
+ *
+ * Pin selection follows the SPIKE Hub physical wiring (matches pybricks
+ * lib/pbio/platform/prime_hub/platform.c).  The PB10 SPI2_SCK alternative
+ * is unavailable here because PB10 is already used for I2C2_SCL.
+ */
+
+#define GPIO_SPI2_SCK     GPIO_SPI2_SCK_2    /* PB13 */
+#define GPIO_SPI2_MISO    GPIO_SPI2_MISO_2   /* PC2 */
+#define GPIO_SPI2_MOSI    GPIO_SPI2_MOSI_2   /* PC3 */
+
+/* SPI2 DMA channel mapping (DMA1, Channel 0)
+ *   RX: DMA1 Stream3 Channel 0
+ *   TX: DMA1 Stream4 Channel 0
+ */
+
+#define DMACHAN_SPI2_RX   DMAMAP_SPI2_RX     /* DMA1 Stream3 Ch0 */
+#define DMACHAN_SPI2_TX   DMAMAP_SPI2_TX     /* DMA1 Stream4 Ch0 */
+
 #endif /* __BOARDS_SPIKE_PRIME_HUB_INCLUDE_BOARD_H */

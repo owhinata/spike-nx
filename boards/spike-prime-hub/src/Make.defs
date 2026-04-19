@@ -36,6 +36,10 @@ ifeq ($(CONFIG_STM32_SPI1),y)
 CSRCS += stm32_tlc5955.c stm32_rgbled.c
 endif
 
+ifeq ($(CONFIG_STM32_SPI2),y)
+CSRCS += stm32_w25q256.c
+endif
+
 ifeq ($(CONFIG_STM32_ADC1),y)
 CSRCS += stm32_adc_dma.c stm32_power.c stm32_resistor_ladder.c
 endif

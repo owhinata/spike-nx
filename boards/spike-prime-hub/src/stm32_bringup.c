@@ -90,6 +90,19 @@ int stm32_bringup(void)
                     NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
   up_prioritize_irq(STM32_IRQ_EXTI4,
                     NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+
+#ifdef CONFIG_STM32_SPI2
+  /* step 7: W25Q256 Flash — SPI2 + DMA1 Stream3/4 (NVIC 0xB0).
+   * Compress pybricks ordering (Sound 4 > Flash 5/6 > USB 6 > ADC/TLC 7)
+   * into the 0x80-0xF0 BASEPRI band.  Co-resident with USB OTG FS at 0xB0.
+   */
+  up_prioritize_irq(STM32_IRQ_SPI2,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_DMA1S3,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_DMA1S4,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
+#endif
 #endif
 
 #ifdef CONFIG_STM32_IWDG
@@ -140,6 +153,15 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: Failed to initialize LSM6DSL: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_STM32_SPI2
+  ret = stm32_w25q256_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_w25q256_initialize() failed: %d\n", ret);
+      /* non-fatal: bringup continues, /mnt/flash will be absent */
     }
 #endif
 

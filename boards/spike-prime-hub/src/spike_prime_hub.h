@@ -67,6 +67,13 @@
 #define GPIO_OTGFS_VBUS (GPIO_INPUT | GPIO_FLOAT | GPIO_SPEED_100MHz | \
                          GPIO_OPENDRAIN | GPIO_PORTA | GPIO_PIN9)
 
+/* W25Q256 SPI NOR Flash chip select (active low, idle HIGH)
+ *   PB12 = /CS (GPIO software NSS for SPI2)
+ */
+
+#define GPIO_W25_CS       (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+                           GPIO_OUTPUT_SET | GPIO_PORTB | GPIO_PIN12)
+
 /* procfs */
 
 #ifdef CONFIG_FS_PROCFS
@@ -174,6 +181,10 @@ void stm32_cpuload_initialize(void);
 int stm32_sound_initialize(void);
 int stm32_tone_register(void);
 int stm32_pcm_register(void);
+
+#ifdef CONFIG_STM32_SPI2
+int stm32_w25q256_initialize(void);
+#endif
 
 #endif /* __ASSEMBLY__ */
 #endif /* __BOARDS_SPIKE_PRIME_HUB_SRC_SPIKE_PRIME_HUB_H */
