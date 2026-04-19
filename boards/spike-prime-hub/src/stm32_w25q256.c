@@ -576,7 +576,11 @@ static int w25q256_mtd_ioctl(FAR struct mtd_dev_s *dev,
 
       case BIOC_PARTINFO:
         {
-          /* Reported when partitioning code or LittleFS asks. */
+          /* Reported when partitioning code or LittleFS asks.  Match the
+           * NuttX upstream MTD convention: numsectors / sectorsize are in
+           * R/W block (page) units, not erase-sector units.  See
+           * nuttx/drivers/mtd/{w25,w25qxxxjv,gd25}.c.
+           */
 
           FAR struct partition_info_s *info =
               (FAR struct partition_info_s *)arg;
@@ -588,8 +592,8 @@ static int w25q256_mtd_ioctl(FAR struct mtd_dev_s *dev,
             }
 
           memset(info, 0, sizeof(*info));
-          info->numsectors  = W25Q256_NSECTORS;
-          info->sectorsize  = W25Q256_SECTOR_SIZE;
+          info->numsectors  = (W25Q256_CHIP_SIZE / W25Q256_PAGE_SIZE);
+          info->sectorsize  = W25Q256_PAGE_SIZE;
           info->startsector = 0;
           strlcpy(info->parent, "", sizeof(info->parent));
 
@@ -748,8 +752,9 @@ uint8_t stm32_spi2status(FAR struct spi_dev_s *dev, uint32_t devid)
 int stm32_w25q256_initialize(void)
 {
   FAR struct spi_dev_s *spi;
-  FAR struct mtd_dev_s *mtd_full;
-  FAR struct mtd_dev_s *mtd_part;
+  FAR struct mtd_dev_s *mtd_full = NULL;
+  FAR struct mtd_dev_s *mtd_part = NULL;
+  bool registered = false;
   int ret;
 
   /* /CS = PB12, idle HIGH */
@@ -767,6 +772,7 @@ int stm32_w25q256_initialize(void)
   if (mtd_full == NULL)
     {
       syslog(LOG_ERR, "W25Q256: chip not detected\n");
+      /* w25q256_initialize() already freed its own allocation on failure */
       return -ENODEV;
     }
 
@@ -783,7 +789,8 @@ int stm32_w25q256_initialize(void)
   if (mtd_part == NULL)
     {
       syslog(LOG_ERR, "W25Q256: mtd_partition failed\n");
-      return -ENOMEM;
+      ret = -ENOMEM;
+      goto errout_free_full;
     }
 
   ret = register_mtddriver(W25Q256_MTDBLOCK_PATH, mtd_part, 0644, NULL);
@@ -791,8 +798,10 @@ int stm32_w25q256_initialize(void)
     {
       syslog(LOG_ERR, "W25Q256: register_mtddriver(%s) failed: %d\n",
              W25Q256_MTDBLOCK_PATH, ret);
-      return ret;
+      goto errout_free_full;
     }
+
+  registered = true;
 
 #ifdef CONFIG_FS_LITTLEFS
   /* Try to mount.  NuttX's "autoformat" only triggers on -EFAULT (CORRUPT),
@@ -821,7 +830,7 @@ int stm32_w25q256_initialize(void)
              "'mount -t littlefs -o autoformat %s %s' to recover)\n",
              W25Q256_MOUNT_POINT, ret,
              W25Q256_MTDBLOCK_PATH, W25Q256_MOUNT_POINT);
-      return ret;
+      goto errout_unregister;
     }
 
   syslog(LOG_INFO, "W25Q256: LittleFS mounted at %s\n",
@@ -829,6 +838,22 @@ int stm32_w25q256_initialize(void)
 #endif
 
   return OK;
+
+errout_unregister:
+  if (registered)
+    {
+      unregister_mtddriver(W25Q256_MTDBLOCK_PATH);
+    }
+
+errout_free_full:
+  /* mtd_full is the first field of our struct w25q256_dev_s, so freeing
+   * the mtd pointer also releases the driver state.  mtd_part (allocated
+   * inside mtd_partition()) has no public free API in NuttX — accept that
+   * one-shot bringup leaks the partition wrapper on these rare paths.
+   */
+
+  kmm_free(mtd_full);
+  return ret;
 }
 
 #endif /* CONFIG_STM32_SPI2 */
