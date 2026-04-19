@@ -260,3 +260,111 @@ def test_flash_zmodem_recv(p):
         # Leave the received file in place on failure for debugging.
         print(f"FAILED — received file kept at {received} for inspection")
         raise
+
+
+# ---------------------------------------------------------------------------
+# G.S Concurrent-load stress (interactive)
+#
+# Verifies that heavy W25Q256 SPI2/DMA1 traffic does not disrupt other
+# active peripherals: the IMU I2C2 daemon (833 Hz reads via HPWORK) and
+# Sound DAC1 + DMA1_S5 playback running concurrently with the flash dd.
+# Operator confirms audible cleanliness; dmesg check + IMU status check
+# automate the rest.  Required by Codex review of the Issue #46 plan.
+# ---------------------------------------------------------------------------
+
+
+_FORBIDDEN_LOG_KEYWORDS = (
+    "ERROR",
+    "FAULT",
+    "underrun",
+    "overflow",
+    "ASSERT",
+    "panic",
+)
+
+
+@pytest.mark.interactive
+def test_flash_stress_concurrent(p):
+    """G-S1: Sound + IMU + Flash dd concurrent stress.
+
+    Drives the IMU daemon (continuous I2C2 + EXTI4 + HPWORK), a 4-second
+    Sound DMA1_S5 playback, and a 64 KB Flash write+read in parallel,
+    then checks dmesg / IMU status / audible cleanliness for regressions.
+    """
+    # 1. Start IMU daemon (puts I2C2 + EXTI + HPWORK under continuous load)
+    p.sendCommand("imu start", timeout=10)
+    time.sleep(1)
+    status = p.sendCommand("imu status")
+    assert re.search(r"running:\s*yes", status), (
+        f"IMU daemon failed to start: {status!r}"
+    )
+
+    try:
+        # 2. Capture dmesg baseline (we will diff after the run)
+        dmesg_before = p.sendCommand("dmesg", timeout=10)
+
+        # 3. Drop the volume so the tone is audible-but-quiet, then kick
+        # off a 4-second 440 Hz tone in the background.  NSH `&` runs the
+        # command as a daemon so we can keep issuing other commands while
+        # DAC1+DMA1_S5 are active.  The original volume is restored in
+        # the finally block.
+        original_volume = p.sendCommand("sound volume")
+        m_vol = re.search(r"volume:\s*(\d+)", original_volume)
+        baseline_vol = int(m_vol.group(1)) if m_vol else 100
+        p.sendCommand("sound volume 15", timeout=5)
+        p.sendCommand("sound beep 440 4000 &", timeout=5)
+        time.sleep(0.3)  # let the playback actually start
+
+        # 4. Heavy flash I/O while sound is playing.  64 KB on LittleFS
+        # exercises 16 × 4 KB sector erases + 256 page programs (≈3-5 s),
+        # which should fully overlap the 4 s tone.
+        p.sendCommand("rm -f /mnt/flash/stress.bin", timeout=10)
+        p.sendCommand(
+            "dd if=/dev/zero of=/mnt/flash/stress.bin bs=1024 count=64",
+            timeout=120,
+        )
+        p.sendCommand(
+            "dd if=/mnt/flash/stress.bin of=/dev/null bs=1024 count=64",
+            timeout=60,
+        )
+        # 5. Wait for the tone (and any tail-end PCM DMA work) to finish
+        time.sleep(2)
+
+        # 6. NSH dd is silent on success; verify the file is the right size
+        ls = p.sendCommand("ls -l /mnt/flash/stress.bin")
+        m = re.search(r"\b(\d{4,})\s+/mnt/flash/stress\.bin", ls)
+        assert m, f"could not parse size from: {ls!r}"
+        assert int(m.group(1)) == 65536, (
+            f"expected 65536 bytes, got {m.group(1)}: {ls!r}"
+        )
+
+        # 7. IMU daemon must still be alive and reading
+        status = p.sendCommand("imu status")
+        assert re.search(r"running:\s*yes", status), (
+            f"IMU daemon died during stress: {status!r}"
+        )
+
+        # 8. dmesg diff must not contain known regressions
+        dmesg_after = p.sendCommand("dmesg", timeout=10)
+        new_lines = dmesg_after[len(dmesg_before):]
+        for kw in _FORBIDDEN_LOG_KEYWORDS:
+            assert kw not in new_lines, (
+                f"dmesg gained {kw!r} during stress:\n{new_lines}"
+            )
+
+        # 9. Operator confirms audible cleanliness (the only check that
+        # cannot be automated — DAC underruns may not surface as syslog).
+        p.waitUser(
+            "Confirm: was the 4-second 440 Hz tone clean — "
+            "no clicks, pops, dropouts, or pitch wobble?"
+        )
+    finally:
+        p.sendCommand("imu stop", timeout=5)
+        p.sendCommand("rm -f /mnt/flash/stress.bin", timeout=10)
+        # restore baseline volume so subsequent runs are not silently quiet
+        try:
+            p.sendCommand(f"sound volume {baseline_vol}", timeout=5)
+        except Exception:
+            pass
+
+    print("--- G-S1 OK: concurrent load survived without regressions ---")

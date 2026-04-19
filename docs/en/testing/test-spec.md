@@ -51,8 +51,8 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 | D. Crash Handling | 4 | 4 | 0 | 0 |
 | E. OS Tests | 2 | 1 | 0 | 1 ([#26](https://github.com/owhinata/spike-nx/issues/26)) |
 | F. Sound | 13 | 9 | 4 | 0 |
-| G. Flash / LittleFS | 6 | 4 | 2 | 0 |
-| **Total** | **44** | **35** | **9** | **1** |
+| G. Flash / LittleFS | 7 | 4 | 3 | 0 |
+| **Total** | **45** | **35** | **10** | **1** |
 
 ## A. Boot & Initialization (`test_boot.py`)
 
@@ -365,6 +365,22 @@ W25Q256 + LittleFS regression tests plus interactive Zmodem transfer tests via p
     7. On success, removes both the local copy and the Hub copy
 - **Requires**: lrzsz (`brew install lrzsz`)
 
+### G-S1: test_flash_stress_concurrent `@interactive`
+
+- **Purpose**: Run Sound DMA1_S5 + IMU I2C2 daemon + Flash SPI2/DMA1_S3/S4 + USB CDC concurrently to confirm the W25Q256 driver does not disrupt other peripherals (Codex-required gate).
+- **Steps**:
+    1. `imu start` to bring up the IMU daemon (continuous I2C2 reads + EXTI4 + HPWORK load).
+    2. Capture `dmesg` as a baseline.
+    3. `sound volume 15` to a quiet level, then `sound beep 440 4000 &` to play a 4-second 440 Hz tone in the background.
+    4. `dd if=/dev/zero of=/mnt/flash/stress.bin bs=1024 count=64` writes 64 KB (16 × 4 KB sector erases + 256 page programs ≈ 3-5 s, fully overlapping the tone).
+    5. `dd if=/mnt/flash/stress.bin of=/dev/null bs=1024 count=64` reads it back.
+    6. Sleep 2 s so any tail-end PCM DMA completes.
+    7. `ls -l /mnt/flash/stress.bin` confirms the size is 65536 bytes.
+    8. `imu status` confirms the IMU daemon is still alive (`running: yes`).
+    9. Assert the new dmesg lines do not contain `ERROR / FAULT / underrun / overflow / ASSERT / panic`.
+    10. Operator confirms the tone had no clicks, dropouts, or pitch wobble (the DAC driver does not log underruns, so this is the only audible check).
+    11. Cleanup: `imu stop`, `rm /mnt/flash/stress.bin`, restore the original volume.
+
 ### Example Commands
 
 ```bash
@@ -373,6 +389,9 @@ W25Q256 + LittleFS regression tests plus interactive Zmodem transfer tests via p
 
 # Send only
 .venv/bin/pytest tests/test_flash.py::test_flash_zmodem_send -D /dev/tty.usbmodem01
+
+# Stress test only
+.venv/bin/pytest tests/test_flash.py::test_flash_stress_concurrent -D /dev/tty.usbmodem01
 
 # All tests (including interactive)
 .venv/bin/pytest tests/test_flash.py -D /dev/tty.usbmodem01
