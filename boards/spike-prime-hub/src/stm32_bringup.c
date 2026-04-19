@@ -39,69 +39,78 @@ int stm32_bringup(void)
   int ret = OK;
 
 #ifdef CONFIG_ARCH_IRQPRIO
-  /* Issue #36 epsilon plan: board-wide NVIC priority assignment.
+  /* Issue #36 epsilon plan + Issue #50 refinement: board-wide NVIC
+   * priority assignment.
    *
-   * Every peripheral IRQ is compressed into the 0x80-0xF0 band so that
+   * Every peripheral IRQ is compressed into the 0x80-0xE0 band so that
    * it stays at or below NuttX BASEPRI (0x80) and can therefore safely
-   * call NuttX APIs (nxsem_post, etc.) from its ISR. The relative
-   * ordering mirrors the pybricks design:
+   * call NuttX APIs (nxsem_post, etc.) from its ISR. 0x80 is reserved
+   * for the OS tick (TIM9) so no peripheral shares a level with the
+   * scheduler. Slots 0x90 (LUMP UART) and 0xA0 (Bluetooth UART) are
+   * reserved for Issue #43 / #47:
    *
-   *   0x80  TIM9 tickless tick          (kept at default)
-   *   0x90  IMU I2C2 ER/EV + EXTI4
-   *   0xA0  Sound DAC DMA1_S5
-   *   0xB0  USB OTG FS
-   *   0xD0  ADC DMA2_S0
-   *   0xD0  TLC5955 SPI1 + DMA2_S2/S3
+   *   0x80  TIM9 tickless tick          (OS, kept at default)
+   *   0x90  LUMP UART                   (future reservation, Issue #43)
+   *   0xA0  Bluetooth UART              (reserved for Issue #47)
+   *   0xB0  IMU I2C2 EV/ER + EXTI4
+   *   0xC0  Sound DAC DMA1_S5
+   *   0xD0  W25Q256 DMA1_S3/S4
+   *         W25Q256 SPI2 IRQ
+   *         USB OTG FS
+   *         USB VBUS EXTI9_5            (future, Issue #49)
+   *   0xE0  ADC DMA2_S0
+   *         TLC5955 SPI1 + DMA2_S2/S3
    *   0xF0  PendSV, SysTick
    *
-   * See docs/{ja,en}/hardware/dma-irq.md "Resolution: Issue #36" for
-   * the full rationale and the staged rollout (steps 1-6) that verified
-   * Issue #36 does not recur.
+   * See docs/{ja,en}/hardware/dma-irq.md for the full rationale.
    */
 
   /* step 1: system handlers */
   up_prioritize_irq(STM32_IRQ_PENDSV,  NVIC_SYSH_PRIORITY_MIN);
   up_prioritize_irq(STM32_IRQ_SYSTICK, NVIC_SYSH_PRIORITY_MIN);
 
-  /* step 2: TLC5955 SPI1 + DMA */
+  /* step 2: TLC5955 SPI1 + DMA (0xE0) */
   up_prioritize_irq(STM32_IRQ_SPI1,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
+                    NVIC_SYSH_PRIORITY_DEFAULT + 6 * NVIC_SYSH_PRIORITY_STEP);
   up_prioritize_irq(STM32_IRQ_DMA2S2,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
+                    NVIC_SYSH_PRIORITY_DEFAULT + 6 * NVIC_SYSH_PRIORITY_STEP);
   up_prioritize_irq(STM32_IRQ_DMA2S3,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
+                    NVIC_SYSH_PRIORITY_DEFAULT + 6 * NVIC_SYSH_PRIORITY_STEP);
 
-  /* step 3: ADC DMA */
+  /* step 3: ADC DMA (0xE0) */
   up_prioritize_irq(STM32_IRQ_DMA2S0,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 6 * NVIC_SYSH_PRIORITY_STEP);
+
+  /* step 4: USB OTG FS (0xD0) */
+  up_prioritize_irq(STM32_IRQ_OTGFS,
                     NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
 
-  /* step 4: USB OTG FS */
-  up_prioritize_irq(STM32_IRQ_OTGFS,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
-
-  /* step 5: Sound DAC DMA (DMA1 Stream5) */
+  /* step 5: Sound DAC DMA (DMA1 Stream5, 0xC0) */
   up_prioritize_irq(STM32_IRQ_DMA1S5,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 2 * NVIC_SYSH_PRIORITY_STEP);
+                    NVIC_SYSH_PRIORITY_DEFAULT + 4 * NVIC_SYSH_PRIORITY_STEP);
 
-  /* step 6: IMU LSM6DS3TR-C — I2C2 event/error + EXTI4 (INT1 DRDY) */
+  /* step 6: IMU LSM6DS3TR-C — I2C2 event/error + EXTI4 (INT1 DRDY, 0xB0) */
   up_prioritize_irq(STM32_IRQ_I2C2EV,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
   up_prioritize_irq(STM32_IRQ_I2C2ER,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
   up_prioritize_irq(STM32_IRQ_EXTI4,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
 
 #ifdef CONFIG_STM32_SPI2
-  /* step 7: W25Q256 Flash — SPI2 + DMA1 Stream3/4 (NVIC 0xB0).
-   * Compress pybricks ordering (Sound 4 > Flash 5/6 > USB 6 > ADC/TLC 7)
-   * into the 0x80-0xF0 BASEPRI band.  Co-resident with USB OTG FS at 0xB0.
+  /* step 7: W25Q256 Flash SPI2 + DMA1 Stream3/4 (0xD0, co-resident with
+   * USB OTG FS).  DMA and SPI2 completion are kept at the same NVIC
+   * level so they cannot mutually preempt: splitting them (DMA=0xD0 /
+   * SPI2 IRQ=0xE0) surfaces SPI2 driver races under heavy concurrent
+   * load (Sound DMA + IMU I2C + Flash dd) and causes USB CDC detaches.
+   * pybricks groups them at the same preempt level (5 / 6) as well.
    */
-  up_prioritize_irq(STM32_IRQ_SPI2,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
   up_prioritize_irq(STM32_IRQ_DMA1S3,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
+                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
   up_prioritize_irq(STM32_IRQ_DMA1S4,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 3 * NVIC_SYSH_PRIORITY_STEP);
+                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_SPI2,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
 #endif
 #endif
 

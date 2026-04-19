@@ -138,29 +138,36 @@ Cortex-M NVIC は各 IRQ に絶対優先度値 (STM32F4 は上位 4bit、0x00–
 | 15 | 0xF0 | SysTick (HAL tick) | `stm32f4xx_hal_conf.h:153` (`TICK_INT_PRIORITY`) |
 | 15 | 0xF0 | RNG | `random_stm32_hal.c:54` |
 
-### NuttX での IRQ 優先度設計 (採用: 選択肢 ε)
+### NuttX での IRQ 優先度設計 (採用: 選択肢 ε + Issue #50 精緻化)
 
-pybricks の**相対優先順序**を 0x80–0xF0 の範囲 (BASEPRI 以下) に圧縮して配置する。全 IRQ が NuttX BASEPRI (0x80) 以上に収まるため、どの ISR からも `nxsem_post` 等の NuttX API を安全に呼べる。設定は `stm32_bringup.c` の先頭にまとめて集中管理。
+pybricks の**相対優先順序**を 0x80–0xE0 の範囲 (BASEPRI 以下) に圧縮して配置する。全 IRQ が NuttX BASEPRI (0x80) 以上に収まるため、どの ISR からも `nxsem_post` 等の NuttX API を安全に呼べる。**0x80 は OS tick (TIM9) 専用**として peripheral との同格衝突を避け、0x90/0xA0 を LUMP UART (Issue #43) と Bluetooth UART (Issue #47) のために予約する。設定は `stm32_bringup.c` の先頭にまとめて集中管理。
 
 | NVIC 値 | レベル | ペリフェラル | pybricks 対応 | 設定箇所 |
 |---|---|---|---|---|
-| 0x80 | 8 | TIM9 tickless tick | (pybricks SysTick) | NuttX デフォルト (据置) |
-| 0x90 | 9 | IMU I2C2 EV/ER + EXTI4 | base=3 | `stm32_bringup.c` (step 6) |
-| 0xA0 | 10 | Sound DAC DMA1_S5 | base=4 (HIGH) | `stm32_bringup.c` (step 5) |
-| 0xB0 | 11 | USB OTG FS | base=6 | `stm32_bringup.c` (step 4) |
-| 0xB0 | 11 | **W25Q256 SPI2 + DMA1_S3/S4** | base=5/6 | `stm32_bringup.c` (step 7) |
-| 0xD0 | 13 | ADC DMA2_S0 | base=7 (MEDIUM) | `stm32_bringup.c` (step 3) |
-| 0xD0 | 13 | TLC5955 SPI1 + DMA2_S2/S3 | base=7 (LOW) | `stm32_bringup.c` (step 2) |
+| 0x80 | 8 | TIM9 tickless tick (OS 専用) | (pybricks SysTick) | NuttX デフォルト (据置) |
+| **0x90** | **9** | **LUMP UART (将来予約)** | base=0/1 | **Issue #43 で設定予定** |
+| **0xA0** | **10** | **Bluetooth UART (予約)** | base=1 | **Issue #47 で設定予定** |
+| 0xB0 | 11 | IMU I2C2 EV/ER + EXTI4 | base=3 | `stm32_bringup.c` (step 6) |
+| 0xC0 | 12 | Sound DAC DMA1_S5 | base=4 (HIGH) | `stm32_bringup.c` (step 5) |
+| 0xD0 | 13 | W25Q256 DMA1_S3/S4 | base=5 | `stm32_bringup.c` (step 7) |
+| 0xD0 | 13 | W25Q256 SPI2 IRQ | base=6 | `stm32_bringup.c` (step 7) |
+| 0xD0 | 13 | USB OTG FS | base=6 | `stm32_bringup.c` (step 4) |
+| 0xD0 | 13 | USB VBUS EXTI9_5 (将来) | base=6 | Issue #49 で設定予定 |
+| 0xE0 | 14 | ADC DMA2_S0 | base=7 (MEDIUM) | `stm32_bringup.c` (step 3) |
+| 0xE0 | 14 | TLC5955 SPI1 + DMA2_S2/S3 | base=7 (LOW) | `stm32_bringup.c` (step 2) |
 | 0xF0 | 15 | PendSV, SysTick | base=15 | `stm32_bringup.c` (step 1) |
 
 !!! success "採用理由"
-    - pybricks の相対順序を完全保存 (IMU > Sound > USB > ADC = TLC5955 > PendSV/SysTick)
+    - **OS tick (TIM9) 専用の 0x80 を peripheral と共有しない** — LUMP UART を 0x80 に置くと scheduler tick と同格になり、危険。0x90 を LUMP の最上位予約とする
     - 全 IRQ が BASEPRI 以上 ⇒ NuttX 管理の USB/I2C/SPI ドライバの ISR が `nxsem_post` 等を呼んでもレース無し
     - NuttX 本体への変更ゼロ (board 側 `stm32_bringup.c` のみで完結)
-    - Issue #36 の USB CDC 切断が解消される (6 step 全て完了後 30/30 pass 継続)
+    - LUMP UART (Issue #43) と Bluetooth UART (Issue #47) の枠を空けてあるので、後続の実装で本表を再調整する必要がない
 
-!!! note "TIM9 を 0x80 に据え置く理由"
-    `CONFIG_SCHED_TICKLESS=y` + `CONFIG_STM32_TICKLESS_TIMER=9` により TIM9 が scheduling tick 源。scheduling 応答性を最優先するため ε 内で唯一 default 値に据え置く。全ペリフェラル IRQ より高優先度になるが、TIM9 ISR は短い (tickless timer 計算のみ) ので他の ISR を阻害しない。
+!!! note "Issue #50 での変更点"
+    当初の ε 設計 (Issue #36) は 0xB0 に USB OTG FS と W25Q256 SPI2+DMA を同居させていた。Issue #50 で全体を 1 段降格して LUMP 用 0x90 / BT 用 0xA0 を空け、TIM9 (OS tick) に peripheral を相乗りさせない配置に変更。W25Q256 の DMA と SPI2 IRQ は引き続き同格 (0xD0) に据え置く — 分離した配置 (DMA=0xD0 / SPI2 IRQ=0xE0) を試したところ、Sound DMA + IMU I2C + Flash dd 並列時に USB CDC detach が発生したため、pybricks と同様 SPI2 の DMA と IRQ は同じ preempt level に置く。
+
+!!! note "TIM9 を 0x80 に据え置き、peripheral を相乗りさせない理由"
+    `CONFIG_SCHED_TICKLESS=y` + `CONFIG_STM32_TICKLESS_TIMER=9` により TIM9 が scheduling tick 源。scheduling 応答性を最優先するため ε 内で唯一 default 値に据え置く。**LUMP UART のような peripheral を同じ 0x80 に置くと OS tick と同格になり応答性に悪影響が出る可能性があるため、peripheral は 0x90 以下に配置する**。
 
 ### `CONFIG_ARCH_IRQPRIO` の実挙動
 

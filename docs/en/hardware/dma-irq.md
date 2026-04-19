@@ -138,29 +138,36 @@ The current `stm32_adc_dma.c` writes `DEFAULT + 3 * STEP` (= 0xB0), which reads 
 | 15 | 0xF0 | SysTick (HAL tick) | `stm32f4xx_hal_conf.h:153` (`TICK_INT_PRIORITY`) |
 | 15 | 0xF0 | RNG | `random_stm32_hal.c:54` |
 
-### NuttX IRQ Priority Design (adopted: option ε)
+### NuttX IRQ Priority Design (adopted: option ε + Issue #50 refinement)
 
-Compresses the pybricks **relative** priority order into the 0x80–0xF0 band (below BASEPRI) so every IRQ stays at or below `NVIC_SYSH_DISABLE_PRIORITY (0x80)`. Every ISR can safely call NuttX APIs (including `nxsem_post`'s slow path), and the NuttX upstream USB/I2C/SPI drivers run unmodified. All priority assignments are centralised in a single block at the top of `stm32_bringup.c`.
+Compresses the pybricks **relative** priority order into the 0x80–0xE0 band (below BASEPRI) so every IRQ stays at or below `NVIC_SYSH_DISABLE_PRIORITY (0x80)`. Every ISR can safely call NuttX APIs (including `nxsem_post`'s slow path), and the NuttX upstream USB/I2C/SPI drivers run unmodified. **Slot 0x80 is reserved for the OS tick (TIM9) — no peripheral shares a level with the scheduler.** Slots 0x90 (LUMP UART) and 0xA0 (Bluetooth) are reserved for Issue #43 and Issue #47 respectively. All priority assignments are centralised in a single block at the top of `stm32_bringup.c`.
 
 | NVIC value | Level | Peripheral | pybricks mapping | Configured in |
 |---|---|---|---|---|
-| 0x80 | 8 | TIM9 tickless tick | (pybricks SysTick 0xF0) | NuttX default (kept) |
-| 0x90 | 9 | IMU I2C2 EV/ER + EXTI4 | base=3 | `stm32_bringup.c` (step 6) |
-| 0xA0 | 10 | Sound DAC DMA1_S5 | base=4 (HIGH) | `stm32_bringup.c` (step 5) |
-| 0xB0 | 11 | USB OTG FS | base=6 | `stm32_bringup.c` (step 4) |
-| 0xB0 | 11 | **W25Q256 SPI2 + DMA1_S3/S4** | base=5/6 | `stm32_bringup.c` (step 7) |
-| 0xD0 | 13 | ADC DMA2_S0 | base=7 (MEDIUM) | `stm32_bringup.c` (step 3) |
-| 0xD0 | 13 | TLC5955 SPI1 + DMA2_S2/S3 | base=7 (LOW) | `stm32_bringup.c` (step 2) |
+| 0x80 | 8 | TIM9 tickless tick (OS only) | (pybricks SysTick 0xF0) | NuttX default (kept) |
+| **0x90** | **9** | **LUMP UART (future reservation)** | base=0/1 | **pending Issue #43** |
+| **0xA0** | **10** | **Bluetooth UART (reserved)** | base=1 | **pending Issue #47** |
+| 0xB0 | 11 | IMU I2C2 EV/ER + EXTI4 | base=3 | `stm32_bringup.c` (step 6) |
+| 0xC0 | 12 | Sound DAC DMA1_S5 | base=4 (HIGH) | `stm32_bringup.c` (step 5) |
+| 0xD0 | 13 | W25Q256 DMA1_S3/S4 | base=5 | `stm32_bringup.c` (step 7) |
+| 0xD0 | 13 | W25Q256 SPI2 IRQ | base=6 | `stm32_bringup.c` (step 7) |
+| 0xD0 | 13 | USB OTG FS | base=6 | `stm32_bringup.c` (step 4) |
+| 0xD0 | 13 | USB VBUS EXTI9_5 (future) | base=6 | pending Issue #49 |
+| 0xE0 | 14 | ADC DMA2_S0 | base=7 (MEDIUM) | `stm32_bringup.c` (step 3) |
+| 0xE0 | 14 | TLC5955 SPI1 + DMA2_S2/S3 | base=7 (LOW) | `stm32_bringup.c` (step 2) |
 | 0xF0 | 15 | PendSV, SysTick | base=15 | `stm32_bringup.c` (step 1) |
 
 !!! success "Why this was adopted"
-    - Preserves pybricks's relative priority order (IMU > Sound > USB > ADC = TLC5955 > PendSV/SysTick).
+    - **Keeps the OS tick (TIM9) on its own 0x80 slot** — placing LUMP UART at 0x80 would put a peripheral on equal footing with the scheduler tick, which is dangerous for scheduling latency.
     - Every IRQ sits at or below BASEPRI ⇒ no `nxsem_post` slow-path race from any ISR; NuttX USB/I2C/SPI upstream drivers work unchanged.
     - No NuttX core change required — everything lives in board code (`stm32_bringup.c`).
-    - Resolves Issue #36: full regression remains at 30/30 pass across all six staged steps.
+    - Leaves 0x90 / 0xA0 free so LUMP UART (Issue #43) and Bluetooth UART (Issue #47) can drop in without disturbing the layout.
 
-!!! note "Why TIM9 stays at 0x80"
-    With `CONFIG_SCHED_TICKLESS=y` + `CONFIG_STM32_TICKLESS_TIMER=9`, TIM9 drives the scheduler tick. It must stay at the highest priority (within ε) to keep scheduling responsive. The TIM9 ISR is short (tickless timer math only), so it does not starve lower-priority peripherals.
+!!! note "Issue #50 changes"
+    The original ε layout (Issue #36) co-located USB OTG FS and the W25Q256 SPI2+DMA group at 0xB0. Issue #50 demotes the entire band by one step to free 0x90 / 0xA0 for LUMP / Bluetooth and keeps TIM9 (OS tick) peripheral-free. The W25Q256 DMA and SPI2 IRQ remain at the same level (0xD0) — splitting them (DMA=0xD0 / SPI2 IRQ=0xE0) surfaced SPI2 driver races under concurrent Sound DMA + IMU I2C + Flash dd load, causing USB CDC detaches. pybricks also groups them at the same preempt level.
+
+!!! note "Why TIM9 stays at 0x80 and nothing else joins it"
+    With `CONFIG_SCHED_TICKLESS=y` + `CONFIG_STM32_TICKLESS_TIMER=9`, TIM9 drives the scheduler tick. It must stay at the highest priority (within ε) to keep scheduling responsive. **Sharing 0x80 with any peripheral (e.g. LUMP UART) risks scheduling latency spikes when that peripheral fires; peripherals therefore start at 0x90.**
 
 ### Actual Behavior of `CONFIG_ARCH_IRQPRIO`
 
