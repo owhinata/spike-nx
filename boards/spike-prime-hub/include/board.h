@@ -203,6 +203,6 @@
  * APB2=96 MHz.  Must be stable before nSHUTD goes high.
  */
 
-#define GPIO_TIM8_CH4_BT_SLOWCLK  GPIO_TIM8_CH4_0   /* PC9 */
+#define GPIO_TIM8_CH4_BT_SLOWCLK  GPIO_TIM8_CH4   /* PC9 (legacy pinmap) */
 
 #endif /* __BOARDS_SPIKE_PRIME_HUB_INCLUDE_BOARD_H */

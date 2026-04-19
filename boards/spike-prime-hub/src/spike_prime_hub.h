@@ -198,5 +198,24 @@ int stm32_pcm_register(void);
 int stm32_w25q256_initialize(void);
 #endif
 
+#ifdef CONFIG_STM32_TIM8
+/* Start the 32.768 kHz TIM8 CH4 PWM on PC9 for the CC2564C SLOWCLK.  Must
+ * be called before driving GPIO_BT_NSHUTD HIGH.
+ */
+
+int stm32_bt_slowclk_initialize(void);
+#endif
+
+#ifdef CONFIG_STM32_USART2
+/* Initialise USART2 + DMA for the CC2564C HCI link and return a board-local
+ * btuart_lowerhalf_s.  Call from the Bluetooth bring-up code after the slow
+ * clock is stable but before nSHUTD HIGH so the UART is already accepting
+ * traffic when the chip finishes its ROM boot.
+ */
+
+struct btuart_lowerhalf_s;
+FAR struct btuart_lowerhalf_s *stm32_btuart_instantiate(void);
+#endif
+
 #endif /* __ASSEMBLY__ */
 #endif /* __BOARDS_SPIKE_PRIME_HUB_SRC_SPIKE_PRIME_HUB_H */
