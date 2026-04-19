@@ -12,11 +12,14 @@ RM0430 Table 27/28 (DMA request mapping) に基づく。
 
 | Stream | Channel | ペリフェラル | 状態 | 優先度 |
 |--------|---------|-------------|------|--------|
-| S3 | Ch0 | Flash SPI2 RX | 未実装 (pybricks 予約) | HIGH |
-| S4 | Ch0 | Flash SPI2 TX | 未実装 (pybricks 予約) | HIGH |
+| S3 | Ch0 | **W25Q256 SPI2 RX** | ✅ 実装済 (NuttX SPI) | MEDIUM |
+| S4 | Ch0 | **W25Q256 SPI2 TX** | ✅ 実装済 (NuttX SPI) | MEDIUM |
 | S5 | Ch7 | **DAC1 CH1 (Sound)** | ✅ 実装済 | **HIGH** |
 | S6 | Ch4 | BT UART2 TX | 未実装 (pybricks 予約) | VERY_HIGH |
 | S7 | Ch6 | BT UART2 RX | 未実装 (pybricks 予約) | VERY_HIGH |
+
+!!! note "Flash SPI2 DMA priority"
+    pybricks は Flash SPI2 DMA を `DMA_PRIORITY_HIGH` で動かしているが、NuttX の `stm32_spi.c` は global `CONFIG_SPI_DMAPRIO` のみで per-bus 設定不可。HIGH に上げると TLC5955 SPI1 DMA も巻き込まれて Sound DMA1_S5 と DMA1 内 HIGH 3 本同時稼働 (S3/S4/S5) になり DAC underrun リスクが上がる。本プロジェクトは F4 デフォルトの MEDIUM (`DMA_SCR_PRIMED`) に据え置き、Sound 単独 HIGH を維持。pybricks 完全一致は将来 NuttX 上流貢献 (`stm32_spi.c` per-bus DMA priority) で対応予定。
 
 ### DMA2
 
@@ -145,6 +148,7 @@ pybricks の**相対優先順序**を 0x80–0xF0 の範囲 (BASEPRI 以下) に
 | 0x90 | 9 | IMU I2C2 EV/ER + EXTI4 | base=3 | `stm32_bringup.c` (step 6) |
 | 0xA0 | 10 | Sound DAC DMA1_S5 | base=4 (HIGH) | `stm32_bringup.c` (step 5) |
 | 0xB0 | 11 | USB OTG FS | base=6 | `stm32_bringup.c` (step 4) |
+| 0xB0 | 11 | **W25Q256 SPI2 + DMA1_S3/S4** | base=5/6 | `stm32_bringup.c` (step 7) |
 | 0xD0 | 13 | ADC DMA2_S0 | base=7 (MEDIUM) | `stm32_bringup.c` (step 3) |
 | 0xD0 | 13 | TLC5955 SPI1 + DMA2_S2/S3 | base=7 (LOW) | `stm32_bringup.c` (step 2) |
 | 0xF0 | 15 | PendSV, SysTick | base=15 | `stm32_bringup.c` (step 1) |

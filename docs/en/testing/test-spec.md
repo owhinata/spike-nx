@@ -51,7 +51,8 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 | D. Crash Handling | 4 | 4 | 0 | 0 |
 | E. OS Tests | 2 | 1 | 0 | 1 ([#26](https://github.com/owhinata/spike-nx/issues/26)) |
 | F. Sound | 13 | 9 | 4 | 0 |
-| **Total** | **38** | **31** | **7** | **1** |
+| G. Flash / LittleFS | 6 | 4 | 2 | 0 |
+| **Total** | **44** | **35** | **9** | **1** |
 
 ## A. Boot & Initialization (`test_boot.py`)
 
@@ -309,6 +310,73 @@ Smoke tests for `/dev/tone0`, `/dev/pcm0`, and the `apps/sound` NSH builtin. The
 - **Purpose**: Volume changes actually affect loudness
 - **Command**: volume 100 → beep → volume 20 → beep → restore
 - **Pass criteria**: The second beep is noticeably quieter than the first
+
+## G. Flash / LittleFS (`test_flash.py`)
+
+W25Q256 + LittleFS regression tests plus interactive Zmodem transfer tests via picocom + lrzsz.  See [W25Q256 driver](../drivers/w25q256.md) and [Zmodem file transfer](../development/file-transfer.md).
+
+### G-1: test_flash_mount
+
+- **Purpose**: `/mnt/flash` is mounted as LittleFS at boot
+- **Command**: `mount`
+- **Pass**: Output contains `/mnt/flash` and `littlefs`
+
+### G-2: test_flash_mtdblock_visible
+
+- **Purpose**: Only `/dev/mtdblock0` is exposed; full-chip raw `/dev/mtd0` is hidden (LEGO area protection)
+- **Command**: `ls /dev/mtdblock0` / `ls /dev/mtd0`
+- **Pass**: First returns the name, second returns ENOENT
+
+### G-3: test_flash_write_read
+
+- **Purpose**: File write / read round-trip
+- **Command**: `echo "regression-<ts>" > /mnt/flash/regress.txt` → `cat /mnt/flash/regress.txt`
+- **Pass**: `cat` returns the written payload
+- **Timeout**: 120 s (LittleFS first metadata update can take several seconds)
+
+### G-4: test_flash_persist_across_reboot
+
+- **Purpose**: Files survive `reboot` (LittleFS durability)
+- **Command**: `echo "persist-<ts>" > /mnt/flash/persist.txt` → `reboot` → `cat /mnt/flash/persist.txt`
+- **Pass**: Contents match after reboot
+
+### G-I1: test_flash_zmodem_send `@interactive`
+
+- **Purpose**: PC → Hub Zmodem upload + on-device md5 verification
+- **Steps**:
+    1. pytest generates a fresh random 1 MB file at `/tmp/spike_zmtest_1mb.bin` (regenerated every run)
+    2. Releases the serial port and prompts the operator to run `picocom --send-cmd 'sz -vv -L 256' /dev/tty.usbmodem01`
+    3. Operator runs `nsh> rz` in picocom, presses `C-a C-s`, enters the file path
+    4. Operator exits picocom and presses Enter; pytest reconnects the serial port
+    5. pytest verifies the file size (1048576 bytes) and that Hub-side `md5 -f /mnt/flash/spike_zmtest_1mb.bin` matches the PC-side md5
+- **Requires**: lrzsz (`brew install lrzsz`)
+
+### G-I2: test_flash_zmodem_recv `@interactive`
+
+- **Purpose**: Hub → PC Zmodem download + PC-side md5 round-trip verification
+- **Depends on**: `test_flash_zmodem_send` having run in the same session (target file must exist on Hub)
+- **Steps**:
+    1. pytest gets the ground-truth md5 from the Hub via `md5 -f`
+    2. Removes any stale local file with the same name and releases the serial port
+    3. Prompts the operator to run `cd <pytest cwd> && picocom --receive-cmd 'rz -vv -y' /dev/tty.usbmodem01`
+    4. Operator runs `nsh> sz /mnt/flash/spike_zmtest_1mb.bin` in picocom, presses `C-a C-r`, then Enter with no arguments
+    5. Operator exits picocom and presses Enter; pytest reconnects the serial port
+    6. pytest md5sums the locally-saved file and asserts it matches the Hub-side md5
+    7. On success, removes both the local copy and the Hub copy
+- **Requires**: lrzsz (`brew install lrzsz`)
+
+### Example Commands
+
+```bash
+# Regression tests only (excluding interactive)
+.venv/bin/pytest tests/test_flash.py -m "not interactive" -D /dev/tty.usbmodem01
+
+# Send only
+.venv/bin/pytest tests/test_flash.py::test_flash_zmodem_send -D /dev/tty.usbmodem01
+
+# All tests (including interactive)
+.venv/bin/pytest tests/test_flash.py -D /dev/tty.usbmodem01
+```
 
 ## Test Synchronization (sendCommand)
 

@@ -1,6 +1,6 @@
-# ファイル転送と ELF 実行
+# Zmodem ファイル転送 (PC ⇔ Hub)
 
-picocom + Zmodem でファイルを転送し、ELF バイナリを実行する方法。
+picocom + lrzsz の `sz` / `rz` で USB CDC コンソール経由のファイル転送を行う。Hub 側で受信したファイルは `/mnt/flash` (W25Q256 + LittleFS) に保存される。
 
 ## 前提条件
 
@@ -14,95 +14,70 @@ brew install lrzsz picocom
 sudo apt install lrzsz picocom
 ```
 
-### NuttX ファームウェア
-
-以下が有効化されたファームウェアを書き込み済みであること。
+### NuttX ファームウェア (usbnsh defconfig)
 
 | 設定 | 用途 |
 |---|---|
-| `CONFIG_SYSTEM_ZMODEM=y` | Zmodem (sz/rz) |
-| `CONFIG_ELF=y` | ELF ローダー |
-| `CONFIG_NSH_FILE_APPS=y` | NSH からファイル実行 (フルパス指定) |
+| `CONFIG_SYSTEM_ZMODEM=y` | Zmodem (`sz` / `rz`) |
+| `CONFIG_SYSTEM_ZMODEM_DEVNAME="/dev/console"` | USB CDC コンソール経由で転送 |
+| `CONFIG_SYSTEM_ZMODEM_MOUNTPOINT="/mnt/flash"` | `rz` 受信先のデフォルト |
+| `CONFIG_CDCACM_RXBUFSIZE=2048` | 取りこぼし軽減 (HW フロー制御なし対策) |
+| `CONFIG_FS_LITTLEFS=y` + `CONFIG_MTD=y` | `/mnt/flash` の永続ストレージ |
+| `CONFIG_NETUTILS_CODECS=y` + `CONFIG_CODECS_HASH_MD5=y` | `md5 -f` で整合性検証 |
 
-## picocom 接続
+詳細は [W25Q256 ドライバ](../drivers/w25q256.md) と [/mnt/flash の使い方](../usage/01-flash-storage.md)。
 
-```bash
-picocom /dev/tty.usbmodem01 -b 115200 \
-  --send-cmd "sz -vv -w 256" \
-  --receive-cmd "rz -vv"
-```
-
-| オプション | 説明 |
-|---|---|
-| `--send-cmd` | `Ctrl-A Ctrl-S` でファイル送信時に使用されるコマンド |
-| `--receive-cmd` | `Ctrl-A Ctrl-R` でファイル受信時に使用されるコマンド |
-| `-w 256` | ウィンドウサイズ制限 (フロー制御なし環境向け) |
-
-## ファイル転送
-
-### PC からデバイスへ (アップロード)
-
-1. NSH で `rz` を入力
-2. `Ctrl-A Ctrl-S` を押す
-3. ファイルパスを入力 (例: `data/imu`)
-4. 転送完了を待つ
-
-```
-nsh> rz
-```
-
-ファイルは `/data/` (Zmodem マウントポイント) に保存される。
-
-### デバイスから PC へ (ダウンロード)
-
-1. NSH で `sz <ファイルパス>` を入力
-2. picocom が自動的に `rz` を起動して受信
-
-```
-nsh> sz /data/test.txt
-```
-
-ファイルはホスト PC のカレントディレクトリに保存される。
-
-## ELF バイナリのビルド
+## PC → Hub (アップロード)
 
 ```bash
-# エクスポートパッケージ作成 + ELF ビルド (export がなければ自動生成)
-make nuttx-elf APP=<app>
-
-# ELF のみ再ビルド (export 済みの場合、高速)
-make nuttx-elf APP=<app>
-
-# ELF ビルド成果物クリーン
-make nuttx-elf-clean
+picocom --send-cmd 'sz -vv -L 256' /dev/tty.usbmodem01
 ```
 
-ELF バイナリは `./data/<app>` に出力される。
+picocom 接続後:
 
-各アプリの ELF ビルド定義は `apps/<app>/elf.mk` に記載:
+1. NSH で `rz` を入力 (Hub を Zmodem 受信モードに)
+2. `Ctrl-A Ctrl-S` を押す → ローカルファイルパス (例: `/path/to/file.bin`) を入力 → Enter
+3. "Transfer complete" を待つ (1 MB ≒ 45 秒)
+4. `Ctrl-A Ctrl-X` で picocom 終了
 
-```makefile
-# apps/imu/elf.mk の例
-ELF_BIN  = imu
-ELF_SRCS = imu_main.c imu_geometry.c imu_stationary.c imu_fusion.c imu_calibration.c
+ファイルは `/mnt/flash/<basename>` に保存される。
+
+```
+nsh> ls -l /mnt/flash/file.bin
+nsh> md5 -f /mnt/flash/file.bin   # 32-char hex (改行なし)
 ```
 
-## ELF の転送と実行
+## Hub → PC (ダウンロード)
 
 ```bash
-# NSH で rz → Ctrl-A Ctrl-S → data/<app> を選択
-nsh> rz
-
-# フルパスで実行
-nsh> /data/imu start
-nsh> /data/imu status
-nsh> /data/imu stop
+cd <受信先ディレクトリ>
+picocom --receive-cmd 'rz -vv -y' /dev/tty.usbmodem01
 ```
 
-### 注意事項
+picocom 接続後:
 
-- ELF 実行は必ずフルパスで指定する (例: `/data/imu`)
-- `CONFIG_LIBC_ENVPATH` は有効にしない (NSH の PATH 検索で CPU オーバーヘッドが発生するため)
-- ELF が使用するシンボルはカーネルのシンボルテーブル (`g_symtab`) に含まれている必要がある
-- シンボルテーブルは `libc.csv` + `syscall.csv` + `libm.csv` + libgcc ヘルパーから生成
-- ELF ロード時にコード + データが RAM に配置される
+1. NSH で `sz /mnt/flash/file.bin` を入力 (Hub を Zmodem 送信モードに)
+2. `Ctrl-A Ctrl-R` を押す → 引数なしで Enter (`rz` がプロトコルから受信ファイル名を取得)
+3. "Transfer complete" を待つ
+4. `Ctrl-A Ctrl-X` で picocom 終了
+
+PC 側で md5 比較:
+
+```bash
+md5sum file.bin
+```
+
+## オプションについての注意
+
+| オプション | 役割 | 備考 |
+|---|---|---|
+| `-vv` | 進捗表示 | 必須ではないが転送中の状態が見える |
+| `-L 256` (sz) | subpacket size を 256 byte に制限 | **必須** — USB CDC は HW フロー制御がなく、デフォルト 1024 byte だと取りこぼしで ZNAK retry になる |
+| `-y` (rz) | 同名ファイルを上書き | 検証サイクルで便利 |
+| `-e` (sz/rz) | 制御文字を escape | **付けない** — 8-bit clean な USB CDC で escape は不要かつ ZNAK の原因になる |
+
+## 関連
+
+- [W25Q256 ドライバ仕様](../drivers/w25q256.md)
+- [/mnt/flash の使い方 (recovery 含む)](../usage/01-flash-storage.md)
+- [テスト仕様 G カテゴリ (pytest 自動化)](../testing/test-spec.md)

@@ -12,11 +12,14 @@ Based on RM0430 Table 27/28 (DMA request mapping).
 
 | Stream | Channel | Peripheral | Status | Priority |
 |--------|---------|-----------|--------|----------|
-| S3 | Ch0 | Flash SPI2 RX | Not implemented (pybricks reserved) | HIGH |
-| S4 | Ch0 | Flash SPI2 TX | Not implemented (pybricks reserved) | HIGH |
+| S3 | Ch0 | **W25Q256 SPI2 RX** | ✅ Implemented (NuttX SPI) | MEDIUM |
+| S4 | Ch0 | **W25Q256 SPI2 TX** | ✅ Implemented (NuttX SPI) | MEDIUM |
 | S5 | Ch7 | **DAC1 CH1 (Sound)** | ✅ Implemented | **HIGH** |
 | S6 | Ch4 | BT UART2 TX | Not implemented (pybricks reserved) | VERY_HIGH |
 | S7 | Ch6 | BT UART2 RX | Not implemented (pybricks reserved) | VERY_HIGH |
+
+!!! note "Flash SPI2 DMA priority"
+    pybricks runs the Flash SPI2 DMA at `DMA_PRIORITY_HIGH`, but NuttX's `stm32_spi.c` only honors a global `CONFIG_SPI_DMAPRIO` (no per-bus setting).  Raising the global to HIGH would also pull TLC5955 SPI1 DMA up, leaving DMA1 to arbitrate three concurrent HIGH streams (S3/S4/S5) with the Sound DMA — increasing DAC underrun risk.  This project keeps the F4 default MEDIUM (`DMA_SCR_PRIMED`) and reserves HIGH for Sound only.  Full pybricks parity is left for a future NuttX upstream contribution that adds per-bus DMA priority to `stm32_spi.c`.
 
 ### DMA2
 
@@ -145,6 +148,7 @@ Compresses the pybricks **relative** priority order into the 0x80–0xF0 band (b
 | 0x90 | 9 | IMU I2C2 EV/ER + EXTI4 | base=3 | `stm32_bringup.c` (step 6) |
 | 0xA0 | 10 | Sound DAC DMA1_S5 | base=4 (HIGH) | `stm32_bringup.c` (step 5) |
 | 0xB0 | 11 | USB OTG FS | base=6 | `stm32_bringup.c` (step 4) |
+| 0xB0 | 11 | **W25Q256 SPI2 + DMA1_S3/S4** | base=5/6 | `stm32_bringup.c` (step 7) |
 | 0xD0 | 13 | ADC DMA2_S0 | base=7 (MEDIUM) | `stm32_bringup.c` (step 3) |
 | 0xD0 | 13 | TLC5955 SPI1 + DMA2_S2/S3 | base=7 (LOW) | `stm32_bringup.c` (step 2) |
 | 0xF0 | 15 | PendSV, SysTick | base=15 | `stm32_bringup.c` (step 1) |

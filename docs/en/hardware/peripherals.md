@@ -124,9 +124,9 @@ For NuttX, treat the first 1 MB as reserved and use 1 MB onward for the filesyst
 
 ### NuttX Driver Support
 
-The existing `w25.c` (MTD_W25) supports 3-byte addressing only (up to W25Q128) and does not support W25Q256. `w25qxxxjv.c` is QSPI-only and does not support standard SPI.
+NuttX upstream `w25.c` (MTD_W25) supports 3-byte addressing only (up to W25Q128) and does not support W25Q256. `w25qxxxjv.c` is QSPI-only and does not support standard SPI.
 
-Recommended approach: extend `w25.c` to add 4-byte command support (0x0C, 0x12, 0x21). Add device ID `0xEF4019` to the JEDEC ID table and branch address transmission between 3-byte and 4-byte modes.
+**Implemented**: `boards/spike-prime-hub/src/stm32_w25q256.c` provides a board-local dedicated MTD driver. It always uses the 4-byte-address opcodes (Fast Read `0x0C` / Page Program `0x12` / Sector Erase `0x21`), so it does not depend on the device's address-mode register state (matches pybricks). The first 1 MB is reserved; the 31 MB region from `0x100000` is exposed via `mtd_partition()` as `/dev/mtdblock0` and mounted as LittleFS at `/mnt/flash`. See the [W25Q256 driver](../drivers/w25q256.md) document for details.
 
 ---
 

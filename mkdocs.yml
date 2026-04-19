@@ -47,6 +47,7 @@ plugins:
             開発ガイド: Development
             NuttX: NuttX
             テスト: Testing
+            利用ガイド: Usage
 
 nav:
   - Home: index.md
@@ -65,6 +66,9 @@ nav:
       - drivers/battery.md
       - drivers/power.md
       - drivers/sound.md
+      - drivers/w25q256.md
+  - 利用ガイド:
+      - usage/01-flash-storage.md
   - 開発ガイド:
       - development/getting-started.md
       - development/debugging.md

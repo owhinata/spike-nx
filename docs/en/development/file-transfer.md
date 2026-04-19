@@ -1,6 +1,6 @@
-# File Transfer and ELF Execution
+# Zmodem File Transfer (PC ⇔ Hub)
 
-How to transfer files using picocom + Zmodem and execute ELF binaries.
+Use picocom + lrzsz's `sz` / `rz` to transfer files over the USB CDC console.  Files received on the Hub are stored under `/mnt/flash` (W25Q256 + LittleFS).
 
 ## Prerequisites
 
@@ -14,95 +14,70 @@ brew install lrzsz picocom
 sudo apt install lrzsz picocom
 ```
 
-### NuttX Firmware
-
-The flashed firmware must have the following enabled.
+### NuttX firmware (usbnsh defconfig)
 
 | Setting | Purpose |
 |---|---|
-| `CONFIG_SYSTEM_ZMODEM=y` | Zmodem (sz/rz) |
-| `CONFIG_ELF=y` | ELF loader |
-| `CONFIG_NSH_FILE_APPS=y` | Execute files from NSH (full path required) |
+| `CONFIG_SYSTEM_ZMODEM=y` | Zmodem (`sz` / `rz`) |
+| `CONFIG_SYSTEM_ZMODEM_DEVNAME="/dev/console"` | Transfer over the USB CDC console |
+| `CONFIG_SYSTEM_ZMODEM_MOUNTPOINT="/mnt/flash"` | Default receive directory for `rz` |
+| `CONFIG_CDCACM_RXBUFSIZE=2048` | Drop mitigation (no HW flow control) |
+| `CONFIG_FS_LITTLEFS=y` + `CONFIG_MTD=y` | Persistent storage at `/mnt/flash` |
+| `CONFIG_NETUTILS_CODECS=y` + `CONFIG_CODECS_HASH_MD5=y` | Integrity check via `md5 -f` |
 
-## picocom Connection
+See [W25Q256 driver](../drivers/w25q256.md) and [/mnt/flash usage](../usage/01-flash-storage.md) for details.
 
-```bash
-picocom /dev/tty.usbmodem01 -b 115200 \
-  --send-cmd "sz -vv -w 256" \
-  --receive-cmd "rz -vv"
-```
-
-| Option | Description |
-|---|---|
-| `--send-cmd` | Command used when sending files with `Ctrl-A Ctrl-S` |
-| `--receive-cmd` | Command used when receiving files with `Ctrl-A Ctrl-R` |
-| `-w 256` | Window size limit (for environments without flow control) |
-
-## File Transfer
-
-### PC to Device (Upload)
-
-1. Type `rz` in NSH
-2. Press `Ctrl-A Ctrl-S`
-3. Enter the file path (e.g., `data/imu`)
-4. Wait for the transfer to complete
-
-```
-nsh> rz
-```
-
-Files are saved to `/data/` (Zmodem mount point).
-
-### Device to PC (Download)
-
-1. Type `sz <file path>` in NSH
-2. picocom automatically launches `rz` to receive
-
-```
-nsh> sz /data/test.txt
-```
-
-Files are saved to the host PC's current directory.
-
-## Building ELF Binaries
+## PC → Hub (upload)
 
 ```bash
-# Create export package + build ELF (auto-generates export if not present)
-make nuttx-elf APP=<app>
-
-# Rebuild ELF only (fast if already exported)
-make nuttx-elf APP=<app>
-
-# Clean ELF build artifacts
-make nuttx-elf-clean
+picocom --send-cmd 'sz -vv -L 256' /dev/tty.usbmodem01
 ```
 
-ELF binaries are output to `./data/<app>`.
+Once picocom is connected:
 
-Each app's ELF build definition is in `apps/<app>/elf.mk`:
+1. Type `rz` at the NSH prompt (Hub enters Zmodem receive mode)
+2. Press `Ctrl-A Ctrl-S` → enter the local file path (e.g. `/path/to/file.bin`) → Enter
+3. Wait for "Transfer complete" (~45 s for 1 MB)
+4. Exit picocom with `Ctrl-A Ctrl-X`
 
-```makefile
-# Example: apps/imu/elf.mk
-ELF_BIN  = imu
-ELF_SRCS = imu_main.c imu_geometry.c imu_stationary.c imu_fusion.c imu_calibration.c
+The file is saved to `/mnt/flash/<basename>`.
+
+```
+nsh> ls -l /mnt/flash/file.bin
+nsh> md5 -f /mnt/flash/file.bin   # 32-char hex (no trailing newline)
 ```
 
-## Transferring and Executing ELF
+## Hub → PC (download)
 
 ```bash
-# In NSH, type rz -> Ctrl-A Ctrl-S -> select data/<app>
-nsh> rz
-
-# Execute with full path
-nsh> /data/imu start
-nsh> /data/imu status
-nsh> /data/imu stop
+cd <destination directory>
+picocom --receive-cmd 'rz -vv -y' /dev/tty.usbmodem01
 ```
 
-### Notes
+Once picocom is connected:
 
-- ELF execution must always use the full path (e.g., `/data/imu`)
-- Do not enable `CONFIG_LIBC_ENVPATH` (causes CPU overhead from NSH PATH searching)
-- Symbols used by the ELF must be included in the kernel's symbol table (`g_symtab`)
-- The symbol table is generated from `libc.csv` + `syscall.csv` + `libm.csv` + libgcc helpers
-- Code + data are placed in RAM when loading an ELF
+1. Type `sz /mnt/flash/file.bin` at the NSH prompt (Hub enters Zmodem send mode)
+2. Press `Ctrl-A Ctrl-R` → press Enter with no arguments (`rz` reads the destination filename from the protocol)
+3. Wait for "Transfer complete"
+4. Exit picocom with `Ctrl-A Ctrl-X`
+
+Compare md5 on the PC:
+
+```bash
+md5sum file.bin
+```
+
+## Option Notes
+
+| Option | Role | Notes |
+|---|---|---|
+| `-vv` | Verbose progress | Optional but useful to see transfer state |
+| `-L 256` (sz) | Cap subpacket size at 256 bytes | **Required** — USB CDC has no HW flow control; the default 1024 bytes causes drops and ZNAK retries |
+| `-y` (rz) | Overwrite same-name files | Convenient for re-running tests |
+| `-e` (sz/rz) | Escape control characters | **Do not use** — escaping is unnecessary on a clean 8-bit USB CDC channel and itself triggers ZNAK retries |
+
+## Related
+
+- [W25Q256 driver spec](../drivers/w25q256.md)
+- [/mnt/flash usage (incl. recovery)](../usage/01-flash-storage.md)
+- [Test spec category G (pytest automation)](../testing/test-spec.md)

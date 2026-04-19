@@ -124,9 +124,9 @@ NuttX では先頭 1 MB を予約域として扱い、1 MB 以降をファイル
 
 ### NuttX ドライバ対応
 
-既存の `w25.c` (MTD_W25) は 3byte アドレスのみ (W25Q128 まで) で W25Q256 非対応。`w25qxxxjv.c` は QSPI 専用で標準 SPI 非対応。
+NuttX 上流の `w25.c` (MTD_W25) は 3byte アドレスのみ (W25Q128 まで) で W25Q256 非対応。`w25qxxxjv.c` は QSPI 専用で標準 SPI 非対応。
 
-推奨アプローチ: `w25.c` を拡張して 4byte コマンド (0x0C, 0x12, 0x21) 対応を追加。デバイス ID `0xEF4019` を JEDEC ID テーブルに追加し、アドレス送信部分を 3byte/4byte で分岐させる。
+**実装済み**: `boards/spike-prime-hub/src/stm32_w25q256.c` に board-local の専用 MTD ドライバを新規実装。常に 4byte 専用コマンド (Fast Read `0x0C` / Page Program `0x12` / Sector Erase `0x21`) を使用し、address mode register の状態に依存しない設計 (pybricks 同等)。先頭 1 MB を予約、`0x100000` 以降 31 MB を `mtd_partition()` で切り出して `/dev/mtdblock0` として LittleFS マウント (`/mnt/flash`)。詳細は [W25Q256 ドライバ](../drivers/w25q256.md) を参照。
 
 ---
 

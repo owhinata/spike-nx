@@ -51,7 +51,8 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 | D. クラッシュ | 4 | 4 | 0 | 0 |
 | E. OSテスト | 2 | 1 | 0 | 1 ([#26](https://github.com/owhinata/spike-nx/issues/26)) |
 | F. サウンド | 13 | 9 | 4 | 0 |
-| **合計** | **38** | **31** | **7** | **1** |
+| G. Flash / LittleFS | 6 | 4 | 2 | 0 |
+| **合計** | **44** | **35** | **9** | **1** |
 
 ## A. 起動・初期化 (`test_boot.py`)
 
@@ -309,6 +310,73 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 - **目的**: ボリューム変更が実際に音量に反映されること
 - **コマンド**: volume 100 → beep → volume 20 → beep → 元に戻す
 - **判定**: 2 音目が 1 音目より明らかに小さく聞こえる
+
+## G. Flash / LittleFS (`test_flash.py`)
+
+W25Q256 + LittleFS の回帰テストと、picocom + lrzsz 経由の Zmodem 転送 interactive テスト。詳細は [W25Q256 ドライバ](../drivers/w25q256.md) と [Zmodem ファイル転送](../development/file-transfer.md) を参照。
+
+### G-1: test_flash_mount
+
+- **目的**: `/mnt/flash` が LittleFS で起動時にマウント済みであること
+- **コマンド**: `mount`
+- **判定**: 出力に `/mnt/flash` と `littlefs` を含む
+
+### G-2: test_flash_mtdblock_visible
+
+- **目的**: `/dev/mtdblock0` のみが公開され、full chip raw `/dev/mtd0` は非公開であること
+- **コマンド**: `ls /dev/mtdblock0` / `ls /dev/mtd0`
+- **判定**: 前者は名前を返す、後者は ENOENT で返る (LEGO 領域保護)
+
+### G-3: test_flash_write_read
+
+- **目的**: ファイル書込・読出のラウンドトリップ
+- **コマンド**: `echo "regression-<ts>" > /mnt/flash/regress.txt` → `cat /mnt/flash/regress.txt`
+- **判定**: 書き込んだ payload が cat で取得できる
+- **タイムアウト**: 120 秒 (LittleFS 初回 metadata 更新は数秒かかることがある)
+
+### G-4: test_flash_persist_across_reboot
+
+- **目的**: NSH `reboot` 後にファイル内容が残ること (LittleFS 永続性)
+- **コマンド**: `echo "persist-<ts>" > /mnt/flash/persist.txt` → `reboot` → `cat /mnt/flash/persist.txt`
+- **判定**: reboot 後にファイル内容が一致する
+
+### G-I1: test_flash_zmodem_send `@interactive`
+
+- **目的**: PC → Hub の Zmodem アップロード + Hub 側 md5 検証
+- **手順**:
+    1. pytest がランダム 1 MB ファイルを `/tmp/spike_zmtest_1mb.bin` に生成 (毎回新規)
+    2. シリアルポートを解放、operator に `picocom --send-cmd 'sz -vv -L 256' /dev/tty.usbmodem01` 実行を促す
+    3. operator が picocom 内で `nsh> rz` → `C-a C-s` → ファイルパス入力で送信
+    4. operator が picocom 終了後 Enter → pytest がシリアル再接続
+    5. ファイルサイズ (1048576 byte) と Hub 側 `md5 -f /mnt/flash/spike_zmtest_1mb.bin` が PC 側 md5 と一致することを検証
+- **依存**: lrzsz (`brew install lrzsz`)
+
+### G-I2: test_flash_zmodem_recv `@interactive`
+
+- **目的**: Hub → PC の Zmodem ダウンロード + PC 側 md5 ラウンドトリップ検証
+- **前提**: `test_flash_zmodem_send` が同セッション内で実行済み (Hub に対象ファイルが存在)
+- **手順**:
+    1. pytest が Hub 側 `md5 -f` で ground-truth md5 を取得
+    2. 既存の同名ローカルファイルを削除し、シリアルポートを解放
+    3. operator に `cd <pytest cwd> && picocom --receive-cmd 'rz -vv -y' /dev/tty.usbmodem01` 実行を促す
+    4. operator が picocom 内で `nsh> sz /mnt/flash/spike_zmtest_1mb.bin` → `C-a C-r` → 引数なし Enter で受信
+    5. operator が picocom 終了後 Enter → pytest がシリアル再接続
+    6. PC 側に保存されたファイルの md5sum が Hub 側 md5 と一致することを検証
+    7. 検証成功時はローカルおよび Hub 側のテストファイルを削除
+- **依存**: lrzsz (`brew install lrzsz`)
+
+### 実行コマンド例
+
+```bash
+# 回帰テストのみ (interactive を除外)
+.venv/bin/pytest tests/test_flash.py -m "not interactive" -D /dev/tty.usbmodem01
+
+# 送信のみ
+.venv/bin/pytest tests/test_flash.py::test_flash_zmodem_send -D /dev/tty.usbmodem01
+
+# 全テスト (interactive 含む)
+.venv/bin/pytest tests/test_flash.py -D /dev/tty.usbmodem01
+```
 
 ## テスト同期方式 (sendCommand)
 
