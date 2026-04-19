@@ -215,6 +215,12 @@ int stm32_bt_slowclk_initialize(void);
 
 struct btuart_lowerhalf_s;
 FAR struct btuart_lowerhalf_s *stm32_btuart_instantiate(void);
+
+/* Orchestrate the CC2564C bring-up sequence: slow clock, nSHUTD toggle,
+ * init-script load, HCI baud negotiation and netdev registration.
+ */
+
+int stm32_bluetooth_initialize(void);
 #endif
 
 #endif /* __ASSEMBLY__ */

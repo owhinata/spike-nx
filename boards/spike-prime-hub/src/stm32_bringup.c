@@ -46,12 +46,11 @@ int stm32_bringup(void)
    * it stays at or below NuttX BASEPRI (0x80) and can therefore safely
    * call NuttX APIs (nxsem_post, etc.) from its ISR. 0x80 is reserved
    * for the OS tick (TIM9) so no peripheral shares a level with the
-   * scheduler. Slots 0x90 (LUMP UART) and 0xA0 (Bluetooth UART) are
-   * reserved for Issue #43 / #47:
+   * scheduler. Slot 0x90 stays reserved for Issue #43 (LUMP UART):
    *
    *   0x80  TIM9 tickless tick          (OS, kept at default)
    *   0x90  LUMP UART                   (future reservation, Issue #43)
-   *   0xA0  Bluetooth UART              (reserved for Issue #47)
+   *   0xA0  Bluetooth UART              (USART2 + DMA1 S6/S7)
    *   0xB0  IMU I2C2 EV/ER + EXTI4
    *   0xC0  Sound DAC DMA1_S5
    *   0xD0  W25Q256 DMA1_S3/S4
@@ -111,6 +110,20 @@ int stm32_bringup(void)
                     NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
   up_prioritize_irq(STM32_IRQ_SPI2,
                     NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
+#endif
+
+#ifdef CONFIG_STM32_USART2
+  /* step 8: CC2564C Bluetooth HCI UART — USART2 + DMA1 S6 (TX) + DMA1 S7
+   * (RX) at 0xA0 (Issue #50 reserved slot).  Sits between LUMP (0x90,
+   * Issue #43) and IMU (0xB0), matching the pybricks relative ordering
+   * so BT RX DMA does not wait behind IMU / Sound / Flash traffic.
+   */
+  up_prioritize_irq(STM32_IRQ_USART2,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 2 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_DMA1S6,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 2 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_DMA1S7,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 2 * NVIC_SYSH_PRIORITY_STEP);
 #endif
 #endif
 
@@ -239,6 +252,15 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR, "ERROR: stm32_pcm_register() failed: %d\n", ret);
     }
+
+#ifdef CONFIG_STM32_USART2
+  ret = stm32_bluetooth_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_bluetooth_initialize() failed: %d\n",
+             ret);
+    }
+#endif
 
   return ret;
 }
