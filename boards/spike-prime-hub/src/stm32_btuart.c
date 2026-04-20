@@ -180,6 +180,7 @@ static struct stm32_btuart_s g_btuart;
 
 static uint8_t g_rxring[BTUART_RXRING_SIZE];
 
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -341,9 +342,9 @@ static int btuart_usart_isr(int irq, FAR void *context, FAR void *arg)
     }
 
   /* ORE / FE / NE are also sticky in SR; clear them by the same SR->DR
-   * sequence so they don't keep re-triggering the IRQ.  We don't (yet)
-   * surface them to the upper half — just count them for diagnostics if
-   * we add a counter later.
+   * sequence so they don't keep re-triggering the IRQ.  They are not
+   * surfaced to the upper half today — at 3 Mbps with VERY_HIGH DMA
+   * priority they have not been observed in practice.
    */
 
   if ((sr & (USART_SR_ORE | USART_SR_FE | USART_SR_NE)) != 0)
@@ -414,7 +415,6 @@ static int btuart_setbaud(FAR const struct btuart_lowerhalf_s *lower,
                           uint32_t baud)
 {
   FAR struct stm32_btuart_s *priv = (FAR struct stm32_btuart_s *)lower;
-  irqstate_t flags;
   int ret;
 
   if (baud == priv->baud)
@@ -422,9 +422,16 @@ static int btuart_setbaud(FAR const struct btuart_lowerhalf_s *lower,
       return OK;
     }
 
-  /* Serialize with any in-flight write() so we don't rip BRR out from
-   * under an active TX DMA transfer.  nxmutex_lock blocks if the TX
-   * thread is mid-write.
+  /* Match pybricks bluetooth_btstack_uart_block_stm32_hal.c
+   * set_baudrate(): write BRR directly, leave UE on, don't touch DMA.
+   * The peripheral picks up the new divisor on the next idle period.
+   *
+   * Toggling UE or stopping the RX DMA around the BRR write creates a
+   * short window (a few microseconds at 3 Mbps) where the receiver is
+   * armed but the DMA is not, which empirically makes the CC2564C
+   * report Hardware Error 0x06 (Event_Not_Served_Time_Out) shortly
+   * after the switch.  We still serialize against any in-flight TX so
+   * the change does not corrupt a byte being shifted out.
    */
 
   ret = nxmutex_lock(&priv->txlock);
@@ -433,42 +440,14 @@ static int btuart_setbaud(FAR const struct btuart_lowerhalf_s *lower,
       return ret;
     }
 
-  /* Wait for the hardware to finish shifting out whatever was already in
-   * the TX data register / shift register (CR3.DMAT was set so the last
-   * DMA byte arrives here before TC asserts).  This avoids a baud-switch
-   * mid-frame on the wire.
-   */
-
   while ((getreg32(STM32_USART2_SR) & USART_SR_TC) == 0)
     {
-      /* spin — typically nanoseconds */
+      /* Spin until TX is quiescent. */
     }
 
-  flags = enter_critical_section();
+  putreg32(btuart_calc_brr(baud), STM32_USART2_BRR);
+  priv->baud = baud;
 
-  /* Quiesce RX: stop circular DMA, mop up any stale SR flags and any
-   * byte that landed in DR during the stop, then snapshot the producer
-   * as the new consumer floor.  Everything received at the old baud is
-   * discarded — Step E uses rxdrain()/explicit readouts of the 0xFF36
-   * Command Complete before getting here, so nothing important is lost.
-   */
-
-  stm32_dmastop(priv->rxdma);
-
-  (void)getreg32(STM32_USART2_SR);
-  (void)getreg32(STM32_USART2_DR);
-
-  btuart_apply_baud(baud);
-
-  /* Restart the RX ring at the new rate. */
-
-  stm32_dmasetup(priv->rxdma, BTUART_PERIPHADDR, (uint32_t)g_rxring,
-                 BTUART_RXRING_SIZE, BTUART_DMA_SCR_RX);
-  stm32_dmastart(priv->rxdma, NULL, NULL, false);
-  priv->rx_consumer    = 0;
-  priv->rxwork_pending = false;
-
-  leave_critical_section(flags);
   nxmutex_unlock(&priv->txlock);
   return OK;
 }

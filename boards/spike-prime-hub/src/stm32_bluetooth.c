@@ -82,6 +82,10 @@
 #define H4_EVT                 0x04
 #define HCI_EVT_COMMAND_COMPL  0x0e
 
+/* Standard HCI opcodes used during bring-up. */
+
+#define HCI_OP_RESET           0x0c03  /* HCI_Reset, OGF=3 OCF=0x03 */
+
 /* Vendor-specific opcode to change the HCI UART baud rate.
  * Parameters: little-endian uint32_t baud rate.
  */
@@ -227,6 +231,30 @@ static int bt_wait_command_complete(FAR const struct btuart_lowerhalf_s
     }
 }
 
+/* Send a parameter-less HCI command (H4_CMD + opcode + plen=0) and wait
+ * for its Command Complete.  Used for HCI_Reset during bring-up.
+ */
+
+static int bt_send_simple_cmd(FAR const struct btuart_lowerhalf_s *lower,
+                              uint16_t opcode)
+{
+  uint8_t cmd[4];
+  ssize_t w;
+
+  cmd[0] = H4_CMD;
+  cmd[1] = (uint8_t)(opcode & 0xff);
+  cmd[2] = (uint8_t)(opcode >> 8);
+  cmd[3] = 0x00;
+
+  w = lower->write(lower, cmd, sizeof(cmd));
+  if (w < 0)
+    {
+      return (int)w;
+    }
+
+  return bt_wait_command_complete(lower, opcode);
+}
+
 /* Stream the entire cc256x_init_script[] blob, one H4 command per
  * iteration, blocking for a Command Complete after each.
  */
@@ -318,11 +346,11 @@ static int bt_negotiate_baud(FAR const struct btuart_lowerhalf_s *lower,
       return ret;
     }
 
-  /* Give the chip time to flush its TX FIFO at the old rate before we
-   * switch our UART.
+  /* Switch the local UART immediately on Command Complete, matching
+   * pybricks/btstack which also have no post-CC delay.  The chip has
+   * already finished shifting out the CC at the old rate by the time
+   * bt_wait_command_complete returned.
    */
-
-  up_mdelay(BT_BAUD_SWITCH_MS);
 
   return lower->setbaud(lower, target_baud);
 }
@@ -391,23 +419,37 @@ int stm32_bluetooth_initialize(void)
   stm32_gpiowrite(GPIO_BT_NSHUTD, true);
   up_mdelay(BT_BOOT_SETTLE_MS);
 
-  /* 5. Stream the TI init script at the initial 115200 baud. */
+  /* Bring-up follows pybricks/btstack's canonical order (see
+   * pybricks/lib/btstack/src/hci.h L744 enum):
+   *
+   *   5. HCI_Reset                 @ initial 115200
+   *   6. HCI_VS_Update_UART_Baud   @ initial 115200 + local UART switch
+   *   7. init script (custom_init) @ target 3 Mbps
+   *
+   * Our earlier attempt to load the init script at 115200 before the
+   * baud change caused the chip to emit a Hardware Error
+   * (Event_Not_Served_Time_Out, code 0x06) right after the baud switch
+   * and drop any subsequent HCI_Reset.
+   */
 
-  ret = bt_load_init_script(lower);
+  ret = bt_send_simple_cmd(lower, HCI_OP_RESET);
   if (ret < 0)
     {
-      syslog(LOG_ERR, "BT: init script load failed: %d\n", ret);
+      syslog(LOG_ERR, "BT: initial HCI_Reset failed: %d\n", ret);
       goto err;
     }
-
-  /* 6. Negotiate the operating baud rate.  After this point both the
-   *    chip and our UART run at BT_TARGET_BAUD.
-   */
 
   ret = bt_negotiate_baud(lower, BT_TARGET_BAUD);
   if (ret < 0)
     {
       syslog(LOG_ERR, "BT: baud negotiation failed: %d\n", ret);
+      goto err;
+    }
+
+  ret = bt_load_init_script(lower);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "BT: init script load failed: %d\n", ret);
       goto err;
     }
 
