@@ -52,7 +52,8 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 | E. OS Tests | 2 | 1 | 0 | 1 ([#26](https://github.com/owhinata/spike-nx/issues/26)) |
 | F. Sound | 13 | 9 | 4 | 0 |
 | G. Flash / LittleFS | 7 | 4 | 3 | 0 |
-| **Total** | **45** | **35** | **10** | **1** |
+| H. Bluetooth (CC2564C) | 5 | 4 | 1 | 0 |
+| **Total** | **50** | **39** | **11** | **1** |
 
 ## A. Boot & Initialization (`test_boot.py`)
 
@@ -395,6 +396,52 @@ W25Q256 + LittleFS regression tests plus interactive Zmodem transfer tests via p
 
 # All tests (including interactive)
 .venv/bin/pytest tests/test_flash.py -D /dev/tty.usbmodem01
+```
+
+## H. Bluetooth (`test_bluetooth.py`)
+
+Verifies that the CC2564C bring-up (slow clock → nSHUTD → HCI_Reset @ 115200 → 0xFF36 baud switch → init script @ 3 Mbps → `btuart_register`) has completed and that the controller is registered with the NuttX BT stack as the `bnep0` netdev.  See the [Bluetooth driver](../drivers/bluetooth.md) page for full context.
+
+### H-1: test_bt_bringup_dmesg
+
+- **Goal**: Bring-up banner present and no failure log
+- **Command**: `dmesg`
+- **Check**: Output contains `BT: CC2564C ready at 3000000 bps` and does NOT contain `btuart_register failed` or `stm32_bluetooth_initialize() failed`
+
+### H-2: test_bt_netdev_visible
+
+- **Goal**: The BT netdev is registered as a NuttX network interface
+- **Command**: `ifconfig`
+- **Check**: Output lists `bnep0`
+
+### H-3: test_bt_info_bdaddr
+
+- **Goal**: Controller returns a plausible Bluetooth Device Address (via HCI_Read_BD_ADDR)
+- **Command**: `bt bnep0 info`
+- **Check**: A 48-bit BD address (`xx:xx:xx:xx:xx:xx`) is returned and is neither all zeros nor all ones
+
+### H-4: test_bt_info_buffer_pool
+
+- **Goal**: HCI bring-up really completed — the ACL buffer pool is positive (if bring-up failed silently both values stay at 0, which H-3 on its own cannot detect)
+- **Command**: `bt bnep0 info`
+- **Check**: `Free: <N>` with `N > 0` and `Max ACL: <M>` with `M > 0`
+
+### H-5: test_bt_scan `@interactive`
+
+- **Goal**: HCI inquiry discovers surrounding BT devices
+- **Prerequisite**: A nearby BT device (e.g. a phone) is advertising / discoverable
+- **Commands**: `bt bnep0 scan start` → wait 3 s → `bt bnep0 scan get` → `bt bnep0 scan stop`
+- **Check**: `bt bnep0 scan get` output contains at least one BT address, confirmed by the operator
+- **Dependency**: A nearby discoverable BT device (phone, etc.)
+
+### Example invocations
+
+```bash
+# Regression only (exclude interactive)
+.venv/bin/pytest tests/test_bluetooth.py -m "not interactive" -D /dev/tty.usbmodem01
+
+# Scan test only (needs a nearby BT device)
+.venv/bin/pytest tests/test_bluetooth.py::test_bt_scan -D /dev/tty.usbmodem01
 ```
 
 ## Test Synchronization (sendCommand)

@@ -67,6 +67,7 @@ nav:
       - drivers/power.md
       - drivers/sound.md
       - drivers/w25q256.md
+      - drivers/bluetooth.md
   - 利用ガイド:
       - usage/01-flash-storage.md
   - 開発ガイド:
@@ -79,6 +80,7 @@ nav:
       - nuttx/f413-support.md
       - nuttx/tickless-timer.md
       - nuttx/watchdog.md
+      - nuttx/upstream-issues.md
   - テスト:
       - testing/test-spec.md
 

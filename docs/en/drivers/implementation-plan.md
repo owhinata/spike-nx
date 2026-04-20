@@ -20,7 +20,7 @@ Implementation plan for device drivers to control hardware on the SPIKE Prime Hu
 | 10 | W25Q256 SPI Flash | `/dev/mtdblock0` | **P2** | SPI2 |
 | 11 | Power Management | (board init) | **Done** | PA13/PA14 GPIO |
 | 12 | MP2639A Charge Control | `/dev/charge0` | **Done** | TIM5 PWM + ADC + BCD |
-| 13 | Bluetooth (CC256x) | -- | **P3** | USART2 + DMA |
+| 13 | Bluetooth (CC2564C) | `/dev/bnep0` | **Done** | USART2 + DMA1 S6/S7, see [bluetooth.md](bluetooth.md) |
 
 ### Priority Definitions
 
@@ -129,11 +129,14 @@ PA13 (BAT_PWR_EN) and PA14 (PORT_3V3_EN) initialization is already implemented i
 
 ### Phase 4: Wireless Communication (P3)
 
-#### 4a. Bluetooth (CC256x)
+#### 4a. Bluetooth (CC2564C) — **Implemented** (Issue #47)
 
-- USART2 (PD5/PD6) + flow control (PD3/PD4)
-- TX/RX via DMA1_Stream6/7
-- Details TBD
+- USART2 (PD5/PD6) + flow control (PD3/PD4), DMA1 Stream 6 (TX Ch4) / Stream 7 (RX Ch6)
+- nSHUTD=PA2, 32.768 kHz slow clock = TIM8 CH4 → PC9
+- NVIC priority 0xA0 (Issue #50 reserved slot)
+- Board-local `stm32_btuart.c` lower half + generic upper half (`CONFIG_BLUETOOTH_UART_OTHER`)
+- TI CC256XC v1.4 init script (6,646 B) streamed at 3 Mbps, HCI verified via btsak
+- See [Bluetooth driver](bluetooth.md) for details
 
 ## 4. Port GPIO Pin Assignment
 
@@ -248,5 +251,5 @@ Phase 2e: ADC Battery               (Done - /dev/bat0)
 Phase 3a: W25Q256 Flash             (Can be implemented independently)
 Phase 3b: MP2639A Charging           (Done - /dev/charge0, BCD on LPWORK)
     |
-Phase 4a: Bluetooth                 (Future)
+Phase 4a: Bluetooth                 (Done — /dev/bnep0, HCI @ 3 Mbps)
 ```
