@@ -1,0 +1,47 @@
+config APP_BTSENSOR
+	tristate "SPP IMU streaming (btstack, Issue #52)"
+	default n
+	---help---
+		SPIKE Prime Hub Classic Bluetooth SPP (RFCOMM) streaming of
+		LSM6DS3TR-C IMU samples.  Requires the CC2564C bring-up in
+		boards/spike-prime-hub (Issue #47) and btstack integrated
+		under libs/btstack.  Step B skeleton only; activating the
+		service happens in Step D.
+
+if APP_BTSENSOR
+
+config APP_BTSENSOR_PROGNAME
+	string "Program name"
+	default "btsensor"
+	depends on BUILD_KERNEL
+	---help---
+		NSH command name.
+
+config APP_BTSENSOR_PRIORITY
+	int "Task priority"
+	default 100
+
+config APP_BTSENSOR_STACKSIZE
+	int "Task stack size"
+	default 4096
+
+config APP_BTSENSOR_BATCH
+	int "IMU samples per RFCOMM frame"
+	default 16
+	range 1 40
+	---help---
+		Number of 12-byte IMU samples packed into one SPP frame.
+		The RFCOMM credit-based flow control tolerates large
+		frames; 16 samples gives ~196 byte payload, well under
+		btstack's default L2CAP MTU.
+
+config APP_BTSENSOR_RING_DEPTH
+	int "Frame ring buffer depth"
+	default 32
+	range 4 128
+	---help---
+		Number of frames kept between the sampler and the RFCOMM
+		send worker.  Deeper rings tolerate longer RF stalls at
+		the cost of RAM.
+
+endif
