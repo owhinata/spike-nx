@@ -1,5 +1,10 @@
 # CC2564C Bluetooth (HCI over USART2)
 
+!!! warning "btstack への移行中 (Issue #52)"
+    Issue #47 で完成した NuttX 標準 BT スタック (`CONFIG_WIRELESS_BLUETOOTH_HOST` / `bnep0` / `btsak`) は Issue #52 Step A で撤去しました。`stm32_bluetooth.c` は電源と 32.768 kHz slow clock の起動、USART2 lower-half の instantiate までに縮退しています。HCI reset / init script / baud 切替 / 上位スタック (Classic BT SPP over RFCOMM) はすべて `apps/btsensor/` の btstack port に移管中 (Step B〜F)。
+
+    このページの「ソフトウェア構成」以降の記述は Issue #47 時点の設計メモです。新アーキテクチャは Step F で全面書き直しの予定です。
+
 SPIKE Prime Hub の **TI CC2564C** (BR/EDR + BLE デュアルモード Bluetooth コントローラ) を NuttX から使えるようにする board-local ドライバ。USART2 HCI-UART 接続で、起動時に約 6.6 KB の TI service pack (init script) を送信 → 115200 から 3 Mbps にボーレート切替 → NuttX の `CONFIG_NET_BLUETOOTH` 経由で `bnep0` netdev として登録、`btsak` からスキャン/接続可能にする。
 
 ## ハードウェア構成

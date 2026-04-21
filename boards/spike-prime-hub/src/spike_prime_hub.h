@@ -216,11 +216,19 @@ int stm32_bt_slowclk_initialize(void);
 struct btuart_lowerhalf_s;
 FAR struct btuart_lowerhalf_s *stm32_btuart_instantiate(void);
 
-/* Orchestrate the CC2564C bring-up sequence: slow clock, nSHUTD toggle,
- * init-script load, HCI baud negotiation and netdev registration.
+/* Power on the CC2564C (slow clock + nSHUTD toggle) and leave the USART2
+ * lower-half instantiated.  HCI bring-up (reset / init script / baud
+ * negotiation) is delegated to the higher-level host stack — see the
+ * btstack port under apps/btsensor/ (Issue #52).
  */
 
 int stm32_bluetooth_initialize(void);
+
+/* Return the USART2 lower-half produced by stm32_bluetooth_initialize().
+ * NULL until the bring-up has run successfully.
+ */
+
+FAR struct btuart_lowerhalf_s *stm32_btuart_lower(void);
 #endif
 
 #endif /* __ASSEMBLY__ */

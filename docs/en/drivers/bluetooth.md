@@ -1,5 +1,10 @@
 # CC2564C Bluetooth (HCI over USART2)
 
+!!! warning "Migration to btstack in progress (Issue #52)"
+    The NuttX standard BT host stack finalised in Issue #47 (`CONFIG_WIRELESS_BLUETOOTH_HOST`, `bnep0`, `btsak`) was removed in Issue #52 Step A.  `stm32_bluetooth.c` now only runs the power-on path (32.768 kHz slow clock, nSHUTD toggle) and hands back the instantiated USART2 lower-half.  HCI reset / init script / baud switch and the upper stack (Classic BT SPP over RFCOMM) are moving to the btstack port under `apps/btsensor/` in Steps B–F.
+
+    Everything below this banner documents the Issue #47 architecture.  Step F will rewrite the page for the new stack.
+
 Board-local driver exposing the SPIKE Prime Hub's **TI CC2564C** BR/EDR + BLE dual-mode Bluetooth controller through NuttX.  Bring-up streams a ~6.6 KB TI service pack (init script) over USART2 at 115,200 bps, switches the link to 3 Mbps and registers the controller through the `CONFIG_NET_BLUETOOTH` path as `bnep0` so `btsak` can drive scans and connections.
 
 ## Hardware wiring
