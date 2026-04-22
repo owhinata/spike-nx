@@ -27,9 +27,18 @@
 #include "hci_transport_h4.h"
 #include "btstack_chipset_cc256x.h"
 
+/* Uncomment + re-enable platform/embedded/hci_dump_embedded_stdout.c in
+ * apps/btsensor/Makefile to route btstack log_info/log_error + HCI
+ * packet traces to printf for debugging host-side connection issues.
+ */
+
+/* #include "hci_dump.h"                         */
+/* #include "hci_dump_embedded_stdout.h"         */
+
 #include "btstack_run_loop_nuttx.h"
 #include "btstack_uart_nuttx.h"
 #include "btsensor_spp.h"
+#include "imu_sampler.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -108,6 +117,13 @@ int main(int argc, FAR char *argv[])
   btstack_memory_init();
   btstack_run_loop_init(btstack_run_loop_nuttx_get_instance());
 
+  /* Enable the HCI/LOG dump on the console when debugging host-side
+   * connection failures.  Also flip the two #include lines at the top
+   * and re-enable hci_dump_embedded_stdout.c in apps/btsensor/Makefile.
+   *
+   * hci_dump_init(hci_dump_embedded_stdout_get_instance());
+   */
+
   /* 2. HCI H4 transport on top of our NuttX UART wrapper. */
 
   const hci_transport_t *transport =
@@ -133,7 +149,17 @@ int main(int argc, FAR char *argv[])
 
   spp_server_init();
 
-  /* 6. Turn the radio on and enter the run loop.  hci_power_control
+  /* 6. IMU sampler — opens uORB accel/gyro, hooks them into the run loop
+   * and will start enqueueing frames as soon as RFCOMM_EVENT_CHANNEL_OPENED
+   * hands us an RFCOMM cid.
+   */
+
+  if (imu_sampler_init() != 0)
+    {
+      printf("btsensor: imu sampler init failed, streaming disabled\n");
+    }
+
+  /* 7. Turn the radio on and enter the run loop.  hci_power_control
    * triggers the bring-up state machine (HCI_Reset → chipset init script
    * → baud switch → local name + BD_ADDR read → STATE_WORKING).  The run
    * loop is entered afterwards and never returns unless the caller posts

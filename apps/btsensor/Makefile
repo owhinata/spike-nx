@@ -12,6 +12,9 @@ MAINSRC = btsensor_main.c
 # below, which we pull in for the spp_create_sdp_record helper.
 CSRCS  += btsensor_spp.c
 
+# IMU sampler / RFCOMM streamer — Issue #52 Step E.
+CSRCS  += imu_sampler.c
+
 # Pulled-in chipset init script (TI v1.4 service pack, eHCILL disabled —
 # originally from pybricks, see apps/btsensor/chipset/cc256x_init_script.c).
 CSRCS  += chipset/cc256x_init_script.c
@@ -76,7 +79,10 @@ CSRCS += btstack_link_key_db_memory.c \
 VPATH += :$(BTSTACK_ROOT)/chipset/cc256x
 CSRCS += btstack_chipset_cc256x.c
 
-# Embedded hci_dump backend is available under libs/btstack/platform/embedded
-# for debugging; include it only when btsensor_main.c calls hci_dump_init().
+# Embedded hci_dump backend (routes btstack log_info/log_error + HCI
+# packet traces to printf) — re-enable when btsensor_main.c calls
+# hci_dump_init() for debugging.
+# VPATH += :$(BTSTACK_ROOT)/platform/embedded
+# CSRCS += hci_dump_embedded_stdout.c
 
 include $(APPDIR)/Application.mk

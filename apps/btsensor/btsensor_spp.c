@@ -27,6 +27,7 @@
 #include "hci.h"
 
 #include "btsensor_spp.h"
+#include "imu_sampler.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -105,20 +106,28 @@ static void spp_packet_handler(uint8_t packet_type, uint16_t channel,
                   printf("btsensor: RFCOMM open failed status 0x%02x\n",
                          rfcomm_event_channel_opened_get_status(packet));
                   g_rfcomm_cid = 0;
+                  imu_sampler_set_rfcomm_cid(0, 0);
                 }
               else
                 {
                   g_rfcomm_cid =
                       rfcomm_event_channel_opened_get_rfcomm_cid(packet);
+                  uint16_t mtu =
+                      rfcomm_event_channel_opened_get_max_frame_size(packet);
                   printf("btsensor: RFCOMM open cid=%u mtu=%u\n",
-                         g_rfcomm_cid,
-                         rfcomm_event_channel_opened_get_max_frame_size(packet));
+                         g_rfcomm_cid, mtu);
+                  imu_sampler_set_rfcomm_cid(g_rfcomm_cid, mtu);
                 }
               break;
 
             case RFCOMM_EVENT_CHANNEL_CLOSED:
               printf("btsensor: RFCOMM closed cid=%u\n", g_rfcomm_cid);
               g_rfcomm_cid = 0;
+              imu_sampler_set_rfcomm_cid(0, 0);
+              break;
+
+            case RFCOMM_EVENT_CAN_SEND_NOW:
+              imu_sampler_on_can_send_now();
               break;
 
             default:
