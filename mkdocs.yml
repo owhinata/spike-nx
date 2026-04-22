@@ -76,6 +76,7 @@ nav:
       - development/file-transfer.md
       - development/apps.md
       - development/build-protected.md
+      - development/pc-receive-spp.md
   - NuttX:
       - nuttx/f413-support.md
       - nuttx/tickless-timer.md
