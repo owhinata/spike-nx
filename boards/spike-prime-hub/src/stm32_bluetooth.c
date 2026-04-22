@@ -102,7 +102,16 @@ int stm32_bluetooth_initialize(void)
 
   g_bt_lower = lower;
 
-  syslog(LOG_INFO, "BT: CC2564C powered, awaiting host stack\n");
+  ret = stm32_btuart_chardev_register(lower);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "BT: chardev register failed: %d\n", ret);
+      stm32_gpiowrite(GPIO_BT_NSHUTD, false);
+      g_bt_lower = NULL;
+      return ret;
+    }
+
+  syslog(LOG_INFO, "BT: CC2564C powered, /dev/ttyBT ready\n");
   return OK;
 }
 

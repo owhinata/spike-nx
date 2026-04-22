@@ -1,17 +1,142 @@
 /****************************************************************************
  * apps/btsensor/btsensor_main.c
  *
- * Step B skeleton.  The real NSH surface (start/stop/status) lands in
- * Step D once the btstack SPP server is wired up.
+ * Issue #52 Step C entry point.  Brings up btstack on top of the /dev/ttyBT
+ * chardev exposed by the board, runs HCI_Reset + CC2564C init-script load +
+ * baud switch via btstack's chipset/cc256x module, then enters the run
+ * loop.  The full NSH command surface (start/stop/status, -r option) lands
+ * in Step D; for now `btsensor` is a blocking foreground helper useful for
+ * verifying that HCI gets to HCI_STATE_WORKING.
  ****************************************************************************/
 
 #include <nuttx/config.h>
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "btstack_config.h"
+#include "btstack_debug.h"
+#include "btstack_event.h"
+#include "btstack_memory.h"
+#include "btstack_run_loop.h"
+#include "hci.h"
+#include "hci_transport.h"
+#include "hci_transport_h4.h"
+#include "btstack_chipset_cc256x.h"
+
+#include "btstack_run_loop_nuttx.h"
+#include "btstack_uart_nuttx.h"
+
+/****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+/* Match stm32_btuart's initial rate.  btstack's chipset module issues its
+ * own HCI_VS_Update_UART_Baud_Rate sequence and flips to the main_baudrate
+ * below via the transport's set_baudrate callback.
+ */
+
+#define BT_INIT_BAUDRATE   115200
+#define BT_MAIN_BAUDRATE   3000000
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
+
+static const hci_transport_config_uart_t g_hci_transport_config =
+{
+  HCI_TRANSPORT_CONFIG_UART,
+  BT_INIT_BAUDRATE,
+  BT_MAIN_BAUDRATE,
+  0,                          /* flowcontrol is already on in HW */
+  NULL,                       /* device_name — ignored by our UART impl */
+  BTSTACK_UART_PARITY_OFF,
+};
+
+static btstack_packet_callback_registration_t g_hci_event_reg;
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+static void packet_handler(uint8_t packet_type, uint16_t channel,
+                           uint8_t *packet, uint16_t size)
+{
+  (void)channel;
+  (void)size;
+
+  if (packet_type != HCI_EVENT_PACKET)
+    {
+      return;
+    }
+
+  switch (hci_event_packet_get_type(packet))
+    {
+      case BTSTACK_EVENT_STATE:
+        if (btstack_event_state_get_state(packet) == HCI_STATE_WORKING)
+          {
+            bd_addr_t addr;
+            gap_local_bd_addr(addr);
+            printf("btsensor: HCI working, BD_ADDR %s\n",
+                   bd_addr_to_str(addr));
+
+            /* Step C POC: stop the run loop after reaching WORKING so the
+             * NSH command returns.  Step D introduces the real NSH surface
+             * (start/stop/status) and keeps the stack running.
+             */
+
+            btstack_run_loop_trigger_exit();
+          }
+        break;
+
+      default:
+        break;
+    }
+}
+
+/****************************************************************************
+ * Entry Point
+ ****************************************************************************/
 
 int main(int argc, FAR char *argv[])
 {
-  printf("btsensor: skeleton only (Issue #52 Step B) — "
-         "SPP server comes in Step D\n");
+  (void)argc;
+  (void)argv;
+
+  printf("btsensor: bringing up btstack on /dev/ttyBT\n");
+
+  /* 1. Run loop. */
+
+  btstack_memory_init();
+  btstack_run_loop_init(btstack_run_loop_nuttx_get_instance());
+
+
+  /* 2. HCI H4 transport on top of our NuttX UART wrapper. */
+
+  const hci_transport_t *transport =
+      hci_transport_h4_instance_for_uart(btstack_uart_nuttx_instance());
+
+  hci_init(transport, &g_hci_transport_config);
+
+  /* 3. CC2564C chipset helper handles init script streaming + baud switch
+   * in response to HCI_Reset Command Complete.
+   */
+
+  hci_set_chipset(btstack_chipset_cc256x_instance());
+
+  /* 4. Hook BTSTACK_EVENT_STATE so we can log HCI_STATE_WORKING. */
+
+  g_hci_event_reg.callback = &packet_handler;
+  hci_add_event_handler(&g_hci_event_reg);
+
+  /* 5. Turn the radio on and enter the run loop.  hci_power_control triggers
+   * the bring-up state machine (HCI_Reset → chipset init script → baud
+   * switch → local name + BD_ADDR read → STATE_WORKING).
+   */
+
+  hci_power_control(HCI_POWER_ON);
+  btstack_run_loop_execute();
+
   return 0;
 }

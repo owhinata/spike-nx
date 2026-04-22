@@ -11,6 +11,10 @@ MAINSRC = btsensor_main.c
 # originally from pybricks, see apps/btsensor/chipset/cc256x_init_script.c).
 CSRCS  += chipset/cc256x_init_script.c
 
+# NuttX-side btstack port: run loop, UART wrapper, HAL stubs.
+CSRCS  += port/btstack_run_loop_nuttx.c
+CSRCS  += port/btstack_uart_nuttx.c
+
 # ---------------------------------------------------------------------------
 # btstack integration (Issue #52 Step B/C)
 # ---------------------------------------------------------------------------
@@ -19,6 +23,7 @@ CSRCS  += chipset/cc256x_init_script.c
 BTSTACK_ROOT := $(APPDIR)/../libs/btstack
 
 CFLAGS += -I$(APPDIR)/external/btsensor
+CFLAGS += -I$(APPDIR)/external/btsensor/port
 CFLAGS += -I$(BTSTACK_ROOT)/src
 CFLAGS += -I$(BTSTACK_ROOT)/src/classic
 CFLAGS += -I$(BTSTACK_ROOT)/chipset/cc256x
@@ -65,5 +70,8 @@ CSRCS += btstack_link_key_db_memory.c \
 # CC2564C chipset driver (init script injection + baud switch).
 VPATH += :$(BTSTACK_ROOT)/chipset/cc256x
 CSRCS += btstack_chipset_cc256x.c
+
+# Embedded hci_dump backend is available under libs/btstack/platform/embedded
+# for debugging; include it only when btsensor_main.c calls hci_dump_init().
 
 include $(APPDIR)/Application.mk

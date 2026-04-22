@@ -216,6 +216,12 @@ int stm32_bt_slowclk_initialize(void);
 struct btuart_lowerhalf_s;
 FAR struct btuart_lowerhalf_s *stm32_btuart_instantiate(void);
 
+/* Return the number of bytes currently sitting in the RX ring.  Non-
+ * destructive; safe to call from any context including poll() setup.
+ */
+
+size_t stm32_btuart_rx_available(FAR const struct btuart_lowerhalf_s *lower);
+
 /* Power on the CC2564C (slow clock + nSHUTD toggle) and leave the USART2
  * lower-half instantiated.  HCI bring-up (reset / init script / baud
  * negotiation) is delegated to the higher-level host stack — see the
@@ -229,6 +235,13 @@ int stm32_bluetooth_initialize(void);
  */
 
 FAR struct btuart_lowerhalf_s *stm32_btuart_lower(void);
+
+/* Register the /dev/ttyBT character device that wraps the btuart lower-half
+ * so user-mode apps can drive HCI over POSIX read/write/poll/ioctl.  See
+ * boards/spike-prime-hub/include/board_btuart.h for the ABI.
+ */
+
+int stm32_btuart_chardev_register(FAR struct btuart_lowerhalf_s *lower);
 #endif
 
 #endif /* __ASSEMBLY__ */
