@@ -7,6 +7,11 @@ MODULE    = $(CONFIG_APP_BTSENSOR)
 
 MAINSRC = btsensor_main.c
 
+# SPP server (L2CAP + RFCOMM + SDP glue) — Issue #52 Step D.  Named
+# btsensor_spp.c to avoid colliding with btstack's src/classic/spp_server.c
+# below, which we pull in for the spp_create_sdp_record helper.
+CSRCS  += btsensor_spp.c
+
 # Pulled-in chipset init script (TI v1.4 service pack, eHCILL disabled —
 # originally from pybricks, see apps/btsensor/chipset/cc256x_init_script.c).
 CSRCS  += chipset/cc256x_init_script.c

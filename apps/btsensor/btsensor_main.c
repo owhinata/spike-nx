@@ -1,12 +1,14 @@
 /****************************************************************************
  * apps/btsensor/btsensor_main.c
  *
- * Issue #52 Step C entry point.  Brings up btstack on top of the /dev/ttyBT
- * chardev exposed by the board, runs HCI_Reset + CC2564C init-script load +
- * baud switch via btstack's chipset/cc256x module, then enters the run
- * loop.  The full NSH command surface (start/stop/status, -r option) lands
- * in Step D; for now `btsensor` is a blocking foreground helper useful for
- * verifying that HCI gets to HCI_STATE_WORKING.
+ * Issue #52 btsensor entry point.
+ *
+ * Step C brought btstack to HCI_STATE_WORKING on /dev/ttyBT.
+ * Step D adds the SPP server (L2CAP + RFCOMM + SDP) and SSP Just-Works
+ * pairing so a PC can discover "SPIKE-BT-Sensor", pair and open the
+ * RFCOMM channel advertised by the SDP record.  The main task stays
+ * alive in the btstack run loop — invoke from NSH as `btsensor &`.
+ * Step E wires sensor streaming into the RFCOMM channel.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -27,6 +29,7 @@
 
 #include "btstack_run_loop_nuttx.h"
 #include "btstack_uart_nuttx.h"
+#include "btsensor_spp.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -78,15 +81,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
           {
             bd_addr_t addr;
             gap_local_bd_addr(addr);
-            printf("btsensor: HCI working, BD_ADDR %s\n",
+            printf("btsensor: HCI working, BD_ADDR %s — "
+                   "advertising as \"" BTSENSOR_SPP_LOCAL_NAME "\"\n",
                    bd_addr_to_str(addr));
-
-            /* Step C POC: stop the run loop after reaching WORKING so the
-             * NSH command returns.  Step D introduces the real NSH surface
-             * (start/stop/status) and keeps the stack running.
-             */
-
-            btstack_run_loop_trigger_exit();
           }
         break;
 
@@ -111,7 +108,6 @@ int main(int argc, FAR char *argv[])
   btstack_memory_init();
   btstack_run_loop_init(btstack_run_loop_nuttx_get_instance());
 
-
   /* 2. HCI H4 transport on top of our NuttX UART wrapper. */
 
   const hci_transport_t *transport =
@@ -125,14 +121,23 @@ int main(int argc, FAR char *argv[])
 
   hci_set_chipset(btstack_chipset_cc256x_instance());
 
-  /* 4. Hook BTSTACK_EVENT_STATE so we can log HCI_STATE_WORKING. */
+  /* 4. Hook BTSTACK_EVENT_STATE for the WORKING banner. */
 
   g_hci_event_reg.callback = &packet_handler;
   hci_add_event_handler(&g_hci_event_reg);
 
-  /* 5. Turn the radio on and enter the run loop.  hci_power_control triggers
-   * the bring-up state machine (HCI_Reset → chipset init script → baud
-   * switch → local name + BD_ADDR read → STATE_WORKING).
+  /* 5. Bring up the SPP protocol stack (L2CAP + RFCOMM + SDP + GAP opts)
+   * before powering HCI on so the SDP record is registered in time for
+   * the first inquiry from the host.
+   */
+
+  spp_server_init();
+
+  /* 6. Turn the radio on and enter the run loop.  hci_power_control
+   * triggers the bring-up state machine (HCI_Reset → chipset init script
+   * → baud switch → local name + BD_ADDR read → STATE_WORKING).  The run
+   * loop is entered afterwards and never returns unless the caller posts
+   * btstack_run_loop_trigger_exit() from a packet handler.
    */
 
   hci_power_control(HCI_POWER_ON);
