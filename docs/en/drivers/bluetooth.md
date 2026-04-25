@@ -249,6 +249,34 @@ btsensor: bringing up btstack on /dev/ttyBT
 btsensor: HCI working, BD_ADDR F8:2E:0C:A0:3E:64 — advertising as "SPIKE-BT-Sensor"
 ```
 
+## Host adapter compatibility (sustained streaming)
+
+The CC2564C side keeps credits available, but on some host adapters the
+HCI `Number of Completed Packets` event stops arriving partway through
+the stream, which prevents btstack from emitting
+`RFCOMM_EVENT_CAN_SEND_NOW` again — and the Hub stalls.  Observed
+behaviour:
+
+| Host adapter | Chip | 30 s streaming test |
+|--------------|------|---------------------|
+| Generic USB dongle | **MediaTek** | Stops after ~1.75 s (`pending=1` never clears; the link supervision timeout closes the session ~30 s later) |
+| RPi 5 built-in | **Broadcom/Cypress** (CYW43455) | Sustains for 30 s (sensor ODR 790 Hz / link ODR 662 Hz; ~16 % drop at the Hub-side ring) |
+
+The Hub-side code is fine.  Root cause is MediaTek Classic-BT firmware
+interop with the TI CC2564C: working around it on the Hub would need a
+rate-limited send path or vendor-specific TX-queue flush.  In practice,
+**pick a known-good adapter**:
+
+- ✅ **Broadcom / Cypress** (RPi 5 built-in, Apple T2-class controllers)
+- ✅ **Intel** (AX200 / AX210 generation — `iwlwifi` family, generally
+  good but not yet verified on this stack)
+- ❌ **MediaTek** (most cheap USB dongles and Logitech "Unifying"
+  adapters)
+
+To verify a given adapter run `tools/rfcomm_receive.py --duration 30
+--decode`; if the trailing `link ODR` does not collapse to ~0 within a
+few seconds, the adapter is OK.
+
 ## Host-side receive
 
 See [PC receive guide](../development/pc-receive-spp.md) for the

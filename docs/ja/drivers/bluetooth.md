@@ -177,6 +177,23 @@ btsensor: bringing up btstack on /dev/ttyBT
 btsensor: HCI working, BD_ADDR F8:2E:0C:A0:3E:64 — advertising as "SPIKE-BT-Sensor"
 ```
 
+## ホスト adapter 互換性 (sustained streaming)
+
+CC2564C 側は credit が残っていても、ホスト側 adapter のチップによっては `Number of Completed Packets` の HCI イベントが途中で途切れ、btstack が `RFCOMM_EVENT_CAN_SEND_NOW` を発火できなくなって stall することがある。観測済みの挙動:
+
+| ホスト adapter | チップ | 30 秒 streaming テスト |
+|----------------|-------|------------------------|
+| Logitech 内蔵 USB ドングル | **MediaTek** | ~1.75 秒で停止 (`pending=1` で再開せず、~30 秒後に link supervision timeout で session close) |
+| RPi 5 内蔵 | **Broadcom/Cypress** (CYW43455) | 30 秒継続 (sensor ODR 790 Hz / link ODR 662 Hz、~16% は ring overflow で drop) |
+
+→ Hub 側コードは正しく動作しており、根本原因は MediaTek Classic BT firmware と CC2564C の interop。Hub アプリ側で回避するには rate-limit 等の改修が必要だが、現状は **adapter の選択** で回避することを推奨:
+
+- ✅ **Broadcom/Cypress** (RPi 5 内蔵、Apple T2 等)
+- ✅ **Intel** (AX200/AX210 等) — 未検証だが `iwlwifi` 系として一般的に良好
+- ❌ **MediaTek** (多くの 安価 USB ドングルや Logitech "Unifying" 系)
+
+検証方法は `tools/rfcomm_receive.py --duration 30 --decode` で、末尾の `link ODR` が 30 秒以上落ちないかで判定できる。
+
 ## PC 側受信
 
 → [PC での SPP 受信手順](../development/pc-receive-spp.md) を参照。
