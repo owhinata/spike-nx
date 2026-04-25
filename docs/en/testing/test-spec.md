@@ -398,50 +398,50 @@ W25Q256 + LittleFS regression tests plus interactive Zmodem transfer tests via p
 .venv/bin/pytest tests/test_flash.py -D /dev/tty.usbmodem01
 ```
 
-## H. Bluetooth (`test_bluetooth.py`)
+## H. Bluetooth (`test_bt_spp.py`)
 
-Verifies that the CC2564C bring-up (slow clock → nSHUTD → HCI_Reset @ 115200 → 0xFF36 baud switch → init script @ 3 Mbps → `btuart_register`) has completed and that the controller is registered with the NuttX BT stack as the `bnep0` netdev.  See the [Bluetooth driver](../drivers/bluetooth.md) page for full context.
+Issue #52 replaced the NuttX stock BT host stack with btstack + Classic BT SPP, so the test suite was rewritten accordingly.  The automated tests cover the Hub-side readiness (chardev, bring-up, btsensor builtin, HCI_STATE_WORKING); the PC-side pair + RFCOMM open step is kept manual under `docs/development/pc-receive-spp.md` because it needs a Linux or macOS host.
 
-### H-1: test_bt_bringup_dmesg
+### H-1: test_bt_chardev_exists
 
-- **Goal**: Bring-up banner present and no failure log
+- **Goal**: kernel-side chardev is registered
+- **Command**: `ls /dev/ttyBT`
+- **Check**: output contains `/dev/ttyBT` and not `No such file`
+
+### H-2: test_bt_powered_banner
+
+- **Goal**: CC2564C is powered and the slow clock is running
 - **Command**: `dmesg`
-- **Check**: Output contains `BT: CC2564C ready at 3000000 bps` and does NOT contain `btuart_register failed` or `stm32_bluetooth_initialize() failed`
+- **Check**: output contains `BT: CC2564C powered, /dev/ttyBT ready`
 
-### H-2: test_bt_netdev_visible
+### H-3: test_bt_btsensor_builtin
 
-- **Goal**: The BT netdev is registered as a NuttX network interface
-- **Command**: `ifconfig`
-- **Check**: Output lists `bnep0`
+- **Goal**: the btsensor NSH builtin is registered
+- **Command**: `help | grep btsensor`
+- **Check**: output lists `btsensor`
 
-### H-3: test_bt_info_bdaddr
+### H-4: test_bt_btsensor_hci_working
 
-- **Goal**: Controller returns a plausible Bluetooth Device Address (via HCI_Read_BD_ADDR)
-- **Command**: `bt bnep0 info`
-- **Check**: A 48-bit BD address (`xx:xx:xx:xx:xx:xx`) is returned and is neither all zeros nor all ones
+- **Goal**: `btsensor &` drives btstack into HCI_STATE_WORKING and returns a plausible BD address
+- **Command**: `btsensor &`
+- **Check**: expect `btsensor: HCI working, BD_ADDR <xx:xx:xx:xx:xx:xx>`; BD address is not all zeros nor all ones
+- **Side effect**: the btstack daemon stays alive until the next `reboot` or power cycle
 
-### H-4: test_bt_info_buffer_pool
+### H-5: test_bt_pc_pair_and_stream `@interactive`
 
-- **Goal**: HCI bring-up really completed — the ACL buffer pool is positive (if bring-up failed silently both values stay at 0, which H-3 on its own cannot detect)
-- **Command**: `bt bnep0 info`
-- **Check**: `Free: <N>` with `N > 0` and `Max ACL: <M>` with `M > 0`
-
-### H-5: test_bt_scan `@interactive`
-
-- **Goal**: HCI inquiry discovers surrounding BT devices
-- **Prerequisite**: A nearby BT device (e.g. a phone) is advertising / discoverable
-- **Commands**: `bt bnep0 scan start` → wait 3 s → `bt bnep0 scan get` → `bt bnep0 scan stop`
-- **Check**: `bt bnep0 scan get` output contains at least one BT address, confirmed by the operator
-- **Dependency**: A nearby discoverable BT device (phone, etc.)
+- **Goal**: end-to-end SPP pair + RFCOMM stream read from a PC
+- **Prerequisite**: H-4 passes; a Linux or macOS host with blueutil / bluetoothctl is available
+- **Procedure**: follow `docs/development/pc-receive-spp.md` — pair → open RFCOMM → look for magic `5a a5`
+- **Check**: operator confirms the stream visually
 
 ### Example invocations
 
 ```bash
 # Regression only (exclude interactive)
-.venv/bin/pytest tests/test_bluetooth.py -m "not interactive" -D /dev/tty.usbmodem01
+.venv/bin/pytest tests/test_bt_spp.py -m "not interactive" -D /dev/tty.usbmodem01
 
-# Scan test only (needs a nearby BT device)
-.venv/bin/pytest tests/test_bluetooth.py::test_bt_scan -D /dev/tty.usbmodem01
+# Manual PC test
+.venv/bin/pytest tests/test_bt_spp.py::test_bt_pc_pair_and_stream -D /dev/tty.usbmodem01
 ```
 
 ## Test Synchronization (sendCommand)

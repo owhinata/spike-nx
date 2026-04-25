@@ -57,5 +57,5 @@ CSRCS += stm32_bt_slowclk.c
 endif
 
 ifeq ($(CONFIG_STM32_USART2),y)
-CSRCS += stm32_btuart.c stm32_bluetooth.c cc256x_init_script.c
+CSRCS += stm32_btuart.c stm32_btuart_chardev.c stm32_bluetooth.c
 endif

@@ -511,6 +511,26 @@ static ssize_t btuart_read(FAR const struct btuart_lowerhalf_s *lower,
     }
 
   priv->rx_consumer = (consumer + copy) & BTUART_RXRING_MASK;
+
+  /* If this read drained the ring, re-arm the IDLE-driven notification
+   * latch so the next incoming burst produces a fresh rxcb.  Without this
+   * step a caller that always requests exactly the available byte count
+   * (e.g. btstack's hci_transport_h4 state machine) would leave
+   * rxwork_pending stuck at true — btuart_notify_rx returns early and
+   * subsequent bursts silently fail to wake readers.
+   */
+
+  if (priv->rxwork_pending)
+    {
+      irqstate_t flags = enter_critical_section();
+      if (btuart_rx_producer(priv) == priv->rx_consumer)
+        {
+          priv->rxwork_pending = false;
+        }
+
+      leave_critical_section(flags);
+    }
+
   return (ssize_t)copy;
 }
 
@@ -606,6 +626,25 @@ static int btuart_ioctl(FAR const struct btuart_lowerhalf_s *lower,
  *   Pointer to the lower-half instance, or NULL on failure.
  *
  ****************************************************************************/
+
+/* Non-destructive count of RX bytes sitting in the ring.  Used by the
+ * chardev wrapper to report POLLIN on poll() setup without perturbing the
+ * stream with rxdrain().
+ */
+
+size_t stm32_btuart_rx_available(FAR const struct btuart_lowerhalf_s *lower)
+{
+  FAR struct stm32_btuart_s *priv = (FAR struct stm32_btuart_s *)lower;
+  size_t consumer = priv->rx_consumer;
+  size_t producer = btuart_rx_producer(priv);
+
+  if (producer >= consumer)
+    {
+      return producer - consumer;
+    }
+
+  return BTUART_RXRING_SIZE - (consumer - producer);
+}
 
 FAR struct btuart_lowerhalf_s *stm32_btuart_instantiate(void)
 {

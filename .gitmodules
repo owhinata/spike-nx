@@ -7,3 +7,6 @@
 [submodule "nuttx-apps"]
 	path = nuttx-apps
 	url = https://github.com/apache/nuttx-apps.git
+[submodule "libs/btstack"]
+	path = libs/btstack
+	url = https://github.com/bluekitchen/btstack.git

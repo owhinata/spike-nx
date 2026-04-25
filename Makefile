@@ -31,6 +31,7 @@ distclean:
 	-docker rmi pybricks-builder
 	-git submodule deinit -f nuttx
 	-git submodule deinit -f nuttx-apps
+	-git submodule deinit -f libs/btstack
 	-git submodule deinit -f pybricks
 
 help:

@@ -41,9 +41,12 @@ link-apps:
 nuttx/Makefile:
 	git submodule update --init nuttx nuttx-apps
 
-submodules: nuttx/Makefile
+libs/btstack/README.md:
+	git submodule update --init libs/btstack
 
-docker-build: nuttx/Makefile
+submodules: nuttx/Makefile libs/btstack/README.md
+
+docker-build: nuttx/Makefile libs/btstack/README.md
 	@if [ -z "$$(docker images -q $(DOCKER_IMAGE) 2>/dev/null)" ]; then \
 		docker build -t $(DOCKER_IMAGE) -f docker/Dockerfile.nuttx docker; \
 	fi
