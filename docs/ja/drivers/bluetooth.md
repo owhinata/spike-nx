@@ -101,7 +101,8 @@ little-endian、1 フレーム = 12 byte header + 16 サンプル × 12 byte = 2
 struct spp_frame_hdr {
     uint16_t magic;          // 0xA55A
     uint16_t seq;            // フレーム単調連番
-    uint32_t timestamp_us;   // Hub boot からの us
+    uint32_t timestamp_us;   // 1 サンプル目のハードウェアタイムスタンプ
+                             // (セッション開始からの μs)
     uint16_t sample_rate;    // 情報用、現状 833 Hz 固定
     uint8_t  sample_count;   // 通常 16
     uint8_t  type;           // 0x01 = IMU

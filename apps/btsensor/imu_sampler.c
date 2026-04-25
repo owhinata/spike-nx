@@ -15,7 +15,8 @@
  *   struct spp_frame_hdr {
  *     uint16_t magic;          // 0xA55A
  *     uint16_t seq;            // monotonic per frame
- *     uint32_t timestamp_us;   // us since boot, first sample in frame
+ *     uint32_t timestamp_us;   // first sample's hardware timestamp,
+ *                              // microseconds since session start
  *     uint16_t sample_rate;    // informational (833 Hz today)
  *     uint8_t  sample_count;   // <= BTSENSOR_FRAME_MAX_SAMPLES (16)
  *     uint8_t  type;           // 0x01 = IMU
@@ -138,34 +139,19 @@ static uint16_t g_rfcomm_cid;
 static uint16_t g_rfcomm_mtu;
 static uint16_t g_seq;
 static bool     g_can_send_pending;
-static struct timespec g_start_ts;
+
+/* Session-start time in the same time base as the uORB sensor message
+ * timestamp field (clock_systime_timespec → CLOCK_BOOTTIME).  Per-frame
+ * ts_us is computed as `first_sample.timestamp - g_start_us` so it
+ * reflects the actual hardware sample time, not the moment the Hub
+ * drained the FIFO.  See Issue #55.
+ */
+
+static uint64_t g_start_us;
 
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
-
-static uint32_t monotonic_us_since_start(void)
-{
-  struct timespec now;
-  clock_gettime(CLOCK_MONOTONIC, &now);
-
-  /* timespec subtraction with borrow.  Without the borrow, when
-   * now.tv_nsec < g_start_ts.tv_nsec the unsigned subtraction below
-   * wraps (≈ 4 s) and the resulting ts_us field jumps backwards by
-   * ~1.27 e9 us before the next "good" sample resets it.
-   */
-
-  time_t sec  = now.tv_sec  - g_start_ts.tv_sec;
-  long   nsec = now.tv_nsec - g_start_ts.tv_nsec;
-  if (nsec < 0)
-    {
-      sec  -= 1;
-      nsec += 1000000000L;
-    }
-
-  uint64_t us = (uint64_t)sec * 1000000ULL + (uint64_t)nsec / 1000ULL;
-  return (uint32_t)us;
-}
 
 static int16_t clamp_i16(int32_t v)
 {
@@ -289,9 +275,18 @@ static void maybe_build_sample(void)
 
   if (g_current_count == 0)
     {
+      /* Use the first paired sample's hardware timestamp (uORB stamps
+       * accel + gyro with the same value at the moment the driver
+       * reads the sensor, see boards/spike-prime-hub/src/lsm6dsl_uorb.c).
+       * The previous monotonic_us_since_start() recorded the Hub's
+       * drain time, which clusters multiple frames to the same value
+       * during FIFO bursts (Issue #55).
+       */
+
+      uint64_t sample_us = g_last_accel.timestamp;
       uint16_t magic     = BTSENSOR_FRAME_MAGIC;
       uint16_t seq       = g_seq++;
-      uint32_t ts        = monotonic_us_since_start();
+      uint32_t ts        = (uint32_t)(sample_us - g_start_us);
       uint16_t rate      = IMU_SAMPLE_RATE_HZ;
       uint8_t  type      = BTSENSOR_FRAME_TYPE_IMU;
       uint8_t  reserved  = 0;
@@ -384,7 +379,15 @@ void imu_sampler_configure(uint8_t batch)
 
 int imu_sampler_init(void)
 {
-  clock_gettime(CLOCK_MONOTONIC, &g_start_ts);
+  /* CLOCK_BOOTTIME matches clock_systime_timespec() used by NuttX's
+   * sensor_get_timestamp(), so subtracting g_start_us from a sample's
+   * uORB timestamp yields microseconds since session start.
+   */
+
+  struct timespec start;
+  clock_gettime(CLOCK_BOOTTIME, &start);
+  g_start_us = (uint64_t)start.tv_sec * 1000000ULL +
+               (uint64_t)start.tv_nsec / 1000ULL;
 
   g_accel_fd = open(ACCEL_DEVPATH, O_RDONLY | O_NONBLOCK);
   if (g_accel_fd < 0)

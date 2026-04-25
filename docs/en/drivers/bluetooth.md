@@ -146,7 +146,8 @@ frame.
 struct spp_frame_hdr {
     uint16_t magic;          // 0xA55A
     uint16_t seq;            // monotonic per frame
-    uint32_t timestamp_us;   // us since Hub boot
+    uint32_t timestamp_us;   // first sample's hardware timestamp,
+                             // microseconds since session start
     uint16_t sample_rate;    // 833 Hz, informational
     uint8_t  sample_count;   // typically 16
     uint8_t  type;           // 0x01 = IMU
