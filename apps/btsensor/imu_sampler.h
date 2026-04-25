@@ -3,8 +3,9 @@
  *
  * LSM6DS3TR-C → RFCOMM streaming for the SPIKE Prime Hub SPP app
  * (Issue #52 Step E).  Opens the uORB accel + gyro feeds, pairs incoming
- * samples into 16-sample batches and pushes them out over an RFCOMM
- * channel as the SPP server announces one open.
+ * samples into batches (Kconfig default 8 samples; 1..80 supported) and
+ * pushes them out over an RFCOMM channel as the SPP server announces
+ * one open.
  ****************************************************************************/
 
 #ifndef __APPS_BTSENSOR_IMU_SAMPLER_H
@@ -16,8 +17,9 @@
 extern "C" {
 #endif
 
-/* Wire-format frame header that leads every SPP payload.  16 samples at
- * sizeof(imu_sample_s) = 12 byte follow.  Values are little-endian.
+/* Wire-format frame header that leads every SPP payload.  Up to 80 samples
+ * (Kconfig default 8) at sizeof(imu_sample_s) = 12 byte follow.  Values are
+ * little-endian.
  */
 
 #define BTSENSOR_FRAME_MAGIC       0xA55A

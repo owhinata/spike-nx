@@ -139,8 +139,8 @@ NuttX port of the btstack `port/` layer.  Written against
 
 ## RFCOMM payload (IMU frame)
 
-Little-endian, 12-byte header + 16 samples × 12 bytes = 204 bytes per
-frame.
+Little-endian, 12-byte header + 8 samples × 12 bytes = 108 bytes per
+frame at the Kconfig default; up to 80 samples per frame are supported.
 
 ```c
 struct spp_frame_hdr {
@@ -149,7 +149,7 @@ struct spp_frame_hdr {
     uint32_t timestamp_us;   // first sample's hardware timestamp,
                              // microseconds since session start
     uint16_t sample_rate;    // 833 Hz, informational
-    uint8_t  sample_count;   // typically 16
+    uint8_t  sample_count;   // typically 8 (Kconfig default), up to 80
     uint8_t  type;           // 0x01 = IMU
 };
 
@@ -226,7 +226,7 @@ CONFIG_SCHED_HPWORK=y          # uORB / btuart IRQ work queue
 CONFIG_SENSORS_LSM6DSL=y       # IMU uORB publication
 CONFIG_UORB=y
 CONFIG_APP_BTSENSOR=y
-CONFIG_APP_BTSENSOR_BATCH=16   # samples per SPP frame
+CONFIG_APP_BTSENSOR_BATCH=8    # samples per SPP frame (default)
 CONFIG_APP_BTSENSOR_RING_DEPTH=8
 ```
 

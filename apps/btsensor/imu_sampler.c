@@ -6,9 +6,10 @@
  * The LSM6DS3TR-C driver publishes accel + gyro through uORB at 833 Hz
  * (±8g / ±2000 dps).  We open both feeds non-blocking, register their
  * fds with the btstack run loop as READ-flagged data sources, pair
- * samples as they arrive and pack 16 paired samples per RFCOMM frame.
- * Frames land in a small SPSC ring drained by the RFCOMM can-send-now
- * hand-shake so we never block the run loop thread inside rfcomm_send.
+ * samples as they arrive and pack 8 paired samples per RFCOMM frame
+ * (Kconfig default; runtime-tunable).  Frames land in a small SPSC ring
+ * drained by the RFCOMM can-send-now hand-shake so we never block the
+ * run loop thread inside rfcomm_send.
  *
  * Wire format (all little-endian):
  *
@@ -18,7 +19,7 @@
  *     uint32_t timestamp_us;   // first sample's hardware timestamp,
  *                              // microseconds since session start
  *     uint16_t sample_rate;    // informational (833 Hz today)
- *     uint8_t  sample_count;   // <= BTSENSOR_FRAME_MAX_SAMPLES (16)
+ *     uint8_t  sample_count;   // <= BTSENSOR_FRAME_MAX_SAMPLES (80)
  *     uint8_t  type;           // 0x01 = IMU
  *   };                         // 12 bytes
  *
@@ -55,7 +56,7 @@
 #define GYRO_DEVPATH           "/dev/uorb/sensor_gyro0"
 
 #ifndef CONFIG_APP_BTSENSOR_BATCH
-#  define CONFIG_APP_BTSENSOR_BATCH       16
+#  define CONFIG_APP_BTSENSOR_BATCH       8
 #endif
 #ifndef CONFIG_APP_BTSENSOR_RING_DEPTH
 #  define CONFIG_APP_BTSENSOR_RING_DEPTH  8
