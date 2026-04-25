@@ -23,6 +23,14 @@ extern "C" {
 #define BTSENSOR_FRAME_MAGIC       0xA55A
 #define BTSENSOR_FRAME_TYPE_IMU    0x01
 
+/* Override the runtime batch size (samples per RFCOMM frame) before
+ * imu_sampler_init().  batch is clamped to [1, 80] (compile-time
+ * upper bound for the per-frame sample buffer).  Lets the btsensor
+ * entry point reconfigure via argv without rebuilding.
+ */
+
+void imu_sampler_configure(uint8_t batch);
+
 /* Register the uORB accel + gyro file descriptors as btstack data
  * sources, initialise the frame ring and hook us up to the btstack run
  * loop.  Must be called after btstack_run_loop_init().

@@ -26,14 +26,16 @@ config APP_BTSENSOR_STACKSIZE
 	default 4096
 
 config APP_BTSENSOR_BATCH
-	int "IMU samples per RFCOMM frame"
+	int "Default IMU samples per RFCOMM frame"
 	default 16
-	range 1 40
+	range 1 80
 	---help---
 		Number of 12-byte IMU samples packed into one SPP frame.
-		The RFCOMM credit-based flow control tolerates large
-		frames; 16 samples gives ~196 byte payload, well under
-		btstack's default L2CAP MTU.
+		16 samples gives ~196 byte payload; the upper bound is
+		set by the negotiated RFCOMM MTU (typically 1016 bytes
+		from BlueZ): 12 byte header + 80 * 12 byte sample = 972
+		bytes still fits one RFCOMM frame.  This is the default;
+		`btsensor [batch]` overrides it at runtime.
 
 config APP_BTSENSOR_RING_DEPTH
 	int "Frame ring buffer depth"

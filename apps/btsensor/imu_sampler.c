@@ -60,7 +60,15 @@
 #  define CONFIG_APP_BTSENSOR_RING_DEPTH  8
 #endif
 
-#define BTSENSOR_FRAME_MAX_SAMPLES        CONFIG_APP_BTSENSOR_BATCH
+/* Compile-time upper bound for the per-frame sample buffer.  The runtime
+ * batch size (g_batch) is set from CONFIG_APP_BTSENSOR_BATCH by default
+ * and can be overridden with imu_sampler_configure() before init —
+ * letting the btsensor entry point accept a "batch" argv positional so
+ * different values can be tested without rebuilding the firmware.  Must
+ * match the Kconfig range upper bound.
+ */
+
+#define BTSENSOR_FRAME_MAX_SAMPLES        80
 #define BTSENSOR_RING_DEPTH               CONFIG_APP_BTSENSOR_RING_DEPTH
 #define BTSENSOR_FRAME_MAX_SIZE           \
     (12 + 12 * BTSENSOR_FRAME_MAX_SAMPLES)
@@ -117,6 +125,12 @@ static uint8_t            g_ring_tail;
 
 static uint32_t g_frames_sent;
 static uint32_t g_frames_dropped;
+
+/* Runtime-tunable batch size (samples per RFCOMM frame).  Default
+ * comes from Kconfig; overridden by imu_sampler_configure().
+ */
+
+static uint8_t  g_batch = CONFIG_APP_BTSENSOR_BATCH;
 
 /* RFCOMM state. */
 
@@ -303,7 +317,7 @@ static void maybe_build_sample(void)
   g_accel_fresh = false;
   g_gyro_fresh  = false;
 
-  if (g_current_count >= BTSENSOR_FRAME_MAX_SAMPLES)
+  if (g_current_count >= g_batch)
     {
       flush_current_frame();
     }
@@ -352,6 +366,21 @@ static void gyro_process(btstack_data_source_t *ds,
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
+
+void imu_sampler_configure(uint8_t batch)
+{
+  if (batch == 0)
+    {
+      batch = 1;
+    }
+
+  if (batch > BTSENSOR_FRAME_MAX_SAMPLES)
+    {
+      batch = BTSENSOR_FRAME_MAX_SAMPLES;
+    }
+
+  g_batch = batch;
+}
 
 int imu_sampler_init(void)
 {

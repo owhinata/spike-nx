@@ -108,8 +108,18 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
 
 int main(int argc, FAR char *argv[])
 {
-  (void)argc;
-  (void)argv;
+  /* Optional positional argv:
+   *   argv[1] = batch (samples per RFCOMM frame; clamped to 1..80).
+   * Without it the Kconfig default is used.  Lets us bisect frame
+   * sizes without rebuilding.
+   */
+
+  if (argc >= 2)
+    {
+      int batch = atoi(argv[1]);
+      imu_sampler_configure((uint8_t)batch);
+      printf("btsensor: configure batch=%d\n", batch);
+    }
 
   printf("btsensor: bringing up btstack on /dev/ttyBT\n");
 
