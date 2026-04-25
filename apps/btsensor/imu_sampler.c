@@ -217,8 +217,23 @@ static void request_send_if_needed(void)
       return;
     }
 
-  rfcomm_request_can_send_now_event(g_rfcomm_cid);
+  /* Set pending BEFORE the request call.  rfcomm_request_can_send_now_
+   * event() reaches l2cap_notify_channel_can_send() synchronously, which
+   * may fire RFCOMM_EVENT_CAN_SEND_NOW and recurse back through
+   * imu_sampler_on_can_send_now() in the same call stack.  If the
+   * recursive on_can_send_now drains the ring and bails out at its
+   * "ring empty" early-return, no further request_can_send_now is
+   * issued — and if we set g_can_send_pending=true *after* the call
+   * returns, we leave a phantom pending: g_can_send_pending=true while
+   * btstack's waiting_for_can_send_now is back to 0.  No further
+   * RFCOMM_EVENT_CAN_SEND_NOW will arrive, and every subsequent
+   * request_send_if_needed() bails out at the pending check.  Setting
+   * pending first lets the recursive on_can_send_now clear it
+   * correctly.
+   */
+
   g_can_send_pending = true;
+  rfcomm_request_can_send_now_event(g_rfcomm_cid);
 }
 
 static void flush_current_frame(void)
