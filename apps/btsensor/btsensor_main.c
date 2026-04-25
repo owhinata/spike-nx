@@ -26,6 +26,7 @@
 #include "hci_transport.h"
 #include "hci_transport_h4.h"
 #include "btstack_chipset_cc256x.h"
+#include "classic/btstack_link_key_db_memory.h"
 
 /* Uncomment + re-enable platform/embedded/hci_dump_embedded_stdout.c in
  * apps/btsensor/Makefile to route btstack log_info/log_error + HCI
@@ -130,6 +131,14 @@ int main(int argc, FAR char *argv[])
       hci_transport_h4_instance_for_uart(btstack_uart_nuttx_instance());
 
   hci_init(transport, &g_hci_transport_config);
+
+  /* In-memory link key DB.  Without this, SSP bonding results are not
+   * persisted, so every RFCOMM reconnect triggers a fresh pairing that
+   * races the host-side agent — on BlueZ this manifests as "rfcomm
+   * connect → Permission denied" right after a successful `pair`.
+   */
+
+  hci_set_link_key_db(btstack_link_key_db_memory_instance());
 
   /* 3. CC2564C chipset helper handles init script streaming + baud switch
    * in response to HCI_Reset Command Complete.
