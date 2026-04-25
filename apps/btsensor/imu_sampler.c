@@ -134,9 +134,22 @@ static uint32_t monotonic_us_since_start(void)
 {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
-  uint64_t us = (uint64_t)(now.tv_sec - g_start_ts.tv_sec) * 1000000ULL +
-                ((uint64_t)now.tv_nsec - (uint64_t)g_start_ts.tv_nsec) /
-                1000ULL;
+
+  /* timespec subtraction with borrow.  Without the borrow, when
+   * now.tv_nsec < g_start_ts.tv_nsec the unsigned subtraction below
+   * wraps (≈ 4 s) and the resulting ts_us field jumps backwards by
+   * ~1.27 e9 us before the next "good" sample resets it.
+   */
+
+  time_t sec  = now.tv_sec  - g_start_ts.tv_sec;
+  long   nsec = now.tv_nsec - g_start_ts.tv_nsec;
+  if (nsec < 0)
+    {
+      sec  -= 1;
+      nsec += 1000000000L;
+    }
+
+  uint64_t us = (uint64_t)sec * 1000000ULL + (uint64_t)nsec / 1000ULL;
   return (uint32_t)us;
 }
 
