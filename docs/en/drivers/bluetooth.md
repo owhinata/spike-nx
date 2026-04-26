@@ -228,8 +228,12 @@ the no-RFCOMM "I just want raw samples" use case.
   FAIL_BLINK=`CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS` short blue
   pulses (~150 ms × 2N).
 - Pairing completion routes through
-  `HCI_EVENT_SIMPLE_PAIRING_COMPLETE` (status≠0 → FAIL_BLINK); SPP
-  channel up routes through `RFCOMM_EVENT_CHANNEL_OPENED` → PAIRED.
+  `HCI_EVENT_SIMPLE_PAIRING_COMPLETE`: status==0 → PAIRED (LED solid
+  immediately, matching the Issue #56 spec "ペアリング成功で BT LED
+  点灯"), status≠0 → FAIL_BLINK.  A subsequent
+  `RFCOMM_EVENT_CHANNEL_OPENED` keeps the state at PAIRED (no LED
+  change), and a link drop / disconnect routes back to ADVERTISING
+  (LED resumes the slow blink).
 - All transitions run on the BTstack main thread (worker / shell
   callers go through `btstack_run_loop_execute_on_main_thread()`).
 
