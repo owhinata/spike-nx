@@ -357,6 +357,9 @@ Hub -> PC:  OK\n
 
 ## 参考
 
+- `host/ImuViewer/` — このストリームを受信し Madgwick filter で姿勢推定して
+  Cube を 3D 表示するデスクトップアプリ (.NET 10 + Avalonia + Silk.NET)。
+  Linux PoC、macOS / Windows は stub
 - btstack `example/spp_counter.c` — SPP server 最小例
 - BlueZ `rfcomm(1)` man — Linux 側 CLI 仕様
 - [IOBluetoothRFCOMMChannel Class Reference](https://developer.apple.com/documentation/iobluetooth/iobluetoothrfcommchannel) — macOS API

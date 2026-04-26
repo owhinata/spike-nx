@@ -387,6 +387,9 @@ Hub -> PC:  OK\n
 
 ## See also
 
+- `host/ImuViewer/` — desktop visualizer (.NET 10 + Avalonia + Silk.NET) that
+  consumes this stream, runs a Madgwick filter, and renders a 3D Cube whose
+  orientation tracks the Hub. Linux PoC; macOS / Windows are stubbed.
 - btstack `example/spp_counter.c` — minimal SPP server reference
 - BlueZ `rfcomm(1)` — Linux CLI reference
 - [IOBluetoothRFCOMMChannel Class Reference](https://developer.apple.com/documentation/iobluetooth/iobluetoothrfcommchannel) — macOS API
