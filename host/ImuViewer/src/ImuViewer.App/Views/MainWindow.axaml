@@ -1,0 +1,7 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="ImuViewer.App.Views.MainWindow"
+        Title="ImuViewer"
+        Width="1024" Height="640">
+  <TextBlock Text="ImuViewer scaffold (Commit A)" Margin="16" />
+</Window>

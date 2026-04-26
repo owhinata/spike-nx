@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ImuViewer.App/ImuViewer.App.csproj" />
+    <Project Path="src/ImuViewer.Core/ImuViewer.Core.csproj" />
+    <Project Path="src/ImuViewer.Rendering/ImuViewer.Rendering.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ImuViewer.Core.Tests/ImuViewer.Core.Tests.csproj" />
+  </Folder>
+</Solution>
