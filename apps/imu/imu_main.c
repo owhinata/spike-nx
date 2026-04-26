@@ -17,6 +17,8 @@
 
 #include <nuttx/sensors/sensor.h>
 
+#include <arch/board/board_lsm6dsl.h>
+
 #include "imu_types.h"
 #include "imu_stationary.h"
 #include "imu_fusion.h"
@@ -31,10 +33,44 @@
 #define IMU_POLL_TIMEOUT  1000
 #define IMU_ODR           833
 
-/* uORB sensor scale factors (chip configured to 8g / 2000dps) */
+/* Driver startup defaults; matches DEFAULT_FSR_XL / DEFAULT_FSR_GY in
+ * boards/spike-prime-hub/src/lsm6dsl_uorb.c.  The imu app does not
+ * reconfigure FSR, so these are sufficient.
+ */
 
-#define IMU_GYRO_SCALE    0.070f   /* mdps/LSB -> deg/s = raw * 0.070 */
-#define IMU_ACCEL_SCALE   0.244f   /* mg/LSB -> mm/s^2 = raw * 0.244 * 9.81 */
+#define IMU_ACCEL_FSR_G    8
+#define IMU_GYRO_FSR_DPS   2000
+
+#define IMU_GRAVITY_MS2    9.80665f
+
+/* Scale factors for FSR -> physical units.  Per-LSB values.
+ *
+ *   accel_lsb_to_mms2(fsr_g):
+ *     LSM6DSL accel sensitivity is fsr_g * 1000 / 32768 mg/LSB (the FSR
+ *     label maps exactly to int16 full scale: e.g. ±8g -> 0.244 mg/LSB),
+ *     converted to mm/s^2 with g = 9.80665.
+ *
+ *   gyro_lsb_to_dps(fsr_dps):
+ *     LSM6DSL gyro sensitivity (datasheet Table 3) carries ~14.7%
+ *     headroom over the nominal FSR, so the per-LSB value is *not*
+ *     simply fsr/32768.  All five FSR rows scale linearly at 0.035
+ *     mdps/LSB per nominal dps:
+ *        ±125  -> 4.375 mdps/LSB
+ *        ±250  -> 8.75  mdps/LSB
+ *        ±500  -> 17.5  mdps/LSB
+ *        ±1000 -> 35.0  mdps/LSB
+ *        ±2000 -> 70.0  mdps/LSB
+ */
+
+static inline float accel_lsb_to_mms2(uint32_t fsr_g)
+{
+  return ((float)fsr_g * IMU_GRAVITY_MS2 * 1000.0f) / 32768.0f;
+}
+
+static inline float gyro_lsb_to_dps(uint32_t fsr_dps)
+{
+  return ((float)fsr_dps * 0.035f) / 1000.0f;
+}
 
 /****************************************************************************
  * Private Data
@@ -48,41 +84,43 @@ static int g_daemon_pid = -1;
  * Private Functions
  ****************************************************************************/
 
+/* Cached scale factors so the stationary callback can convert the raw
+ * gyro sum it receives back into deg/s without holding a per-call FSR.
+ * Driver does not change FSR while the imu app is running.
+ */
+
+static float g_accel_mms2_per_lsb;
+static float g_gyro_dps_per_lsb;
+
 static void stationary_callback(const int32_t *gyro_sum,
                                 const int32_t *accel_sum,
                                 uint32_t num_samples)
 {
   imu_fusion_stationary_update(gyro_sum, accel_sum, num_samples,
-                               IMU_GYRO_SCALE);
+                               g_gyro_dps_per_lsb);
 }
 
 static int imu_daemon(int argc, char *argv[])
 {
-  struct pollfd fds[2];
-  struct sensor_accel accel_data;
-  struct sensor_gyro gyro_data;
-  int accel_fd;
-  int gyro_fd;
+  struct pollfd fds[1];
+  struct sensor_imu imu_data;
+  int imu_fd;
   int ret;
 
-  /* Open sensor devices */
+  /* Open the combined IMU topic. */
 
-  accel_fd = open("/dev/uorb/sensor_accel0", O_RDONLY | O_NONBLOCK);
-  if (accel_fd < 0)
+  imu_fd = open("/dev/uorb/sensor_imu0", O_RDONLY | O_NONBLOCK);
+  if (imu_fd < 0)
     {
-      fprintf(stderr, "imu: cannot open sensor_accel0\n");
+      fprintf(stderr, "imu: cannot open sensor_imu0\n");
       g_daemon_running = false;
       return -1;
     }
 
-  gyro_fd = open("/dev/uorb/sensor_gyro0", O_RDONLY | O_NONBLOCK);
-  if (gyro_fd < 0)
-    {
-      fprintf(stderr, "imu: cannot open sensor_gyro0\n");
-      close(accel_fd);
-      g_daemon_running = false;
-      return -1;
-    }
+  /* Compute scale factors from the driver's startup FSR. */
+
+  g_accel_mms2_per_lsb = accel_lsb_to_mms2(IMU_ACCEL_FSR_G);
+  g_gyro_dps_per_lsb   = gyro_lsb_to_dps(IMU_GYRO_FSR_DPS);
 
   /* Initialize modules */
 
@@ -91,9 +129,10 @@ static int imu_daemon(int argc, char *argv[])
   imu_calibration_load(IMU_CAL_PATH);
   imu_fusion_init();
   imu_fusion_set_settings(settings);
-  imu_stationary_init(settings->gyro_stationary_threshold / IMU_GYRO_SCALE,
+  imu_stationary_init(settings->gyro_stationary_threshold /
+                      g_gyro_dps_per_lsb,
                       settings->accel_stationary_threshold /
-                      (IMU_ACCEL_SCALE * 9.81f),
+                      g_accel_mms2_per_lsb,
                       IMU_ODR, stationary_callback);
 
   g_daemon_running = true;
@@ -105,12 +144,10 @@ static int imu_daemon(int argc, char *argv[])
 
   while (!g_daemon_stop)
     {
-      fds[0].fd = accel_fd;
+      fds[0].fd = imu_fd;
       fds[0].events = POLLIN;
-      fds[1].fd = gyro_fd;
-      fds[1].events = POLLIN;
 
-      ret = poll(fds, 2, IMU_POLL_TIMEOUT);
+      ret = poll(fds, 1, IMU_POLL_TIMEOUT);
       if (ret < 0)
         {
           break;
@@ -121,65 +158,36 @@ static int imu_daemon(int argc, char *argv[])
           continue;
         }
 
-      bool have_accel = false;
-      bool have_gyro = false;
-
-      if (fds[0].revents & POLLIN)
+      if (!(fds[0].revents & POLLIN))
         {
-          if (read(accel_fd, &accel_data, sizeof(accel_data)) ==
-              sizeof(accel_data))
-            {
-              have_accel = true;
-            }
+          continue;
         }
 
-      if (fds[1].revents & POLLIN)
+      while (read(imu_fd, &imu_data, sizeof(imu_data)) ==
+             sizeof(imu_data))
         {
-          if (read(gyro_fd, &gyro_data, sizeof(gyro_data)) ==
-              sizeof(gyro_data))
-            {
-              have_gyro = true;
-            }
-        }
-
-      if (have_accel && have_gyro)
-        {
-          /* Build raw int16 array for stationary detector:
-           * data[0..2] = gyro XYZ raw, data[3..5] = accel XYZ raw
-           * uORB gyro is rad/s, uORB accel is m/s^2
-           * Convert back to raw LSB for stationary detection
-           */
-
           int16_t raw[6];
-          raw[0] = (int16_t)(gyro_data.x * IMU_RAD_TO_DEG / IMU_GYRO_SCALE);
-          raw[1] = (int16_t)(gyro_data.y * IMU_RAD_TO_DEG / IMU_GYRO_SCALE);
-          raw[2] = (int16_t)(gyro_data.z * IMU_RAD_TO_DEG / IMU_GYRO_SCALE);
-          raw[3] = (int16_t)(accel_data.x * 1000.0f /
-                             (IMU_ACCEL_SCALE * 9.81f));
-          raw[4] = (int16_t)(accel_data.y * 1000.0f /
-                             (IMU_ACCEL_SCALE * 9.81f));
-          raw[5] = (int16_t)(accel_data.z * 1000.0f /
-                             (IMU_ACCEL_SCALE * 9.81f));
+          raw[0] = imu_data.gx;
+          raw[1] = imu_data.gy;
+          raw[2] = imu_data.gz;
+          raw[3] = imu_data.ax;
+          raw[4] = imu_data.ay;
+          raw[5] = imu_data.az;
 
           imu_stationary_update(raw);
 
-          /* Convert to physical units for fusion:
-           * accel: m/s^2 -> mm/s^2 (* 1000)
-           * gyro:  rad/s -> deg/s  (* RAD_TO_DEG)
-           */
-
           imu_xyz_t accel_mms2 =
           {
-            .x = accel_data.x * 1000.0f,
-            .y = accel_data.y * 1000.0f,
-            .z = accel_data.z * 1000.0f,
+            .x = (float)imu_data.ax * g_accel_mms2_per_lsb,
+            .y = (float)imu_data.ay * g_accel_mms2_per_lsb,
+            .z = (float)imu_data.az * g_accel_mms2_per_lsb,
           };
 
           imu_xyz_t gyro_dps =
           {
-            .x = gyro_data.x * IMU_RAD_TO_DEG,
-            .y = gyro_data.y * IMU_RAD_TO_DEG,
-            .z = gyro_data.z * IMU_RAD_TO_DEG,
+            .x = (float)imu_data.gx * g_gyro_dps_per_lsb,
+            .y = (float)imu_data.gy * g_gyro_dps_per_lsb,
+            .z = (float)imu_data.gz * g_gyro_dps_per_lsb,
           };
 
           float st = imu_stationary_get_sample_time();
@@ -187,8 +195,7 @@ static int imu_daemon(int argc, char *argv[])
         }
     }
 
-  close(accel_fd);
-  close(gyro_fd);
+  close(imu_fd);
 
   /* Reset module state so status reports clean after stop */
 
@@ -248,6 +255,135 @@ static void cmd_gyro(bool raw)
   imu_xyz_t v;
   imu_fusion_get_gyro(&v, !raw);
   printf("gyro: x=%.3f y=%.3f z=%.3f deg/s\n", v.x, v.y, v.z);
+}
+
+/* Dump live IMU samples for `duration_ms` straight from the uORB topic.
+ * `which` selects accel ('a') or gyro ('g'); `raw` prints chip-frame
+ * int16 LSB instead of physical units.  Timestamp is the driver's
+ * ISR-captured CLOCK_BOOTTIME us low 32 bits (mod 2^32, ~71m35s wrap).
+ *
+ * The IMU daemon must be running so the sensor is activated and samples
+ * are flowing on the topic.
+ */
+
+static void cmd_dump(char which, bool raw, uint32_t duration_ms)
+{
+  if (!g_daemon_running)
+    {
+      fprintf(stderr, "imu: daemon not running; run 'imu start' first\n");
+      return;
+    }
+
+  int fd = open("/dev/uorb/sensor_imu0", O_RDONLY | O_NONBLOCK);
+  if (fd < 0)
+    {
+      fprintf(stderr, "imu: cannot open sensor_imu0\n");
+      return;
+    }
+
+  /* Make sure scale factors reflect the driver's startup FSR; the
+   * daemon also sets these during init but a stand-alone dump from a
+   * fresh shell should still work.
+   */
+
+  if (g_accel_mms2_per_lsb == 0.0f)
+    {
+      g_accel_mms2_per_lsb = accel_lsb_to_mms2(IMU_ACCEL_FSR_G);
+    }
+
+  if (g_gyro_dps_per_lsb == 0.0f)
+    {
+      g_gyro_dps_per_lsb = gyro_lsb_to_dps(IMU_GYRO_FSR_DPS);
+    }
+
+  if (raw)
+    {
+      printf("# ts_us %s_x %s_y %s_z (raw int16)\n",
+             which == 'a' ? "ax" : "gx",
+             which == 'a' ? "ay" : "gy",
+             which == 'a' ? "az" : "gz");
+    }
+  else
+    {
+      printf("# ts_us %s_x %s_y %s_z (%s)\n",
+             which == 'a' ? "ax" : "gx",
+             which == 'a' ? "ay" : "gy",
+             which == 'a' ? "az" : "gz",
+             which == 'a' ? "mm/s^2" : "deg/s");
+    }
+
+  struct timespec t0;
+  clock_gettime(CLOCK_BOOTTIME, &t0);
+  uint64_t deadline_us = (uint64_t)t0.tv_sec * 1000000ULL +
+                         (uint64_t)t0.tv_nsec / 1000ULL +
+                         (uint64_t)duration_ms * 1000ULL;
+
+  uint32_t printed = 0;
+  while (1)
+    {
+      struct timespec now;
+      clock_gettime(CLOCK_BOOTTIME, &now);
+      uint64_t now_us = (uint64_t)now.tv_sec * 1000000ULL +
+                        (uint64_t)now.tv_nsec / 1000ULL;
+      if (now_us >= deadline_us)
+        {
+          break;
+        }
+
+      struct pollfd pfd = { .fd = fd, .events = POLLIN };
+      int remaining_ms = (int)((deadline_us - now_us) / 1000ULL);
+      if (remaining_ms <= 0)
+        {
+          break;
+        }
+
+      int pret = poll(&pfd, 1, remaining_ms);
+      if (pret <= 0)
+        {
+          continue;
+        }
+
+      struct sensor_imu s;
+      while (read(fd, &s, sizeof(s)) == sizeof(s))
+        {
+          if (which == 'a')
+            {
+              if (raw)
+                {
+                  printf("%u %d %d %d\n", (unsigned)s.timestamp,
+                         s.ax, s.ay, s.az);
+                }
+              else
+                {
+                  printf("%u %.3f %.3f %.3f\n", (unsigned)s.timestamp,
+                         (double)((float)s.ax * g_accel_mms2_per_lsb),
+                         (double)((float)s.ay * g_accel_mms2_per_lsb),
+                         (double)((float)s.az * g_accel_mms2_per_lsb));
+                }
+            }
+          else
+            {
+              if (raw)
+                {
+                  printf("%u %d %d %d\n", (unsigned)s.timestamp,
+                         s.gx, s.gy, s.gz);
+                }
+              else
+                {
+                  printf("%u %.4f %.4f %.4f\n", (unsigned)s.timestamp,
+                         (double)((float)s.gx * g_gyro_dps_per_lsb),
+                         (double)((float)s.gy * g_gyro_dps_per_lsb),
+                         (double)((float)s.gz * g_gyro_dps_per_lsb));
+                }
+            }
+
+          printed++;
+        }
+    }
+
+  close(fd);
+  printf("# %u sample(s) over %u ms\n", (unsigned)printed,
+         (unsigned)duration_ms);
 }
 
 static void cmd_mag(void)
@@ -333,8 +469,8 @@ static void print_usage(void)
   printf("  start        - start daemon\n");
   printf("  stop         - stop daemon\n");
   printf("  status       - print status\n");
-  printf("  accel [raw]  - print acceleration\n");
-  printf("  gyro [raw]   - print angular velocity\n");
+  printf("  accel [raw] [ms] - print acceleration; with ms, dump samples\n");
+  printf("  gyro  [raw] [ms] - print angular velocity; with ms, dump\n");
   printf("  mag          - print magnetic field\n");
   printf("  heading [1d|3d] - print heading\n");
   printf("  tilt         - print tilt vector\n");
@@ -372,13 +508,43 @@ int main(int argc, FAR char *argv[])
     }
   else if (strcmp(argv[1], "accel") == 0)
     {
-      bool raw = (argc > 2 && strcmp(argv[2], "raw") == 0);
-      cmd_accel(raw);
+      bool raw = false;
+      int dur_arg_idx = 2;
+      if (argc > 2 && strcmp(argv[2], "raw") == 0)
+        {
+          raw = true;
+          dur_arg_idx = 3;
+        }
+
+      if (argc > dur_arg_idx)
+        {
+          uint32_t ms = (uint32_t)strtoul(argv[dur_arg_idx], NULL, 10);
+          cmd_dump('a', raw, ms);
+        }
+      else
+        {
+          cmd_accel(raw);
+        }
     }
   else if (strcmp(argv[1], "gyro") == 0)
     {
-      bool raw = (argc > 2 && strcmp(argv[2], "raw") == 0);
-      cmd_gyro(raw);
+      bool raw = false;
+      int dur_arg_idx = 2;
+      if (argc > 2 && strcmp(argv[2], "raw") == 0)
+        {
+          raw = true;
+          dur_arg_idx = 3;
+        }
+
+      if (argc > dur_arg_idx)
+        {
+          uint32_t ms = (uint32_t)strtoul(argv[dur_arg_idx], NULL, 10);
+          cmd_dump('g', raw, ms);
+        }
+      else
+        {
+          cmd_gyro(raw);
+        }
     }
   else if (strcmp(argv[1], "mag") == 0)
     {

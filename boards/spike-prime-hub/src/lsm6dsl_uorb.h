@@ -56,15 +56,18 @@ struct lsm6dsl_uorb_config_s
  * Name: lsm6dsl_register_uorb
  *
  * Description:
- *   Register the LSM6DSL as a uORB sensor with accel and gyro topics.
- *   If used with interrupts and device registration fails, it is the
- *   caller's responsibility to detach the interrupt handler.
+ *   Register the LSM6DSL as a uORB sensor publishing struct sensor_imu
+ *   on /dev/uorb/sensor_imu<devno>.  Accel and gyro raw LSB plus a
+ *   decimated temperature reading are bundled in a single topic; physical
+ *   unit conversion is the consumer's responsibility.  If used with
+ *   interrupts and device registration fails, it is the caller's
+ *   responsibility to detach the interrupt handler.
  *
  * Input Parameters:
  *   i2c     - An instance of the I2C interface to communicate with the
  *             LSM6DSL
  *   addr    - The I2C address of the LSM6DSL (0x6a or 0x6b).
- *   devno   - The device number for the uORB topics (sensor_accel<n>)
+ *   devno   - The device number for the uORB topic (sensor_imu<n>).
  *   config  - Configuration for interrupt-driven or polling data fetching.
  *             Leave attach NULL to use kthread polling.
  *

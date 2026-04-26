@@ -14,9 +14,9 @@ The LSM6DS3TR-C is a single-die 6-axis IMU integrating a 3-axis accelerometer an
 |---|---|
 | I2C Address | 0x6A (SDO/SA0 = GND) |
 | WHO_AM_I | 0x6A |
-| ODR | 833 Hz (pybricks-aligned) |
-| Accel FSR | ±8 g (0.244 mg/LSB) |
-| Gyro FSR | 2000 dps (70.0 mdps/LSB) |
+| Startup ODR | 833 Hz (runtime-tunable via ioctl) |
+| Startup accel FSR | ±8 g (runtime-tunable to 2/4/8/16 g via ioctl) |
+| Startup gyro FSR | 2000 dps (runtime-tunable to 125/250/500/1000/2000 dps via ioctl) |
 
 ## 3. Board Wiring
 
@@ -50,28 +50,62 @@ Both sensors operate at the same ODR (833 Hz), so accel data is also updated whe
 
 ```
 INT1 (gyro DRDY) fires
+  -> ISR: capture timestamp (CLOCK_BOOTTIME us, low 32 bits)
   -> HPWORK: 12-byte burst read from 0x22
-  -> raw int16 x 6 (gyro XYZ + accel XYZ)
-  -> float scale multiplication
-  -> push_event delivers to sensor_gyro0 and sensor_accel0
+  -> Every 16 samples: also read OUT_TEMP_L/H (0x20); reuse the cached
+     value in between
+  -> struct sensor_imu (timestamp + raw int16 accel/gyro + temperature_raw)
+  -> push_event delivers to /dev/uorb/sensor_imu0
 ```
+
+The driver does not perform physical-unit conversion; consumers convert
+the raw LSB values using the configured FSR.
 
 ## 6. NuttX Driver Architecture
 
 ### Board Layer
 
 ```
-boards/spike-prime-hub/src/lsm6dsl_uorb.c   - I2C control, burst read, uORB registration
-boards/spike-prime-hub/src/lsm6dsl_uorb.h   - config struct, registration API
-boards/spike-prime-hub/src/stm32_lsm6dsl.c  - I2C2 init, INT1 interrupt setup, driver registration
+boards/spike-prime-hub/src/lsm6dsl_uorb.c        - I2C control, burst read, uORB registration
+boards/spike-prime-hub/src/lsm6dsl_uorb.h        - config struct, registration API
+boards/spike-prime-hub/src/stm32_lsm6dsl.c       - I2C2 init, INT1 interrupt setup, driver registration
+boards/spike-prime-hub/include/board_lsm6dsl.h   - Board-local ioctl numbers (FSR set)
 ```
 
 ### uORB Topics
 
 ```
-/dev/uorb/sensor_accel0   (m/s^2)
-/dev/uorb/sensor_gyro0    (rad/s)
+/dev/uorb/sensor_imu0   (struct sensor_imu)
 ```
+
+Registered via `sensor_custom_register()` as `SENSOR_TYPE_CUSTOM`.  A
+single `read()` returns one combined accel + gyro + temperature_raw +
+ISR-captured timestamp record.
+
+### struct sensor_imu
+
+Defined in `nuttx/include/nuttx/uorb.h`:
+
+| Field | Type | Description |
+|---|---|---|
+| timestamp | uint32_t | Low 32 bits of CLOCK_BOOTTIME us (~71m35s wraparound).  ARMv7-M 4-byte aligned word load/store is single-copy atomic, so ISR -> worker handoff is tearing-free. |
+| ax / ay / az | int16_t | Accel raw LSB, chip frame |
+| gx / gy / gz | int16_t | Gyro raw LSB, chip frame |
+| temperature_raw | int16_t | OUT_TEMP raw, refreshed every 16 samples (stale in between) |
+| reserved | int16_t | Alignment padding |
+
+### ioctl
+
+| ioctl | Argument | Behavior |
+|---|---|---|
+| `SNIOC_SET_INTERVAL` | uint32 (period_us) | Pick the closest ODR whose period is <= `period_us` |
+| `SNIOC_SETSAMPLERATE` | uint32 (Hz: 13/26/52/104/208/416/833/1660/3330/6660) | Set ODR by frequency |
+| `LSM6DSL_IOC_SETACCELFSR` | uint32 (g: 2/4/8/16) | Set accel full-scale range |
+| `LSM6DSL_IOC_SETGYROFSR` | uint32 (dps: 125/250/500/1000/2000) | Set gyro full-scale range |
+
+Calling any of the configuration ioctls while the sensor is active
+(after `SNIOC_ACTIVATE`) returns `-EBUSY`.  Deactivate the sensor before
+reconfiguring.
 
 ### defconfig
 
@@ -184,8 +218,8 @@ nsh> imu stop     # Stop daemon
 |---|---|---|
 | `imu.up()` | `imu_fusion` gravity vector classification | 6-face detection |
 | `imu.tilt()` | `imu_fusion` derived from gravity vector | Pitch/Roll |
-| `imu.acceleration()` | uORB `sensor_accel0` direct read | mm/s² units |
-| `imu.angular_velocity()` | uORB `sensor_gyro0` direct read | deg/s units |
+| `imu.acceleration()` | uORB `sensor_imu0` ax/ay/az read, converted to mm/s² in apps/imu using current FSR | Conversion in apps/imu |
+| `imu.angular_velocity()` | uORB `sensor_imu0` gx/gy/gz read, converted to deg/s in apps/imu using current FSR | Conversion in apps/imu |
 | `imu.heading()` | `imu_fusion` 3D heading | Z-axis rotation |
 | `imu.rotation()` | `imu_fusion` 1D heading | Per-axis |
 | `imu.orientation()` | `imu_fusion` quaternion -> Euler angles | Yaw/Pitch/Roll |

@@ -1,31 +1,35 @@
 /****************************************************************************
  * apps/btsensor/imu_sampler.c
  *
- * IMU sampler / RFCOMM streamer (Issue #52 Step E).
+ * IMU sampler / RFCOMM streamer.
  *
- * The LSM6DS3TR-C driver publishes accel + gyro through uORB at 833 Hz
- * (±8g / ±2000 dps).  We open both feeds non-blocking, register their
- * fds with the btstack run loop as READ-flagged data sources, pair
- * samples as they arrive and pack 8 paired samples per RFCOMM frame
- * (Kconfig default; runtime-tunable).  Frames land in a small SPSC ring
- * drained by the RFCOMM can-send-now hand-shake so we never block the
- * run loop thread inside rfcomm_send.
+ * The LSM6DSL uORB driver publishes a single struct sensor_imu on
+ * /dev/uorb/sensor_imu0 carrying paired accel + gyro raw int16 LSB
+ * values plus an ISR-captured timestamp.  We open the topic non-blocking
+ * and register its fd with the btstack run loop as a READ-flagged data
+ * source, copy each sample's raw values straight into the wire-format
+ * sample slot (no physical-unit conversion), and pack a Kconfig-tunable
+ * batch into one RFCOMM frame.  Frames land in a small SPSC ring drained
+ * by the RFCOMM can-send-now hand-shake so we never block the run loop
+ * thread inside rfcomm_send.
  *
- * Wire format (all little-endian):
+ * Wire format (all little-endian) — unchanged in Commit A; the header
+ * gets reshaped (magic / FSR fields / per-sample ts_delta) in Commit E:
  *
  *   struct spp_frame_hdr {
  *     uint16_t magic;          // 0xA55A
  *     uint16_t seq;            // monotonic per frame
  *     uint32_t timestamp_us;   // first sample's hardware timestamp,
  *                              // microseconds since session start
+ *                              // (mod 2^32, ~71m35s wrap)
  *     uint16_t sample_rate;    // informational (833 Hz today)
  *     uint8_t  sample_count;   // <= BTSENSOR_FRAME_MAX_SAMPLES (80)
  *     uint8_t  type;           // 0x01 = IMU
  *   };                         // 12 bytes
  *
  *   struct imu_sample {
- *     int16_t ax, ay, az;      // raw LSM6DS3 accel LSB, 0.244 mg/LSB
- *     int16_t gx, gy, gz;      // raw LSM6DS3 gyro  LSB, 0.070 dps/LSB
+ *     int16_t ax, ay, az;      // raw LSM6DSL accel LSB, chip frame
+ *     int16_t gx, gy, gz;      // raw LSM6DSL gyro  LSB, chip frame
  *   };                         // 12 bytes each
  ****************************************************************************/
 
@@ -40,7 +44,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <nuttx/uorb.h>
+#include <arch/board/board_lsm6dsl.h>
 
 #include "btstack_event.h"
 #include "btstack_run_loop.h"
@@ -52,8 +56,7 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define ACCEL_DEVPATH          "/dev/uorb/sensor_accel0"
-#define GYRO_DEVPATH           "/dev/uorb/sensor_gyro0"
+#define IMU_DEVPATH            "/dev/uorb/sensor_imu0"
 
 #ifndef CONFIG_APP_BTSENSOR_BATCH
 #  define CONFIG_APP_BTSENSOR_BATCH       8
@@ -75,16 +78,6 @@
 #define BTSENSOR_FRAME_MAX_SIZE           \
     (12 + 12 * BTSENSOR_FRAME_MAX_SAMPLES)
 
-/* LSM6DS3 scales matching apps/imu/imu_main.c (chip configured to
- * ±8g / ±2000 dps).  Used to re-encode the uORB physical-unit samples
- * back into raw int16 LSBs for the wire format.
- */
-
-#define IMU_ACCEL_SCALE_MG_LSB        0.244f
-#define IMU_GYRO_SCALE_DPS_LSB        0.070f
-#define IMU_GRAVITY_MS2               9.80665f
-#define IMU_RAD_TO_DEG                57.29577951f
-
 #define IMU_SAMPLE_RATE_HZ            833
 
 /****************************************************************************
@@ -101,21 +94,20 @@ struct imu_frame_s
  * Private Data
  ****************************************************************************/
 
-static btstack_data_source_t g_accel_ds;
-static btstack_data_source_t g_gyro_ds;
+static btstack_data_source_t g_imu_ds;
 
-static int g_accel_fd = -1;
-static int g_gyro_fd = -1;
-
-static struct sensor_accel g_last_accel;
-static struct sensor_gyro  g_last_gyro;
-static bool                g_accel_fresh;
-static bool                g_gyro_fresh;
+static int g_imu_fd = -1;
 
 /* Batch in progress (assembled sample-by-sample). */
 
 static struct imu_frame_s g_current;
 static uint8_t            g_current_count;
+
+/* Hardware timestamp of the first sample in g_current; copied into the
+ * frame header at flush time.
+ */
+
+static uint32_t           g_current_first_ts;
 
 /* SPSC ring drained by the RFCOMM send path. */
 
@@ -141,69 +133,29 @@ static uint16_t g_rfcomm_mtu;
 static uint16_t g_seq;
 static bool     g_can_send_pending;
 
-/* Session-start time in the same time base as the uORB sensor message
- * timestamp field (clock_systime_timespec → CLOCK_BOOTTIME).  Per-frame
- * ts_us is computed as `first_sample.timestamp - g_start_us` so it
- * reflects the actual hardware sample time, not the moment the Hub
- * drained the FIFO.  See Issue #55.
+/* Session-start time in the same time base as the driver's sensor_imu
+ * timestamp (low 32 bits of CLOCK_BOOTTIME us).  Per-frame ts_us is
+ * computed as `first_sample.timestamp - g_start_us` mod 2^32 so it
+ * reflects the actual hardware sample time relative to the session
+ * (Issue #55).
  */
 
-static uint64_t g_start_us;
+static uint32_t g_start_us;
 
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
 
-static int16_t clamp_i16(int32_t v)
+static void encode_sample(uint8_t *dst, const struct sensor_imu *s)
 {
-  if (v > INT16_MAX)
-    {
-      return INT16_MAX;
-    }
+  /* Raw int16 LSB values — driver already publishes them this way. */
 
-  if (v < INT16_MIN)
-    {
-      return INT16_MIN;
-    }
-
-  return (int16_t)v;
-}
-
-/* Convert uORB physical units back to the raw LSM6DS3 ADC LSB values. */
-
-static void encode_sample(uint8_t *dst,
-                          const struct sensor_accel *a,
-                          const struct sensor_gyro *g)
-{
-  /* uORB accel is m/s^2.  Raw LSB = m/s^2 * 1000 / 9.80665 / 0.244. */
-
-  int16_t ax = clamp_i16((int32_t)(a->x * 1000.0f /
-                                   (IMU_GRAVITY_MS2 *
-                                    IMU_ACCEL_SCALE_MG_LSB)));
-  int16_t ay = clamp_i16((int32_t)(a->y * 1000.0f /
-                                   (IMU_GRAVITY_MS2 *
-                                    IMU_ACCEL_SCALE_MG_LSB)));
-  int16_t az = clamp_i16((int32_t)(a->z * 1000.0f /
-                                   (IMU_GRAVITY_MS2 *
-                                    IMU_ACCEL_SCALE_MG_LSB)));
-
-  /* uORB gyro is rad/s.  Raw LSB = rad/s * (180/pi) / 0.070. */
-
-  int16_t gx = clamp_i16((int32_t)(g->x * IMU_RAD_TO_DEG /
-                                   IMU_GYRO_SCALE_DPS_LSB));
-  int16_t gy = clamp_i16((int32_t)(g->y * IMU_RAD_TO_DEG /
-                                   IMU_GYRO_SCALE_DPS_LSB));
-  int16_t gz = clamp_i16((int32_t)(g->z * IMU_RAD_TO_DEG /
-                                   IMU_GYRO_SCALE_DPS_LSB));
-
-  /* Write little-endian. */
-
-  dst[0]  = (uint8_t)(ax & 0xff); dst[1]  = (uint8_t)(ax >> 8);
-  dst[2]  = (uint8_t)(ay & 0xff); dst[3]  = (uint8_t)(ay >> 8);
-  dst[4]  = (uint8_t)(az & 0xff); dst[5]  = (uint8_t)(az >> 8);
-  dst[6]  = (uint8_t)(gx & 0xff); dst[7]  = (uint8_t)(gx >> 8);
-  dst[8]  = (uint8_t)(gy & 0xff); dst[9]  = (uint8_t)(gy >> 8);
-  dst[10] = (uint8_t)(gz & 0xff); dst[11] = (uint8_t)(gz >> 8);
+  dst[0]  = (uint8_t)(s->ax & 0xff); dst[1]  = (uint8_t)(s->ax >> 8);
+  dst[2]  = (uint8_t)(s->ay & 0xff); dst[3]  = (uint8_t)(s->ay >> 8);
+  dst[4]  = (uint8_t)(s->az & 0xff); dst[5]  = (uint8_t)(s->az >> 8);
+  dst[6]  = (uint8_t)(s->gx & 0xff); dst[7]  = (uint8_t)(s->gx >> 8);
+  dst[8]  = (uint8_t)(s->gy & 0xff); dst[9]  = (uint8_t)(s->gy >> 8);
+  dst[10] = (uint8_t)(s->gz & 0xff); dst[11] = (uint8_t)(s->gz >> 8);
 }
 
 static void request_send_if_needed(void)
@@ -244,8 +196,14 @@ static void flush_current_frame(void)
       return;
     }
 
-  /* Patch sample_count into the header now that we're done. */
+  /* Patch header fields decided at flush time. */
 
+  uint32_t ts = g_current_first_ts - g_start_us; /* mod 2^32 */
+
+  g_current.buf[4]  = (uint8_t)(ts & 0xff);
+  g_current.buf[5]  = (uint8_t)((ts >> 8) & 0xff);
+  g_current.buf[6]  = (uint8_t)((ts >> 16) & 0xff);
+  g_current.buf[7]  = (uint8_t)((ts >> 24) & 0xff);
   g_current.buf[10] = g_current_count;    /* sample_count */
   g_current.len     = 12 + 12 * g_current_count;
 
@@ -265,41 +223,30 @@ static void flush_current_frame(void)
   request_send_if_needed();
 }
 
-static void maybe_build_sample(void)
+static void append_sample(const struct sensor_imu *sample)
 {
-  if (!g_accel_fresh || !g_gyro_fresh)
-    {
-      return;
-    }
-
-  /* Start a new frame header if this is the first sample. */
-
   if (g_current_count == 0)
     {
-      /* Use the first paired sample's hardware timestamp (uORB stamps
-       * accel + gyro with the same value at the moment the driver
-       * reads the sensor, see boards/spike-prime-hub/src/lsm6dsl_uorb.c).
-       * The previous monotonic_us_since_start() recorded the Hub's
-       * drain time, which clusters multiple frames to the same value
-       * during FIFO bursts (Issue #55).
+      /* First sample: lay down the frame header skeleton.  ts_us and
+       * sample_count are patched at flush time by flush_current_frame().
        */
 
-      uint64_t sample_us = g_last_accel.timestamp;
       uint16_t magic     = BTSENSOR_FRAME_MAGIC;
       uint16_t seq       = g_seq++;
-      uint32_t ts        = (uint32_t)(sample_us - g_start_us);
       uint16_t rate      = IMU_SAMPLE_RATE_HZ;
       uint8_t  type      = BTSENSOR_FRAME_TYPE_IMU;
       uint8_t  reserved  = 0;
+
+      g_current_first_ts = sample->timestamp;
 
       g_current.buf[0]  = (uint8_t)(magic & 0xff);
       g_current.buf[1]  = (uint8_t)(magic >> 8);
       g_current.buf[2]  = (uint8_t)(seq & 0xff);
       g_current.buf[3]  = (uint8_t)(seq >> 8);
-      g_current.buf[4]  = (uint8_t)(ts & 0xff);
-      g_current.buf[5]  = (uint8_t)((ts >> 8) & 0xff);
-      g_current.buf[6]  = (uint8_t)((ts >> 16) & 0xff);
-      g_current.buf[7]  = (uint8_t)((ts >> 24) & 0xff);
+      g_current.buf[4]  = 0;             /* ts_us — patched at flush */
+      g_current.buf[5]  = 0;
+      g_current.buf[6]  = 0;
+      g_current.buf[7]  = 0;
       g_current.buf[8]  = (uint8_t)(rate & 0xff);
       g_current.buf[9]  = (uint8_t)(rate >> 8);
       g_current.buf[10] = 0;             /* sample_count — patched at flush */
@@ -307,11 +254,8 @@ static void maybe_build_sample(void)
     }
 
   uint8_t *slot = &g_current.buf[12 + 12 * g_current_count];
-  encode_sample(slot, &g_last_accel, &g_last_gyro);
+  encode_sample(slot, sample);
   g_current_count++;
-
-  g_accel_fresh = false;
-  g_gyro_fresh  = false;
 
   if (g_current_count >= g_batch)
     {
@@ -319,43 +263,21 @@ static void maybe_build_sample(void)
     }
 }
 
-static void accel_process(btstack_data_source_t *ds,
-                          btstack_data_source_callback_type_t type)
+static void imu_process(btstack_data_source_t *ds,
+                        btstack_data_source_callback_type_t type)
 {
   (void)type;
 
   while (1)
     {
-      struct sensor_accel s;
+      struct sensor_imu s;
       ssize_t n = read(ds->source.fd, &s, sizeof(s));
       if (n != sizeof(s))
         {
           break;
         }
 
-      g_last_accel  = s;
-      g_accel_fresh = true;
-      maybe_build_sample();
-    }
-}
-
-static void gyro_process(btstack_data_source_t *ds,
-                         btstack_data_source_callback_type_t type)
-{
-  (void)type;
-
-  while (1)
-    {
-      struct sensor_gyro s;
-      ssize_t n = read(ds->source.fd, &s, sizeof(s));
-      if (n != sizeof(s))
-        {
-          break;
-        }
-
-      g_last_gyro  = s;
-      g_gyro_fresh = true;
-      maybe_build_sample();
+      append_sample(&s);
     }
 }
 
@@ -380,43 +302,30 @@ void imu_sampler_configure(uint8_t batch)
 
 int imu_sampler_init(void)
 {
-  /* CLOCK_BOOTTIME matches clock_systime_timespec() used by NuttX's
-   * sensor_get_timestamp(), so subtracting g_start_us from a sample's
-   * uORB timestamp yields microseconds since session start.
+  /* CLOCK_BOOTTIME matches the driver's ts_irq (low 32 bits of
+   * sensor_get_timestamp() = clock_systime_timespec()), so the modular
+   * subtraction `sample.timestamp - g_start_us` yields microseconds
+   * since session start.
    */
 
   struct timespec start;
   clock_gettime(CLOCK_BOOTTIME, &start);
-  g_start_us = (uint64_t)start.tv_sec * 1000000ULL +
-               (uint64_t)start.tv_nsec / 1000ULL;
+  uint64_t start_us = (uint64_t)start.tv_sec * 1000000ULL +
+                      (uint64_t)start.tv_nsec / 1000ULL;
+  g_start_us = (uint32_t)start_us;
 
-  g_accel_fd = open(ACCEL_DEVPATH, O_RDONLY | O_NONBLOCK);
-  if (g_accel_fd < 0)
+  g_imu_fd = open(IMU_DEVPATH, O_RDONLY | O_NONBLOCK);
+  if (g_imu_fd < 0)
     {
-      printf("btsensor: open %s errno %d\n", ACCEL_DEVPATH, errno);
+      printf("btsensor: open %s errno %d\n", IMU_DEVPATH, errno);
       return -1;
     }
 
-  g_gyro_fd = open(GYRO_DEVPATH, O_RDONLY | O_NONBLOCK);
-  if (g_gyro_fd < 0)
-    {
-      printf("btsensor: open %s errno %d\n", GYRO_DEVPATH, errno);
-      close(g_accel_fd);
-      g_accel_fd = -1;
-      return -1;
-    }
-
-  btstack_run_loop_set_data_source_fd(&g_accel_ds, g_accel_fd);
-  btstack_run_loop_set_data_source_handler(&g_accel_ds, accel_process);
-  btstack_run_loop_add_data_source(&g_accel_ds);
+  btstack_run_loop_set_data_source_fd(&g_imu_ds, g_imu_fd);
+  btstack_run_loop_set_data_source_handler(&g_imu_ds, imu_process);
+  btstack_run_loop_add_data_source(&g_imu_ds);
   btstack_run_loop_enable_data_source_callbacks(
-      &g_accel_ds, DATA_SOURCE_CALLBACK_READ);
-
-  btstack_run_loop_set_data_source_fd(&g_gyro_ds, g_gyro_fd);
-  btstack_run_loop_set_data_source_handler(&g_gyro_ds, gyro_process);
-  btstack_run_loop_add_data_source(&g_gyro_ds);
-  btstack_run_loop_enable_data_source_callbacks(
-      &g_gyro_ds, DATA_SOURCE_CALLBACK_READ);
+      &g_imu_ds, DATA_SOURCE_CALLBACK_READ);
 
   return 0;
 }

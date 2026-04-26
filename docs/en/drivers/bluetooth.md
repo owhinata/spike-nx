@@ -42,7 +42,7 @@ Matches pybricks `lib/pbio/platform/prime_hub/platform.c`.  TIM8 CH4
 │ apps/btsensor/ (user-mode, Issue #52 Step C-E)             │
 │  btsensor_main.c   NSH builtin, run-loop host              │
 │  btsensor_spp.c    L2CAP + RFCOMM + SDP + SSP Just-Works   │
-│  imu_sampler.c     uORB accel/gyro -> RFCOMM streaming     │
+│  imu_sampler.c     uORB sensor_imu -> RFCOMM streaming     │
 │  port/             btstack run loop + UART adapter         │
 └────────────┬───────────────────────────────────────────────┘
              │ read/write/ioctl/poll on /dev/ttyBT
@@ -105,10 +105,11 @@ NuttX port of the btstack `port/` layer.  Written against
 - `btsensor_spp.c` — L2CAP + RFCOMM + SDP setup, SPP SDP record, SSP
   Just-Works pairing, RFCOMM channel lifecycle handlers that forward
   OPEN/CLOSED/CAN_SEND_NOW to the sampler.
-- `imu_sampler.c` — opens `/dev/uorb/sensor_accel0` and
-  `sensor_gyro0`, registers both fds as btstack data sources, packs
-  accel + gyro sample pairs into 16-sample batches and pushes them
-  through `rfcomm_send` on CAN_SEND_NOW.
+- `imu_sampler.c` — opens `/dev/uorb/sensor_imu0`, registers the fd as
+  a btstack data source, copies each `struct sensor_imu` (paired raw
+  int16 accel + gyro + ISR-captured timestamp) into a wire-format
+  sample slot and pushes a Kconfig-tunable batch through `rfcomm_send`
+  on CAN_SEND_NOW.
 
 ## Bring-up sequence (btstack-driven)
 
@@ -119,7 +120,7 @@ NuttX port of the btstack `port/` layer.  Written against
    - `btstack_run_loop_init(btstack_run_loop_nuttx_get_instance())`
    - `hci_init(transport, cfg)` + `hci_set_chipset(cc256x_instance)`
    - `spp_server_init()` registers L2CAP + RFCOMM + SDP + GAP options
-   - `imu_sampler_init()` hooks the uORB fds as data sources
+   - `imu_sampler_init()` hooks `/dev/uorb/sensor_imu0` as a data source
    - `hci_power_control(HCI_POWER_ON)` drives the state machine
      through HCI_Reset → Read_Local_Version → HCI_VS_Update_UART_Baud
      (0xFF36) → chipset init script streaming (~40 chunks, ~200 ms)
@@ -154,9 +155,15 @@ struct spp_frame_hdr {
 };
 
 struct imu_sample {
-    int16_t ax, ay, az;      // raw LSM6DS3 accel LSB (±8 g, 0.244 mg/LSB)
-    int16_t gx, gy, gz;      // raw LSM6DS3 gyro  LSB (±2000 dps, 0.070 dps/LSB)
+    int16_t ax, ay, az;      // LSM6DSL accel chip-frame raw LSB
+    int16_t gx, gy, gz;      // LSM6DSL gyro  chip-frame raw LSB
 };
+/* Convert with the driver's startup FSR (default ±8 g / ±2000 dps):
+ *   accel_ms2  = raw * fsr_g  * 9.80665 / 32768
+ *   gyro_dps   = raw * fsr_dps / 32768
+ * Issue #56 Commit E embeds the per-frame FSR in the header so the PC
+ * can pick up FSR changes at runtime.
+ */
 ```
 
 ## Key design decisions

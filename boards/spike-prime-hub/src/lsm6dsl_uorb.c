@@ -1,9 +1,11 @@
 /****************************************************************************
- * drivers/sensors/lsm6dsl_uorb.c
+ * boards/spike-prime-hub/src/lsm6dsl_uorb.c
  *
- * LSM6DSL IMU uORB driver — accelerometer + gyroscope.
+ * LSM6DSL IMU uORB driver — combined accel + gyro raw publisher.
  * Single DRDY interrupt on INT1 reads both accel and gyro in one burst,
- * following the pybricks LSM6DS3TR-C pattern.
+ * then publishes a single struct sensor_imu on /dev/uorb/sensor_imu0.
+ * Physical-unit conversion is left to the consumer; FSR/ODR are
+ * runtime-tunable through ioctl while the sensor is inactive.
  *
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -44,6 +46,8 @@
 #include <nuttx/sensors/sensor.h>
 #include <nuttx/signal.h>
 
+#include <arch/board/board_lsm6dsl.h>
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -58,18 +62,11 @@
 #  define CONFIG_LSM6DSL_UORB_THREAD_STACKSIZE  1024
 #endif
 
-#ifndef CONFIG_LSM6DSL_UORB_ACCEL_BUFSIZE
-#  define CONFIG_LSM6DSL_UORB_ACCEL_BUFSIZE     10
-#endif
-
-#ifndef CONFIG_LSM6DSL_UORB_GYRO_BUFSIZE
-#  define CONFIG_LSM6DSL_UORB_GYRO_BUFSIZE      10
+#ifndef CONFIG_LSM6DSL_UORB_BUFSIZE
+#  define CONFIG_LSM6DSL_UORB_BUFSIZE           10
 #endif
 
 #define WHO_AM_I_VAL    0x6a
-
-#define MILLIG_TO_MS2   (0.0098067f)
-#define MDPS_TO_RADS    (3.141592653f / (180.0f * 1000.0f))
 
 /* Registers */
 
@@ -81,6 +78,7 @@
 #define CTRL3_C         0x12   /* Control reg 3 (BDU, IF_INC, etc.) */
 #define CTRL5_C         0x14   /* Control reg 5 (rounding) */
 #define STATUS_REG      0x1e
+#define OUT_TEMP_L      0x20   /* Temperature low byte */
 #define OUTX_L_G        0x22   /* Gyro output start (12 bytes: G+XL) */
 
 /* Bits */
@@ -95,6 +93,18 @@
 /* Burst read: 6 bytes gyro (0x22-0x27) + 6 bytes accel (0x28-0x2D) */
 
 #define BURST_DATA_LEN  12
+
+/* Read OUT_TEMP every TEMP_DECIMATE samples; samples in between reuse
+ * the cached value.  Keeps the per-sample I2C burst at 12 bytes.
+ */
+
+#define TEMP_DECIMATE   16
+
+/* Default startup configuration (matches pybricks). */
+
+#define DEFAULT_ODR     ODR_833HZ
+#define DEFAULT_FSR_XL  FSR_XL_8G
+#define DEFAULT_FSR_GY  FSR_GY_2000DPS
 
 /****************************************************************************
  * Private Types
@@ -134,18 +144,30 @@ enum lsm6dsl_fsr_xl_e
 
 struct lsm6dsl_dev_s
 {
-  struct sensor_lowerhalf_s gyro_lower;
-  struct sensor_lowerhalf_s accel_lower;
+  struct sensor_lowerhalf_s imu_lower;
   FAR struct i2c_master_s *i2c;
   uint8_t addr;
   mutex_t devlock;
   sem_t run;                   /* Polling thread wakeup */
   struct work_s work;          /* HPWORK for interrupt mode */
-  enum lsm6dsl_odr_e odr;     /* Shared ODR for both sensors */
+  enum lsm6dsl_odr_e odr;
   int fsr_gy;
   int fsr_xl;
-  bool gyro_enabled;
-  bool accel_enabled;
+  bool active;                 /* Sampling enabled */
+
+  /* ISR -> worker handoff.  ARMv7-M 4-byte aligned word load/store is
+   * single-copy atomic, so no critical section is needed for the read
+   * in drdy_worker.
+   */
+
+  volatile uint32_t ts_irq;
+
+  /* Temperature is decimated to once per TEMP_DECIMATE samples; the
+   * cached value is reused for the in-between samples.
+   */
+
+  uint32_t sample_index;
+  int16_t  temperature_raw;
 };
 
 /****************************************************************************
@@ -181,25 +203,6 @@ static const uint32_t g_odr_interval[] =
   602,     /* ODR_1660HZ */
   300,     /* ODR_3330HZ */
   150,     /* ODR_6660HZ */
-};
-
-static const float g_fsr_xl_sens[] =
-{
-  0.061f * MILLIG_TO_MS2,  /* 2g */
-  0.488f * MILLIG_TO_MS2,  /* 16g */
-  0.122f * MILLIG_TO_MS2,  /* 4g */
-  0.244f * MILLIG_TO_MS2,  /* 8g */
-};
-
-static const float g_fsr_gy_sens[] =
-{
-  8.75f * MDPS_TO_RADS,    /* 250 dps */
-  4.375f * MDPS_TO_RADS,   /* 125 dps */
-  17.50f * MDPS_TO_RADS,   /* 500 dps */
-  0.0f,                    /* unused (3) */
-  35.0f * MDPS_TO_RADS,    /* 1000 dps */
-  0.0f,                    /* unused (5) */
-  70.0f * MDPS_TO_RADS,    /* 2000 dps */
 };
 
 static const struct sensor_ops_s g_sensor_ops =
@@ -329,9 +332,7 @@ static int gyro_set_fsr(FAR struct lsm6dsl_dev_s *dev,
 static int push_data(FAR struct lsm6dsl_dev_s *dev)
 {
   int16_t raw[6];  /* gyro XYZ + accel XYZ */
-  struct sensor_gyro gyro;
-  struct sensor_accel accel;
-  uint64_t ts;
+  struct sensor_imu sample;
   int err;
 
   err = nxmutex_lock(&dev->devlock);
@@ -350,30 +351,35 @@ static int push_data(FAR struct lsm6dsl_dev_s *dev)
       goto unlock;
     }
 
-  ts = sensor_get_timestamp();
+  /* Refresh temperature once per TEMP_DECIMATE samples; in between, reuse
+   * the cached value.  OUT_TEMP_L / OUT_TEMP_H is two bytes at 0x20.
+   */
 
-  gyro.timestamp   = ts;
-  gyro.temperature = 0;
-  gyro.x = (float)(raw[0]) * g_fsr_gy_sens[dev->fsr_gy];
-  gyro.y = (float)(raw[1]) * g_fsr_gy_sens[dev->fsr_gy];
-  gyro.z = (float)(raw[2]) * g_fsr_gy_sens[dev->fsr_gy];
-
-  accel.timestamp   = ts;
-  accel.temperature = 0;
-  accel.x = (float)(raw[3]) * g_fsr_xl_sens[dev->fsr_xl];
-  accel.y = (float)(raw[4]) * g_fsr_xl_sens[dev->fsr_xl];
-  accel.z = (float)(raw[5]) * g_fsr_xl_sens[dev->fsr_xl];
-
-  if (dev->gyro_enabled)
+  if ((dev->sample_index % TEMP_DECIMATE) == 0)
     {
-      dev->gyro_lower.push_event(dev->gyro_lower.priv,
-                                 &gyro, sizeof(gyro));
+      int16_t temp;
+      if (lsm6dsl_read_bytes(dev, OUT_TEMP_L, &temp, sizeof(temp)) >= 0)
+        {
+          dev->temperature_raw = temp;
+        }
     }
 
-  if (dev->accel_enabled)
+  dev->sample_index++;
+
+  sample.timestamp       = dev->ts_irq;
+  sample.gx              = raw[0];
+  sample.gy              = raw[1];
+  sample.gz              = raw[2];
+  sample.ax              = raw[3];
+  sample.ay              = raw[4];
+  sample.az              = raw[5];
+  sample.temperature_raw = dev->temperature_raw;
+  sample.reserved        = 0;
+
+  if (dev->active)
     {
-      dev->accel_lower.push_event(dev->accel_lower.priv,
-                                  &accel, sizeof(accel));
+      dev->imu_lower.push_event(dev->imu_lower.priv,
+                                &sample, sizeof(sample));
     }
 
 unlock:
@@ -395,6 +401,14 @@ static int drdy_int_handler(int irq, FAR void *context, FAR void *arg)
   FAR struct lsm6dsl_dev_s *dev = (FAR struct lsm6dsl_dev_s *)arg;
 
   DEBUGASSERT(dev != NULL);
+
+  /* Capture the timestamp inside the ISR so the worker carries the true
+   * sample-ready time, free of HPWORK + I2C burst latency.  ARMv7-M
+   * 4-byte aligned STR is single-copy atomic, so the worker's matching
+   * LDR can never see a torn value.
+   */
+
+  dev->ts_irq = (uint32_t)sensor_get_timestamp();
   work_queue(HPWORK, &dev->work, drdy_worker, dev, 0);
   return OK;
 }
@@ -410,12 +424,13 @@ static int poll_thread(int argc, char **argv)
 
   while (true)
     {
-      if (!dev->gyro_enabled && !dev->accel_enabled)
+      if (!dev->active)
         {
           nxsem_wait(&dev->run);
           continue;
         }
 
+      dev->ts_irq = (uint32_t)sensor_get_timestamp();
       push_data(dev);
       nxsched_usleep(g_odr_interval[dev->odr]);
     }
@@ -430,19 +445,9 @@ static int poll_thread(int argc, char **argv)
 static int lsm6dsl_activate(FAR struct sensor_lowerhalf_s *lower,
                              FAR struct file *filep, bool enable)
 {
-  FAR struct lsm6dsl_dev_s *dev;
-  bool was_active;
-  bool now_active;
+  FAR struct lsm6dsl_dev_s *dev =
+      container_of(lower, struct lsm6dsl_dev_s, imu_lower);
   int err;
-
-  if (lower->type == SENSOR_TYPE_GYROSCOPE)
-    {
-      dev = container_of(lower, struct lsm6dsl_dev_s, gyro_lower);
-    }
-  else
-    {
-      dev = container_of(lower, struct lsm6dsl_dev_s, accel_lower);
-    }
 
   err = nxmutex_lock(&dev->devlock);
   if (err < 0)
@@ -450,39 +455,22 @@ static int lsm6dsl_activate(FAR struct sensor_lowerhalf_s *lower,
       return err;
     }
 
-  was_active = dev->gyro_enabled || dev->accel_enabled;
-
-  if (lower->type == SENSOR_TYPE_GYROSCOPE)
+  if (enable && !dev->active)
     {
-      dev->gyro_enabled = enable;
-    }
-  else
-    {
-      dev->accel_enabled = enable;
-    }
-
-  now_active = dev->gyro_enabled || dev->accel_enabled;
-
-  /* Start sampling when first sensor activates */
-
-  if (!was_active && now_active)
-    {
-      err = lsm6dsl_set_odr(dev, ODR_833HZ);
+      err = lsm6dsl_set_odr(dev, DEFAULT_ODR);
       if (err < 0)
         {
           goto unlock;
         }
 
-      /* Wake polling thread if present */
-
+      dev->sample_index = 0;
+      dev->active       = true;
       nxsem_post(&dev->run);
     }
-
-  /* Stop sampling when last sensor deactivates */
-
-  if (was_active && !now_active)
+  else if (!enable && dev->active)
     {
       err = lsm6dsl_set_odr(dev, ODR_OFF);
+      dev->active = false;
     }
 
 unlock:
@@ -494,18 +482,10 @@ static int lsm6dsl_set_interval(FAR struct sensor_lowerhalf_s *lower,
                                  FAR struct file *filep,
                                  FAR uint32_t *period_us)
 {
-  FAR struct lsm6dsl_dev_s *dev;
+  FAR struct lsm6dsl_dev_s *dev =
+      container_of(lower, struct lsm6dsl_dev_s, imu_lower);
   enum lsm6dsl_odr_e odr;
   int err;
-
-  if (lower->type == SENSOR_TYPE_GYROSCOPE)
-    {
-      dev = container_of(lower, struct lsm6dsl_dev_s, gyro_lower);
-    }
-  else
-    {
-      dev = container_of(lower, struct lsm6dsl_dev_s, accel_lower);
-    }
 
   if (*period_us >= 80000)
     {
@@ -554,7 +534,11 @@ static int lsm6dsl_set_interval(FAR struct sensor_lowerhalf_s *lower,
       return err;
     }
 
-  /* Both accel and gyro share the same ODR */
+  if (dev->active)
+    {
+      err = -EBUSY;
+      goto unlock;
+    }
 
   err = lsm6dsl_set_odr(dev, odr);
   if (err >= 0)
@@ -562,43 +546,49 @@ static int lsm6dsl_set_interval(FAR struct sensor_lowerhalf_s *lower,
       *period_us = g_odr_interval[odr];
     }
 
+unlock:
   nxmutex_unlock(&dev->devlock);
   return err;
+}
+
+static int set_samplerate_hz(FAR struct lsm6dsl_dev_s *dev, uint32_t hz)
+{
+  enum lsm6dsl_odr_e odr;
+
+  switch (hz)
+    {
+    case 13:    odr = ODR_12_5HZ;  break;
+    case 26:    odr = ODR_26HZ;    break;
+    case 52:    odr = ODR_52HZ;    break;
+    case 104:   odr = ODR_104HZ;   break;
+    case 208:   odr = ODR_208HZ;   break;
+    case 416:   odr = ODR_416HZ;   break;
+    case 833:   odr = ODR_833HZ;   break;
+    case 1660:  odr = ODR_1660HZ;  break;
+    case 3330:  odr = ODR_3330HZ;  break;
+    case 6660:  odr = ODR_6660HZ;  break;
+    default:    return -EINVAL;
+    }
+
+  return lsm6dsl_set_odr(dev, odr);
 }
 
 static int lsm6dsl_get_info(FAR struct sensor_lowerhalf_s *lower,
                              FAR struct file *filep,
                              FAR struct sensor_device_info_s *info)
 {
-  FAR struct lsm6dsl_dev_s *dev;
-
-  if (lower->type == SENSOR_TYPE_GYROSCOPE)
-    {
-      dev = container_of(lower, struct lsm6dsl_dev_s, gyro_lower);
-    }
-  else
-    {
-      dev = container_of(lower, struct lsm6dsl_dev_s, accel_lower);
-    }
+  FAR struct lsm6dsl_dev_s *dev =
+      container_of(lower, struct lsm6dsl_dev_s, imu_lower);
 
   memset(info, 0, sizeof(*info));
-  info->power = 0.55f;
+  info->power      = 0.55f;
+  info->resolution = 1.0f;        /* Raw LSB */
+  info->max_range  = (float)INT16_MAX;
+  info->min_delay  = (int32_t)g_odr_interval[ODR_6660HZ];
+  info->max_delay  = (int32_t)g_odr_interval[ODR_12_5HZ];
   memcpy(info->name, "LSM6DSL", sizeof("LSM6DSL"));
   memcpy(info->vendor, "STMicro", sizeof("STMicro"));
-
-  if (lower->type == SENSOR_TYPE_GYROSCOPE)
-    {
-      info->resolution = g_fsr_gy_sens[dev->fsr_gy];
-      info->max_range  = g_fsr_gy_sens[dev->fsr_gy] * INT16_MAX;
-    }
-  else
-    {
-      info->resolution = g_fsr_xl_sens[dev->fsr_xl];
-      info->max_range  = g_fsr_xl_sens[dev->fsr_xl] * INT16_MAX;
-    }
-
-  info->min_delay = (int32_t)g_odr_interval[ODR_6660HZ];
-  info->max_delay = (int32_t)g_odr_interval[ODR_12_5HZ];
+  UNUSED(dev);
   return OK;
 }
 
@@ -606,22 +596,25 @@ static int lsm6dsl_control(FAR struct sensor_lowerhalf_s *lower,
                             FAR struct file *filep, int cmd,
                             unsigned long arg)
 {
-  FAR struct lsm6dsl_dev_s *dev;
+  FAR struct lsm6dsl_dev_s *dev =
+      container_of(lower, struct lsm6dsl_dev_s, imu_lower);
   int err;
-
-  if (lower->type == SENSOR_TYPE_GYROSCOPE)
-    {
-      dev = container_of(lower, struct lsm6dsl_dev_s, gyro_lower);
-    }
-  else
-    {
-      dev = container_of(lower, struct lsm6dsl_dev_s, accel_lower);
-    }
 
   err = nxmutex_lock(&dev->devlock);
   if (err < 0)
     {
       return err;
+    }
+
+  /* All control commands except WHO_AM_I are reconfiguration; reject them
+   * while sampling is active so callers must explicitly stop the sensor
+   * first (and are not racing against the publish path).
+   */
+
+  if (cmd != SNIOC_WHO_AM_I && dev->active)
+    {
+      err = -EBUSY;
+      goto unlock;
     }
 
   switch (cmd)
@@ -639,32 +632,31 @@ static int lsm6dsl_control(FAR struct sensor_lowerhalf_s *lower,
       }
       break;
 
-    case SNIOC_SETFULLSCALE:
-      {
-        if (lower->type == SENSOR_TYPE_ACCELEROMETER)
-          {
-            switch (arg)
-              {
-              case 2:  err = accel_set_fsr(dev, FSR_XL_2G);  break;
-              case 4:  err = accel_set_fsr(dev, FSR_XL_4G);  break;
-              case 8:  err = accel_set_fsr(dev, FSR_XL_8G);  break;
-              case 16: err = accel_set_fsr(dev, FSR_XL_16G); break;
-              default: err = -EINVAL;                         break;
-              }
-          }
-        else
-          {
-            switch (arg)
-              {
-              case 125:  err = gyro_set_fsr(dev, FSR_GY_125DPS);  break;
-              case 250:  err = gyro_set_fsr(dev, FSR_GY_250DPS);  break;
-              case 500:  err = gyro_set_fsr(dev, FSR_GY_500DPS);  break;
-              case 1000: err = gyro_set_fsr(dev, FSR_GY_1000DPS); break;
-              case 2000: err = gyro_set_fsr(dev, FSR_GY_2000DPS); break;
-              default:   err = -EINVAL;                            break;
-              }
-          }
-      }
+    case SNIOC_SETSAMPLERATE:
+      err = set_samplerate_hz(dev, (uint32_t)arg);
+      break;
+
+    case LSM6DSL_IOC_SETACCELFSR:
+      switch (arg)
+        {
+        case 2:  err = accel_set_fsr(dev, FSR_XL_2G);  break;
+        case 4:  err = accel_set_fsr(dev, FSR_XL_4G);  break;
+        case 8:  err = accel_set_fsr(dev, FSR_XL_8G);  break;
+        case 16: err = accel_set_fsr(dev, FSR_XL_16G); break;
+        default: err = -EINVAL;                         break;
+        }
+      break;
+
+    case LSM6DSL_IOC_SETGYROFSR:
+      switch (arg)
+        {
+        case 125:  err = gyro_set_fsr(dev, FSR_GY_125DPS);  break;
+        case 250:  err = gyro_set_fsr(dev, FSR_GY_250DPS);  break;
+        case 500:  err = gyro_set_fsr(dev, FSR_GY_500DPS);  break;
+        case 1000: err = gyro_set_fsr(dev, FSR_GY_1000DPS); break;
+        case 2000: err = gyro_set_fsr(dev, FSR_GY_2000DPS); break;
+        default:   err = -EINVAL;                            break;
+        }
       break;
 
     default:
@@ -672,6 +664,7 @@ static int lsm6dsl_control(FAR struct sensor_lowerhalf_s *lower,
       break;
     }
 
+unlock:
   nxmutex_unlock(&dev->devlock);
   return err;
 }
@@ -730,15 +723,15 @@ static int lsm6dsl_hw_init(FAR struct lsm6dsl_dev_s *dev)
       return err;
     }
 
-  /* Set FSR: accel ±8g, gyro 2000 dps (matching pybricks) */
+  /* Set startup FSR */
 
-  err = accel_set_fsr(dev, FSR_XL_8G);
+  err = accel_set_fsr(dev, DEFAULT_FSR_XL);
   if (err < 0)
     {
       return err;
     }
 
-  err = gyro_set_fsr(dev, FSR_GY_2000DPS);
+  err = gyro_set_fsr(dev, DEFAULT_FSR_GY);
   if (err < 0)
     {
       return err;
@@ -764,6 +757,7 @@ int lsm6dsl_register_uorb(FAR struct i2c_master_s *i2c, uint8_t addr,
                            FAR struct lsm6dsl_uorb_config_s *config)
 {
   FAR struct lsm6dsl_dev_s *priv;
+  char path[32];
   int err;
   FAR char *argv[2];
   char arg1[32];
@@ -785,11 +779,11 @@ int lsm6dsl_register_uorb(FAR struct i2c_master_s *i2c, uint8_t addr,
       return -ENOMEM;
     }
 
-  priv->i2c  = i2c;
-  priv->addr = addr;
-  priv->odr  = ODR_OFF;
-  priv->fsr_gy = FSR_GY_2000DPS;
-  priv->fsr_xl = FSR_XL_8G;
+  priv->i2c    = i2c;
+  priv->addr   = addr;
+  priv->odr    = ODR_OFF;
+  priv->fsr_gy = DEFAULT_FSR_GY;
+  priv->fsr_xl = DEFAULT_FSR_XL;
 
   err = nxmutex_init(&priv->devlock);
   if (err < 0)
@@ -812,30 +806,20 @@ int lsm6dsl_register_uorb(FAR struct i2c_master_s *i2c, uint8_t addr,
       goto del_sem;
     }
 
-  /* Register gyro */
+  /* Register a single combined accel+gyro+temperature topic. */
 
-  priv->gyro_lower.type    = SENSOR_TYPE_GYROSCOPE;
-  priv->gyro_lower.ops     = &g_sensor_ops;
-  priv->gyro_lower.nbuffer = CONFIG_LSM6DSL_UORB_GYRO_BUFSIZE;
+  priv->imu_lower.type    = SENSOR_TYPE_CUSTOM;
+  priv->imu_lower.ops     = &g_sensor_ops;
+  priv->imu_lower.nbuffer = CONFIG_LSM6DSL_UORB_BUFSIZE;
 
-  err = sensor_register(&priv->gyro_lower, devno);
+  snprintf(path, sizeof(path), "/dev/uorb/sensor_imu%u", devno);
+
+  err = sensor_custom_register(&priv->imu_lower, path,
+                               sizeof(struct sensor_imu));
   if (err < 0)
     {
-      snerr("ERROR: gyro register failed: %d\n", err);
+      snerr("ERROR: imu register failed: %d\n", err);
       goto del_sem;
-    }
-
-  /* Register accel */
-
-  priv->accel_lower.type    = SENSOR_TYPE_ACCELEROMETER;
-  priv->accel_lower.ops     = &g_sensor_ops;
-  priv->accel_lower.nbuffer = CONFIG_LSM6DSL_UORB_ACCEL_BUFSIZE;
-
-  err = sensor_register(&priv->accel_lower, devno);
-  if (err < 0)
-    {
-      snerr("ERROR: accel register failed: %d\n", err);
-      goto unreg_gyro;
     }
 
   /* Data acquisition: interrupt or polling */
@@ -846,7 +830,7 @@ int lsm6dsl_register_uorb(FAR struct i2c_master_s *i2c, uint8_t addr,
       if (err < 0)
         {
           snerr("ERROR: INT1 attach failed: %d\n", err);
-          goto unreg_accel;
+          goto unreg_imu;
         }
 
       sninfo("LSM6DSL using INT1 interrupt.\n");
@@ -862,19 +846,17 @@ int lsm6dsl_register_uorb(FAR struct i2c_master_s *i2c, uint8_t addr,
       if (err < 0)
         {
           snerr("ERROR: poll thread create failed: %d\n", err);
-          goto unreg_accel;
+          goto unreg_imu;
         }
 
       sninfo("LSM6DSL using polling thread.\n");
     }
 
-  sninfo("LSM6DSL driver registered!\n");
+  sninfo("LSM6DSL driver registered as %s\n", path);
   return OK;
 
-unreg_accel:
-  sensor_unregister(&priv->accel_lower, devno);
-unreg_gyro:
-  sensor_unregister(&priv->gyro_lower, devno);
+unreg_imu:
+  sensor_custom_unregister(&priv->imu_lower, path);
 del_sem:
   nxsem_destroy(&priv->run);
 del_mutex:
