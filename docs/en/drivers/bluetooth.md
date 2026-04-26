@@ -42,6 +42,7 @@ Matches pybricks `lib/pbio/platform/prime_hub/platform.c`.  TIM8 CH4
 │ apps/btsensor/ (user-mode, Issue #52 Step C-E)             │
 │  btsensor_main.c   NSH builtin, run-loop host              │
 │  btsensor_spp.c    L2CAP + RFCOMM + SDP + SSP Just-Works   │
+│  btsensor_tx.c     RFCOMM send arbiter (resp + frame ring) │
 │  imu_sampler.c     uORB sensor_imu -> RFCOMM streaming     │
 │  port/             btstack run loop + UART adapter         │
 └────────────┬───────────────────────────────────────────────┘
@@ -99,34 +100,68 @@ NuttX port of the btstack `port/` layer.  Written against
 
 ### App layer (`apps/btsensor/`)
 
-- `btsensor_main.c` — NSH builtin `btsensor`.  Initialises btstack,
-  powers HCI on, waits for `HCI_STATE_WORKING`, then enters the run
-  loop.  Meant to be launched as `btsensor &` so it stays alive.
+- `btsensor_main.c` — NSH builtin `btsensor start [batch]` /
+  `stop` / `status`.  Issue #56 Commit B converts the foreground
+  `btsensor &` form into a long-lived daemon spawned with
+  `task_create()`; `stop` walks an event-driven teardown FSM (GAP off
+  → RFCOMM disconnect → sampler/tx deinit → HCI off → run loop exit),
+  each pending state guarded by a 3 s btstack-timer watchdog.
 - `btsensor_spp.c` — L2CAP + RFCOMM + SDP setup, SPP SDP record, SSP
-  Just-Works pairing, RFCOMM channel lifecycle handlers that forward
-  OPEN/CLOSED/CAN_SEND_NOW to the sampler.
+  Just-Works pairing, RFCOMM channel lifecycle handlers.  **Default
+  GAP posture is discoverable=0 / connectable=0** — Commit C wires the
+  BT button to enable advertising on demand.
+- `btsensor_tx.c` — single RFCOMM send arbiter introduced in Commit B.
+  Holds a small ASCII response queue (Commit D, priority send) and a
+  frame ringbuf (drop-oldest on back-pressure); both share one
+  `rfcomm_request_can_send_now_event` registration so command replies
+  and IMU telemetry never compete.
 - `imu_sampler.c` — opens `/dev/uorb/sensor_imu0`, registers the fd as
   a btstack data source, copies each `struct sensor_imu` (paired raw
   int16 accel + gyro + ISR-captured timestamp) into a wire-format
-  sample slot and pushes a Kconfig-tunable batch through `rfcomm_send`
-  on CAN_SEND_NOW.
+  sample slot and hands a Kconfig-tunable batch to
+  `btsensor_tx_try_enqueue_frame()`.
+
+## NSH commands
+
+```
+nsh> btsensor start [batch]   # launch daemon (BT advertising stays off)
+nsh> btsensor status          # running / pid / rfcomm cid / frame stats
+nsh> btsensor stop            # asynchronous teardown (HCI off completes
+                              # within ~3 s; watchdog forces exit)
+```
+
+`start` accepts an optional batch override (1..80 samples per RFCOMM
+frame).  Multiple-start is rejected with `already running`.  `stop`
+posts a teardown_kick callback via
+`btstack_run_loop_execute_on_main_thread()` so the FSM advances on the
+btstack main thread.
 
 ## Bring-up sequence (btstack-driven)
 
 1. NuttX boot: `stm32_bluetooth_initialize()` runs — nSHUTD LOW, slow
    clock up, USART2 lower-half instantiated, 50 ms LOW / HIGH / 150 ms
    settle, `/dev/ttyBT` registered.
-2. `btsensor &` from NSH:
+2. `btsensor start` (daemon thread):
    - `btstack_run_loop_init(btstack_run_loop_nuttx_get_instance())`
-   - `hci_init(transport, cfg)` + `hci_set_chipset(cc256x_instance)`
-   - `spp_server_init()` registers L2CAP + RFCOMM + SDP + GAP options
-   - `imu_sampler_init()` hooks `/dev/uorb/sensor_imu0` as a data source
+   - `hci_init(transport, cfg)` + `hci_set_link_key_db()` +
+     `hci_set_chipset(cc256x_instance)`
+   - `spp_server_init()` registers L2CAP + RFCOMM + SDP (GAP
+     discoverable/connectable both off)
+   - `btsensor_tx_init()` + `imu_sampler_init()` hook
+     `/dev/uorb/sensor_imu0` as a data source
    - `hci_power_control(HCI_POWER_ON)` drives the state machine
      through HCI_Reset → Read_Local_Version → HCI_VS_Update_UART_Baud
      (0xFF36) → chipset init script streaming (~40 chunks, ~200 ms)
      → Read_BD_ADDR → Write_Scan_Enable → `HCI_STATE_WORKING`.
-3. Console prints `HCI working, BD_ADDR ...` and the Hub becomes
-   discoverable + connectable.
+3. `HCI working, BD_ADDR ...` is logged via syslog (advertising stays
+   off until the BT button enables it in Commit C).
+4. `btsensor stop` walks the teardown FSM through GAP off → RFCOMM
+   disconnect (when cid != 0) → sampler/tx deinit →
+   `hci_power_control(HCI_POWER_OFF)` → `BTSTACK_EVENT_STATE =
+   HCI_STATE_OFF` → `btstack_run_loop_trigger_exit()`.  Each pending
+   state has a 3 s watchdog.  After the run loop returns the daemon
+   calls `hci_close()` to reset btstack state so the next `start`
+   succeeds.
 
 ## SPP service
 

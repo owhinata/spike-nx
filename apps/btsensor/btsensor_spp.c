@@ -1,13 +1,13 @@
 /****************************************************************************
  * apps/btsensor/btsensor_spp.c
  *
- * SPIKE Prime Hub SPP server (Issue #52 Step D).
+ * SPIKE Prime Hub SPP server.
  *
  * Mirrors btstack's spp_counter example: L2CAP + RFCOMM + SDP stack,
  * SSP Just-Works pairing, fixed RFCOMM server channel announced over SDP
- * as "SPIKE IMU Stream".  The Step E sampler will hook into the RFCOMM
- * channel id captured from RFCOMM_EVENT_CHANNEL_OPENED to stream IMU
- * frames via rfcomm_send + RFCOMM_EVENT_CAN_SEND_NOW.
+ * as "SPIKE IMU Stream".  Issue #56 Commit B changes the default GAP
+ * posture to "discoverable+connectable OFF" so the daemon is silent at
+ * boot; the BT button (Commit C) toggles advertising on demand.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -15,6 +15,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <syslog.h>
 
 #include "bluetooth.h"
 #include "btstack_event.h"
@@ -27,7 +28,15 @@
 #include "hci.h"
 
 #include "btsensor_spp.h"
+#include "btsensor_tx.h"
 #include "imu_sampler.h"
+
+/* Defined in btsensor_main.c — let the daemon's teardown FSM observe
+ * RFCOMM open/close.  Forward-declared instead of pulled into a public
+ * header to keep the spp/main split intact.
+ */
+
+void btsensor_set_rfcomm_cid(uint16_t cid);
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -64,29 +73,24 @@ static void spp_packet_handler(uint8_t packet_type, uint16_t channel,
         switch (hci_event_packet_get_type(packet))
           {
             case HCI_EVENT_PIN_CODE_REQUEST:
-              /* Legacy pairing: reply with "0000".  Kept as a fallback for
-               * older hosts; SSP Just-Works is preferred.
-               */
-
               hci_event_pin_code_request_get_bd_addr(packet, addr);
-              printf("btsensor: legacy pairing with %s, replying with 0000\n",
+              syslog(LOG_INFO,
+                     "btsensor: legacy pairing with %s, replying 0000\n",
                      bd_addr_to_str(addr));
               gap_pin_code_response(addr, "0000");
               break;
 
             case HCI_EVENT_USER_CONFIRMATION_REQUEST:
-              /* SSP Just-Works: btstack auto-accepts when the IO capability
-               * is DISPLAY_YES_NO and we do nothing here.  Log the numeric
-               * value so the host dialog can be cross-checked.
-               */
-
-              printf("btsensor: SSP confirm (numeric %06" PRIu32 ") — auto accept\n",
+              syslog(LOG_INFO,
+                     "btsensor: SSP confirm (numeric %06" PRIu32
+                     ") — auto accept\n",
                      little_endian_read_32(packet, 8));
               break;
 
             case HCI_EVENT_SIMPLE_PAIRING_COMPLETE:
               hci_event_simple_pairing_complete_get_bd_addr(packet, addr);
-              printf("btsensor: SSP pairing with %s status 0x%02x\n",
+              syslog(LOG_INFO,
+                     "btsensor: SSP pairing with %s status 0x%02x\n",
                      bd_addr_to_str(addr),
                      hci_event_simple_pairing_complete_get_status(packet));
               break;
@@ -95,7 +99,8 @@ static void spp_packet_handler(uint8_t packet_type, uint16_t channel,
               rfcomm_event_incoming_connection_get_bd_addr(packet, addr);
               g_rfcomm_cid =
                   rfcomm_event_incoming_connection_get_rfcomm_cid(packet);
-              printf("btsensor: RFCOMM incoming cid=%u from %s\n",
+              syslog(LOG_INFO,
+                     "btsensor: RFCOMM incoming cid=%u from %s\n",
                      g_rfcomm_cid, bd_addr_to_str(addr));
               rfcomm_accept_connection(g_rfcomm_cid);
               break;
@@ -103,10 +108,12 @@ static void spp_packet_handler(uint8_t packet_type, uint16_t channel,
             case RFCOMM_EVENT_CHANNEL_OPENED:
               if (rfcomm_event_channel_opened_get_status(packet) != 0)
                 {
-                  printf("btsensor: RFCOMM open failed status 0x%02x\n",
+                  syslog(LOG_WARNING,
+                         "btsensor: RFCOMM open failed status 0x%02x\n",
                          rfcomm_event_channel_opened_get_status(packet));
                   g_rfcomm_cid = 0;
                   imu_sampler_set_rfcomm_cid(0, 0);
+                  btsensor_set_rfcomm_cid(0);
                 }
               else
                 {
@@ -114,20 +121,23 @@ static void spp_packet_handler(uint8_t packet_type, uint16_t channel,
                       rfcomm_event_channel_opened_get_rfcomm_cid(packet);
                   uint16_t mtu =
                       rfcomm_event_channel_opened_get_max_frame_size(packet);
-                  printf("btsensor: RFCOMM open cid=%u mtu=%u\n",
+                  syslog(LOG_INFO, "btsensor: RFCOMM open cid=%u mtu=%u\n",
                          g_rfcomm_cid, mtu);
                   imu_sampler_set_rfcomm_cid(g_rfcomm_cid, mtu);
+                  btsensor_set_rfcomm_cid(g_rfcomm_cid);
                 }
               break;
 
             case RFCOMM_EVENT_CHANNEL_CLOSED:
-              printf("btsensor: RFCOMM closed cid=%u\n", g_rfcomm_cid);
+              syslog(LOG_INFO, "btsensor: RFCOMM closed cid=%u\n",
+                     g_rfcomm_cid);
               g_rfcomm_cid = 0;
               imu_sampler_set_rfcomm_cid(0, 0);
+              btsensor_set_rfcomm_cid(0);
               break;
 
             case RFCOMM_EVENT_CAN_SEND_NOW:
-              imu_sampler_on_can_send_now();
+              btsensor_tx_on_can_send_now();
               break;
 
             default:
@@ -136,11 +146,9 @@ static void spp_packet_handler(uint8_t packet_type, uint16_t channel,
         break;
 
       case RFCOMM_DATA_PACKET:
-        /* Step D: log what the host sends so we can verify round-trip data.
-         * Step E will interpret Pybricks-style rate/reset control frames.
-         */
+        /* Commit D wires the ASCII command parser here. */
 
-        printf("btsensor: RFCOMM rx %u bytes\n", size);
+        syslog(LOG_DEBUG, "btsensor: RFCOMM rx %u bytes\n", size);
         break;
 
       default:
@@ -166,9 +174,7 @@ void spp_server_init(void)
   rfcomm_register_service(&spp_packet_handler, BTSENSOR_SPP_RFCOMM_CHANNEL,
                           0xffff);
 
-  /* Build and register the SPP SDP record advertising our channel number
-   * + "SPIKE IMU Stream" service name.
-   */
+  /* Build and register the SPP SDP record. */
 
   sdp_init();
   memset(g_sdp_record_buffer, 0, sizeof(g_sdp_record_buffer));
@@ -178,12 +184,14 @@ void spp_server_init(void)
                         BTSENSOR_SPP_SERVICE_NAME);
   sdp_register_service(g_sdp_record_buffer);
 
-  /* GAP: device identity + SSP Just-Works pairing. */
+  /* GAP: device identity + SSP Just-Works pairing.  Discoverable and
+   * connectable stay OFF — the BT button (Commit C) flips them on.
+   */
 
   gap_set_class_of_device(BTSENSOR_CLASS_OF_DEVICE);
   gap_set_local_name(BTSENSOR_SPP_LOCAL_NAME);
-  gap_discoverable_control(1);
-  gap_connectable_control(1);
+  gap_discoverable_control(0);
+  gap_connectable_control(0);
   gap_ssp_set_io_capability(SSP_IO_CAPABILITY_DISPLAY_YES_NO);
   gap_set_security_level(LEVEL_2);
 }

@@ -12,6 +12,7 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -53,6 +54,17 @@
 static bool            g_exit_requested;
 static volatile bool   g_trigger_event;
 static struct timespec g_start_ts;
+
+/* Cross-thread callbacks land on btstack_run_loop_base_callbacks via
+ * execute_on_main_thread().  The btstack-provided list itself is not
+ * thread-safe; serialise enqueue/dequeue with this mutex so an NSH
+ * context posting a teardown_kick cannot tear the list while the run
+ * loop is iterating it.  Held only across the linked-list operation —
+ * the user callback runs unlocked so it may itself post further
+ * cross-thread work without deadlocking.
+ */
+
+static pthread_mutex_t g_callback_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /****************************************************************************
  * Private Helpers
@@ -202,10 +214,30 @@ static void run_loop_nuttx_execute(void)
           btstack_run_loop_base_poll_data_sources();
         }
 
-      /* Expired timers + callbacks queued via execute_on_main_thread. */
+      /* Expired timers. */
 
       btstack_run_loop_base_process_timers(run_loop_nuttx_get_time_ms());
-      btstack_run_loop_base_execute_callbacks();
+
+      /* Cross-thread callbacks queued via execute_on_main_thread.  Pop
+       * one at a time under the lock and invoke unlocked so the
+       * callback may itself post further work.
+       */
+
+      while (1)
+        {
+          pthread_mutex_lock(&g_callback_lock);
+          btstack_context_callback_registration_t *cbr =
+              (btstack_context_callback_registration_t *)
+                  btstack_linked_list_pop(&btstack_run_loop_base_callbacks);
+          pthread_mutex_unlock(&g_callback_lock);
+
+          if (cbr == NULL)
+            {
+              break;
+            }
+
+          (*cbr->callback)(cbr->context);
+        }
     }
 }
 
@@ -217,7 +249,9 @@ static void run_loop_nuttx_poll_data_sources_from_irq(void)
 static void run_loop_nuttx_execute_on_main_thread(
     btstack_context_callback_registration_t *callback_registration)
 {
+  pthread_mutex_lock(&g_callback_lock);
   btstack_run_loop_base_add_callback(callback_registration);
+  pthread_mutex_unlock(&g_callback_lock);
   g_trigger_event = true;
 }
 

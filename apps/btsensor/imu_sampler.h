@@ -1,11 +1,10 @@
 /****************************************************************************
  * apps/btsensor/imu_sampler.h
  *
- * LSM6DS3TR-C → RFCOMM streaming for the SPIKE Prime Hub SPP app
- * (Issue #52 Step E).  Opens the uORB accel + gyro feeds, pairs incoming
- * samples into batches (Kconfig default 8 samples; 1..80 supported) and
- * pushes them out over an RFCOMM channel as the SPP server announces
- * one open.
+ * LSM6DS3TR-C uORB -> RFCOMM frame producer.  Reads paired raw int16
+ * accel + gyro samples from /dev/uorb/sensor_imu0 (Issue #56 Commit A),
+ * batches them into a fixed-size IMU frame, and hands each completed
+ * frame to btsensor_tx for arbitrated send.
  ****************************************************************************/
 
 #ifndef __APPS_BTSENSOR_IMU_SAMPLER_H
@@ -17,9 +16,9 @@
 extern "C" {
 #endif
 
-/* Wire-format frame header that leads every SPP payload.  Up to 80 samples
- * (Kconfig default 8) at sizeof(imu_sample_s) = 12 byte follow.  Values are
- * little-endian.
+/* Wire-format frame header magic and type.  Reshaped in Commit E to
+ * embed FSR + per-sample ts_delta; for Commit A/B these mirror the
+ * existing layout so PC scripts keep parsing.
  */
 
 #define BTSENSOR_FRAME_MAGIC       0xA55A
@@ -33,22 +32,27 @@ extern "C" {
 
 void imu_sampler_configure(uint8_t batch);
 
-/* Register the uORB accel + gyro file descriptors as btstack data
- * sources, initialise the frame ring and hook us up to the btstack run
- * loop.  Must be called after btstack_run_loop_init().
+/* Open /dev/uorb/sensor_imu0 and register it as a btstack data source.
+ * Must be called after btstack_run_loop_init().  Returns 0 on success
+ * or a negated errno; on failure the data source is not registered and
+ * subsequent set_rfcomm_cid / on_can_send_now calls are no-ops.
  */
 
-int imu_sampler_init(void);
+int  imu_sampler_init(void);
 
-/* Called from the SPP packet handler whenever RFCOMM_EVENT_CHANNEL_OPENED
- * or RFCOMM_EVENT_CHANNEL_CLOSED arrives.  Pass cid=0 on close.
+/* Reverse of imu_sampler_init(): remove the data source, close the fd,
+ * and reset internal state so the next init() starts clean.  Safe to
+ * call from the BTstack main thread; not safe from interrupt context.
+ */
+
+void imu_sampler_deinit(void);
+
+/* Notify the sampler that the RFCOMM channel is open (cid != 0) or
+ * closed (cid == 0).  Forwarded to btsensor_tx so the arbiter knows
+ * where to send.
  */
 
 void imu_sampler_set_rfcomm_cid(uint16_t rfcomm_cid, uint16_t mtu);
-
-/* Called from the SPP packet handler on RFCOMM_EVENT_CAN_SEND_NOW. */
-
-void imu_sampler_on_can_send_now(void);
 
 #if defined __cplusplus
 }
