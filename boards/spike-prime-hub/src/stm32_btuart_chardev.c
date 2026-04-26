@@ -224,6 +224,9 @@ static int btuart_cdev_ioctl(FAR struct file *filep, int cmd,
 
         return priv->lower->setbaud(priv->lower, (uint32_t)arg);
 
+      case BTUART_IOC_CHIPRESET:
+        return stm32_bluetooth_chip_reset();
+
       default:
         return -ENOTTY;
     }

@@ -19,6 +19,7 @@
 
 #include <nuttx/config.h>
 
+#include <errno.h>
 #include <stdint.h>
 #include <debug.h>
 
@@ -132,6 +133,37 @@ int stm32_bluetooth_initialize(void)
 FAR struct btuart_lowerhalf_s *stm32_btuart_lower(void)
 {
   return g_bt_lower;
+}
+
+/****************************************************************************
+ * Name: stm32_bluetooth_chip_reset
+ *
+ * Description:
+ *   Pulse nSHUTD low/high to force the CC2564C through a fresh ROM boot.
+ *   Slow clock and the USART2 lower-half / chardev set up by
+ *   stm32_bluetooth_initialize() are left untouched — only the chip
+ *   itself is reset.  Use this between btstack sessions (i.e. before
+ *   each `btsensor start` after a previous `stop`); without it the
+ *   chip retains its post-init-script state and the next btstack
+ *   bring-up silently fails to reach HCI_STATE_WORKING.
+ *
+ * Returned Value:
+ *   OK on success, -ENODEV if stm32_bluetooth_initialize() has not run.
+ *
+ ****************************************************************************/
+
+int stm32_bluetooth_chip_reset(void)
+{
+  if (g_bt_lower == NULL)
+    {
+      return -ENODEV;
+    }
+
+  stm32_gpiowrite(GPIO_BT_NSHUTD, false);
+  up_mdelay(BT_NSHUTD_LOW_MS);
+  stm32_gpiowrite(GPIO_BT_NSHUTD, true);
+  up_mdelay(BT_BOOT_SETTLE_MS);
+  return OK;
 }
 
 #endif /* CONFIG_STM32_USART2 */

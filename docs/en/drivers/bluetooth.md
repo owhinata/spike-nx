@@ -75,12 +75,21 @@ Matches pybricks `lib/pbio/platform/prime_hub/platform.c`.  TIM8 CH4
   can report POLLIN without perturbing the stream.
 - `stm32_btuart_chardev.c` — wraps the above lower-half as a POSIX
   character device at `/dev/ttyBT`.  Implements `read`/`write`/`poll`
-  and `ioctl(fd, BTUART_IOC_SETBAUD, baud)`.  `poll()` setup reports
-  POLLIN when the RX ring is non-empty and always-POLLOUT because the
-  lower-half write is blocking-DMA based.
-- `stm32_bluetooth.c` — nSHUTD toggle, slow clock start and chardev
-  registration only.  HCI reset / init script / baud switch are
-  delegated to btstack.
+  and two ioctls:
+    - `BTUART_IOC_SETBAUD` — change the UART baud
+    - `BTUART_IOC_CHIPRESET` — pulse CC2564C nSHUTD low/high so the
+      next `hci_init` sees a fresh chip.  Issue #56 follow-up:
+      btstack's `hci_power_off` leaves the chip in a post-init-script
+      state that the next session cannot drive back to
+      HCI_STATE_WORKING, so the daemon issues this ioctl on every
+      start.
+
+  `poll()` setup reports POLLIN when the RX ring is non-empty and
+  always-POLLOUT because the lower-half write is blocking-DMA based.
+- `stm32_bluetooth.c` — nSHUTD toggle, slow clock start, chardev
+  registration, and `stm32_bluetooth_chip_reset()` (the kernel-side
+  backend for `BTUART_IOC_CHIPRESET`).  HCI reset / init script /
+  baud switch are delegated to btstack.
 - `stm32_bt_slowclk.c` — TIM8 CH4 PWM (unchanged from Issue #47).
 
 ### User side (`apps/btsensor/port/`)

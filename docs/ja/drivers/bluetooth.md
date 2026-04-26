@@ -58,8 +58,11 @@ Issue #47 で構築した NuttX 標準 BT スタックは LE 専用で RFCOMM / 
 ### カーネル側 (`boards/spike-prime-hub/src/`)
 
 - `stm32_btuart.c` — `struct btuart_lowerhalf_s` 実装 (USART2 + DMA1 S6/S7)。RX は 512 byte 循環 DMA + USART IDLE IRQ 駆動、TX は blocking DMA。API として `stm32_btuart_rx_available()` (非破壊ペック) を export。
-- `stm32_btuart_chardev.c` — 上記 lower-half を `/dev/ttyBT` として POSIX chardev 化。`read`/`write`/`poll`/`ioctl` を実装。`ioctl(fd, BTUART_IOC_SETBAUD, baud)` で baud 変更。`poll()` 設定時は `rx_available > 0` で即 POLLIN 通知、POLLOUT は常時レディ。
-- `stm32_bluetooth.c` — nSHUTD 制御と slow clock 起動、chardev 登録のみ。HCI reset / init script / baud 切替は btstack に委譲。
+- `stm32_btuart_chardev.c` — 上記 lower-half を `/dev/ttyBT` として POSIX chardev 化。`read`/`write`/`poll`/`ioctl` を実装。
+  - `ioctl(fd, BTUART_IOC_SETBAUD, baud)` で baud 変更
+  - `ioctl(fd, BTUART_IOC_CHIPRESET, 0)` で CC2564C を nSHUTD パルスでリセット (Issue #56 follow-up: btstack `hci_power_off` 後はチップが post-init-script 状態に残り、次の `hci_init` で WORKING に到達しないため、btsensor デーモン起動毎にこの ioctl で chip を cold-boot 相当に戻す)
+  - `poll()` 設定時は `rx_available > 0` で即 POLLIN 通知、POLLOUT は常時レディ
+- `stm32_bluetooth.c` — nSHUTD 制御と slow clock 起動、chardev 登録、`stm32_bluetooth_chip_reset()` (上記 ioctl のバックエンド)。HCI reset / init script / baud 切替は btstack に委譲。
 - `stm32_bt_slowclk.c` — TIM8 CH4 PWM (Issue #47 から変更なし)。
 
 ### ユーザ側 (`apps/btsensor/port/`)

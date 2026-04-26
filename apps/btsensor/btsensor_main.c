@@ -36,6 +36,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <sys/ioctl.h>
+
+#include <arch/board/board_btuart.h>
 #include <arch/board/board_lsm6dsl.h>
 
 #include "btstack_config.h"
@@ -393,12 +396,20 @@ void btsensor_on_pairing_complete(uint8_t status)
   if (status != 0)
     {
       bt_enter_fail_blink();
+      return;
     }
 
-  /* Success is reflected when RFCOMM_EVENT_CHANNEL_OPENED arrives via
-   * btsensor_set_rfcomm_cid(); SSP completion alone doesn't mean the
-   * SPP service is up yet.
+  /* Issue #56 spec: "ペアリング成功で BT LED 点灯".  Flip to BT_PAIRED
+   * on SSP completion so the LED goes solid blue immediately, even
+   * before the PC opens the RFCOMM channel.  If RFCOMM is opened
+   * later, btsensor_set_rfcomm_cid() observes us already in BT_PAIRED
+   * and is a no-op for the LED state machine.
    */
+
+  if (g_bt_state == BT_ADVERTISING)
+    {
+      bt_enter_paired();
+    }
 }
 
 /****************************************************************************
@@ -456,6 +467,33 @@ static int btsensor_daemon(int argc, char **argv)
 
   g_ts_state    = TS_RUNNING;
   g_rfcomm_cid  = 0;
+
+  /* 0. Hard-reset the CC2564C via nSHUTD.  Without this the second
+   * `btsensor start` after a `stop` silently fails to reach
+   * HCI_STATE_WORKING because the chip retains its post-init-script
+   * state from the previous session.  Harmless on the very first
+   * start since the cold-boot pulse has already settled.
+   * BUILD_PROTECTED keeps board code out of the user image, so we
+   * reach the chip-reset GPIO sequence through a board-private ioctl.
+   */
+
+  {
+    int btfd = open(BOARD_BTUART_DEVPATH, O_RDWR);
+    if (btfd < 0)
+      {
+        syslog(LOG_WARNING, "btsensor: chip reset open(%s) errno %d\n",
+               BOARD_BTUART_DEVPATH, errno);
+      }
+    else
+      {
+        if (ioctl(btfd, BTUART_IOC_CHIPRESET, 0) < 0)
+          {
+            syslog(LOG_WARNING, "btsensor: BTUART_IOC_CHIPRESET errno %d\n",
+                   errno);
+          }
+        close(btfd);
+      }
+  }
 
   /* 1. Run loop. */
 

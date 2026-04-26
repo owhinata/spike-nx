@@ -34,4 +34,17 @@
 
 #define BTUART_IOC_SETBAUD     _BLUETOOTHIOC(0x40)
 
+/* ioctl(fd, BTUART_IOC_CHIPRESET, 0) — pulse nSHUTD low/high to force
+ * the CC2564C through a fresh ROM boot.  No argument; returns 0 on
+ * success or -ENODEV if the board-level bring-up has not run.
+ *
+ * Issue #56 follow-up: btstack `hci_power_off` leaves the CC2564C in
+ * a post-init-script state that the next btstack session cannot
+ * drive back to HCI_STATE_WORKING, so the daemon issues this ioctl
+ * before each `hci_init` to hand btstack a chip identical to the
+ * cold-boot state.
+ */
+
+#define BTUART_IOC_CHIPRESET   _BLUETOOTHIOC(0x41)
+
 #endif /* __BOARDS_SPIKE_PRIME_HUB_INCLUDE_BOARD_BTUART_H */

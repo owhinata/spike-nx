@@ -231,6 +231,15 @@ size_t stm32_btuart_rx_available(FAR const struct btuart_lowerhalf_s *lower);
 
 int stm32_bluetooth_initialize(void);
 
+/* Pulse nSHUTD low/high to force the CC2564C through a fresh ROM boot.
+ * Slow clock and the chardev set up by stm32_bluetooth_initialize()
+ * are kept untouched; only the chip itself is reset.  Call this before
+ * each `btsensor start` so a previous btstack session's chip state
+ * does not block the next bring-up from reaching HCI_STATE_WORKING.
+ */
+
+int stm32_bluetooth_chip_reset(void);
+
 /* Return the USART2 lower-half produced by stm32_bluetooth_initialize().
  * NULL until the bring-up has run successfully.
  */
