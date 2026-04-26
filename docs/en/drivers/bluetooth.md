@@ -43,6 +43,8 @@ Matches pybricks `lib/pbio/platform/prime_hub/platform.c`.  TIM8 CH4
 │  btsensor_main.c   NSH builtin, run-loop host              │
 │  btsensor_spp.c    L2CAP + RFCOMM + SDP + SSP Just-Works   │
 │  btsensor_tx.c     RFCOMM send arbiter (resp + frame ring) │
+│  btsensor_button.c BT button events (open /dev/btbutton)   │
+│  btsensor_led.c    BT LED helper (open /dev/rgbled0)       │
 │  imu_sampler.c     uORB sensor_imu -> RFCOMM streaming     │
 │  port/             btstack run loop + UART adapter         │
 └────────────┬───────────────────────────────────────────────┘
@@ -105,7 +107,22 @@ NuttX port of the btstack `port/` layer.  Written against
   `btsensor &` form into a long-lived daemon spawned with
   `task_create()`; `stop` walks an event-driven teardown FSM (GAP off
   → RFCOMM disconnect → sampler/tx deinit → HCI off → run loop exit),
-  each pending state guarded by a 3 s btstack-timer watchdog.
+  each pending state guarded by a 3 s btstack-timer watchdog.  Commit
+  C adds the **BT visibility state machine** (OFF / ADVERTISING /
+  FAIL_BLINK / PAIRED) and short / long press handlers that drive the
+  button (btsensor_button) and LED (btsensor_led) helpers.
+- `btsensor_button.c` — registers `/dev/btbutton` (kernel-side ADC
+  ladder polling) as a btstack data source; debounces short vs. long
+  press using `CONFIG_APP_BTSENSOR_BTN_LONG_PRESS_MS` (default
+  1500 ms).  Callbacks reach the BT state machine through
+  `btstack_run_loop_execute_on_main_thread()` so all transitions stay
+  on the run loop's single thread.
+- `btsensor_led.c` — wraps `/dev/rgbled0` (TLC5955) BT_B / BT_G /
+  BT_R channels (18 / 19 / 20).  Four modes: off, solid blue, slow
+  blue blink (`CONFIG_APP_BTSENSOR_LED_BLINK_PERIOD_MS`), and a
+  fail-pulse train (`CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS` toggles).
+  Animations are driven by btstack timers so they share the run
+  loop's cadence and stop cleanly during teardown.
 - `btsensor_spp.c` — L2CAP + RFCOMM + SDP setup, SPP SDP record, SSP
   Just-Works pairing, RFCOMM channel lifecycle handlers.  **Default
   GAP posture is discoverable=0 / connectable=0** — Commit C wires the
@@ -125,7 +142,7 @@ NuttX port of the btstack `port/` layer.  Written against
 
 ```
 nsh> btsensor start [batch]   # launch daemon (BT advertising stays off)
-nsh> btsensor status          # running / pid / rfcomm cid / frame stats
+nsh> btsensor status          # running / pid / bt state / rfcomm / stats
 nsh> btsensor stop            # asynchronous teardown (HCI off completes
                               # within ~3 s; watchdog forces exit)
 ```
@@ -135,6 +152,68 @@ frame).  Multiple-start is rejected with `already running`.  `stop`
 posts a teardown_kick callback via
 `btstack_run_loop_execute_on_main_thread()` so the FSM advances on the
 btstack main thread.
+
+## BT state machine
+
+```
+   OFF ──short/long press──▶ ADVERTISING ──pairing OK──▶ PAIRED
+                                  │                          │
+                                  │  pairing FAIL            │  long press
+                                  ▼                          ▼
+                             FAIL_BLINK ─auto──▶ OFF         OFF
+                                                              ▲
+                                  PAIRED ─link drop──▶ ADVERTISING
+```
+
+- States: `OFF`, `ADVERTISING`, `FAIL_BLINK`, `PAIRED`.  `status`
+  prints `bt: <state>`.
+- Short press: only OFF/FAIL_BLINK → ADVERTISING; no-op otherwise.
+- Long press: OFF/FAIL_BLINK → ADVERTISING, ADVERTISING → OFF,
+  PAIRED → RFCOMM disconnect + OFF.
+- LED: OFF=off, ADVERTISING=blue 1 Hz blink, PAIRED=solid blue,
+  FAIL_BLINK=`CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS` short blue
+  pulses (~150 ms × 2N).
+- Pairing completion routes through
+  `HCI_EVENT_SIMPLE_PAIRING_COMPLETE` (status≠0 → FAIL_BLINK); SPP
+  channel up routes through `RFCOMM_EVENT_CHANNEL_OPENED` → PAIRED.
+- All transitions run on the BTstack main thread (worker / shell
+  callers go through `btstack_run_loop_execute_on_main_thread()`).
+
+## EXTI0 / NVIC priority
+
+`stm32_bringup.c` step 9 sets
+`up_prioritize_irq(STM32_IRQ_EXTI0, NVIC_SYSH_PRIORITY_DEFAULT + 6 *
+NVIC_SYSH_PRIORITY_STEP) = 0xE0`, placing BUTTON_USER (PA0 EXTI0) in
+the ε layout's lowest peripheral band (alongside ADC and TLC5955) so
+the IRQ stays below BASEPRI and can call NuttX work-queue APIs
+freely.  See the NVIC table in `docs/{ja,en}/hardware/dma-irq.md`.
+
+## Self-pipe wake (run loop)
+
+`apps/btsensor/port/btstack_run_loop_nuttx.c` wakes the run loop on
+cross-thread `execute_on_main_thread()` calls via a **self-pipe**:
+- `pipe(p)` opened in init, both ends `O_NONBLOCK`.
+- `g_wake_lock` (pthread_mutex) protects the write side against the
+  open/close race during teardown.
+- The read side is registered as a btstack data source so the main
+  thread's poll() picks up the byte as POLLIN.
+- Callback enqueues write a single 'x' byte to wake the loop.
+
+This drops the cross-thread wake latency from up to
+`NUTTX_RUN_LOOP_MAX_WAIT_MS` (1 s) to a few hundred microseconds —
+essential for responsive button handling and short stop latency.
+
+## Known follow-up
+
+- **BT control button physical detection**:
+  `boards/spike-prime-hub/src/stm32_btbutton.c` polls the PA1 ADC
+  resistor ladder and exposes the BT button state at `/dev/btbutton`.
+  On the hardware tested for Issue #56 Commit C the ADC value did not
+  swing far enough on a button press to cleanly cross the
+  pybricks-ported threshold table, so the BT state machine receives
+  no reliable button events yet.  The pybricks
+  `g_ladder_dev1_levels` table and the PA1 wiring need a fresh look —
+  tracked as a follow-up to this commit.
 
 ## Bring-up sequence (btstack-driven)
 

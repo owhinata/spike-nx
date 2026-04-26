@@ -46,6 +46,8 @@
 
 #include "btstack_run_loop_nuttx.h"
 #include "btstack_uart_nuttx.h"
+#include "btsensor_button.h"
+#include "btsensor_led.h"
 #include "btsensor_spp.h"
 #include "btsensor_tx.h"
 #include "imu_sampler.h"
@@ -75,6 +77,19 @@ enum teardown_state
   TS_DONE,                /* run loop exit triggered */
 };
 
+/* BT visibility state machine driven by the BT button + pairing events.
+ * Default startup state is BT_OFF (HCI on but advertising / connectable
+ * both off — the BT button toggles them).
+ */
+
+enum bt_state
+{
+  BT_OFF = 0,
+  BT_ADVERTISING,
+  BT_FAIL_BLINK,
+  BT_PAIRED,
+};
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -100,6 +115,7 @@ static pthread_mutex_t g_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool   g_running;
 static int             g_daemon_pid = -1;
 static enum teardown_state g_ts_state = TS_RUNNING;
+static enum bt_state       g_bt_state = BT_OFF;
 
 /* Mirror of the active RFCOMM channel id, updated by btsensor_spp_*
  * callbacks.  The teardown FSM consults it to decide whether to issue
@@ -199,6 +215,8 @@ static void teardown_rfcomm_closed(void)
 static void teardown_sampler_off(void)
 {
   g_ts_state = TS_SAMPLER_DEINIT;
+  btsensor_button_deinit();
+  btsensor_led_deinit();
   imu_sampler_deinit();
   btsensor_tx_deinit();
   syslog(LOG_INFO, "btsensor: teardown HCI off\n");
@@ -212,6 +230,146 @@ static void teardown_finish(void)
   teardown_cancel_timer();
   g_ts_state = TS_DONE;
   btstack_run_loop_trigger_exit();
+}
+
+/****************************************************************************
+ * Private Functions — BT state machine
+ ****************************************************************************/
+
+#ifndef CONFIG_APP_BTSENSOR_LED_BLINK_PERIOD_MS
+#  define CONFIG_APP_BTSENSOR_LED_BLINK_PERIOD_MS  1000
+#endif
+#ifndef CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS
+#  define CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS      3
+#endif
+
+static const char *bt_state_name(enum bt_state s)
+{
+  switch (s)
+    {
+      case BT_OFF:         return "off";
+      case BT_ADVERTISING: return "advertising";
+      case BT_FAIL_BLINK:  return "fail_blink";
+      case BT_PAIRED:      return "paired";
+      default:             return "?";
+    }
+}
+
+static void bt_enter_off(void)
+{
+  syslog(LOG_INFO, "btsensor: BT off (was %s)\n",
+         bt_state_name(g_bt_state));
+  g_bt_state = BT_OFF;
+  gap_discoverable_control(0);
+  gap_connectable_control(0);
+  btsensor_led_off();
+}
+
+static void bt_enter_advertising(void)
+{
+  syslog(LOG_INFO, "btsensor: BT advertising (was %s)\n",
+         bt_state_name(g_bt_state));
+  g_bt_state = BT_ADVERTISING;
+  gap_connectable_control(1);
+  gap_discoverable_control(1);
+  btsensor_led_blink_blue(CONFIG_APP_BTSENSOR_LED_BLINK_PERIOD_MS);
+}
+
+static void bt_enter_paired(void)
+{
+  syslog(LOG_INFO, "btsensor: BT paired (was %s)\n",
+         bt_state_name(g_bt_state));
+  g_bt_state = BT_PAIRED;
+
+  /* Stop being discoverable once we have a session — pybricks does the
+   * same.  Keep connectable on so a brief drop-and-reconnect just
+   * resumes streaming without the user having to press the button.
+   */
+
+  gap_discoverable_control(0);
+  btsensor_led_solid_blue();
+}
+
+static void bt_enter_fail_blink(void)
+{
+  syslog(LOG_WARNING, "btsensor: BT pairing failed (was %s)\n",
+         bt_state_name(g_bt_state));
+  g_bt_state = BT_FAIL_BLINK;
+  gap_discoverable_control(0);
+  gap_connectable_control(0);
+  btsensor_led_fail_blink(CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS);
+}
+
+/* Button events: short = "turn BT on" from any off-ish state.  long =
+ * "turn BT off" from any visible state, or also "turn BT on" from off
+ * (treated identically to short for OFF/FAIL_BLINK so the user does
+ * not have to discover the press-duration semantics for the on path).
+ */
+
+static void on_button_short(void)
+{
+  if (g_ts_state != TS_RUNNING)
+    {
+      return;
+    }
+
+  switch (g_bt_state)
+    {
+      case BT_OFF:
+      case BT_FAIL_BLINK:
+        bt_enter_advertising();
+        break;
+      default:
+        break;        /* short press is a no-op while ADV / PAIRED */
+    }
+}
+
+static void on_button_long(void)
+{
+  if (g_ts_state != TS_RUNNING)
+    {
+      return;
+    }
+
+  switch (g_bt_state)
+    {
+      case BT_OFF:
+      case BT_FAIL_BLINK:
+        bt_enter_advertising();
+        break;
+      case BT_ADVERTISING:
+        bt_enter_off();
+        break;
+      case BT_PAIRED:
+        if (g_rfcomm_cid != 0)
+          {
+            rfcomm_disconnect(g_rfcomm_cid);
+          }
+        bt_enter_off();
+        break;
+    }
+}
+
+/****************************************************************************
+ * Public Functions — pairing / link bridge
+ ****************************************************************************/
+
+void btsensor_on_pairing_complete(uint8_t status)
+{
+  if (g_ts_state != TS_RUNNING)
+    {
+      return;
+    }
+
+  if (status != 0)
+    {
+      bt_enter_fail_blink();
+    }
+
+  /* Success is reflected when RFCOMM_EVENT_CHANNEL_OPENED arrives via
+   * btsensor_set_rfcomm_cid(); SSP completion alone doesn't mean the
+   * SPP service is up yet.
+   */
 }
 
 /****************************************************************************
@@ -323,6 +481,21 @@ static int btsensor_daemon(int argc, char **argv)
                       "streaming disabled\n");
     }
 
+  /* 7. BT button + LED.  Wire callbacks before init so the IRQ does
+   * not arrive ahead of the dispatch table.
+   */
+
+  btsensor_button_set_callbacks(on_button_short, on_button_long);
+  if (btsensor_button_init() != 0)
+    {
+      syslog(LOG_WARNING, "btsensor: button init failed — BT will only "
+                          "be controllable from NSH\n");
+    }
+
+  btsensor_led_init();
+  g_bt_state = BT_OFF;
+  btsensor_led_off();
+
   /* 7. Power HCI on (radio active, but adv/connectable still off) and
    * enter the run loop.  cmd_stop() posts teardown_kick which walks
    * the FSM until btstack_run_loop_trigger_exit() returns us here.
@@ -360,7 +533,29 @@ static int btsensor_daemon(int argc, char **argv)
 
 void btsensor_set_rfcomm_cid(uint16_t cid)
 {
+  uint16_t prev = g_rfcomm_cid;
   g_rfcomm_cid = cid;
+
+  /* Drive the BT state machine on link up / down (only while the
+   * teardown FSM is idle — once stop is requested the LED + GAP are
+   * already being torn down by the daemon).
+   */
+
+  if (g_ts_state == TS_RUNNING)
+    {
+      if (cid != 0 && g_bt_state == BT_ADVERTISING)
+        {
+          bt_enter_paired();
+        }
+      else if (cid == 0 && g_bt_state == BT_PAIRED)
+        {
+          /* Link drop while we still want to be reachable — go back to
+           * advertising (LED resumes blinking).
+           */
+
+          bt_enter_advertising();
+        }
+    }
 
   /* If teardown is waiting for the RFCOMM channel to close, the cid=0
    * notification is our cue to advance to the next state.
@@ -370,6 +565,8 @@ void btsensor_set_rfcomm_cid(uint16_t cid)
     {
       teardown_rfcomm_closed();
     }
+
+  (void)prev;
 }
 
 /****************************************************************************
@@ -460,6 +657,7 @@ static int cmd_status(void)
   if (running)
     {
       printf("pid:        %d\n", pid);
+      printf("bt:         %s\n", bt_state_name(g_bt_state));
     }
 
   printf("rfcomm cid: %u\n", (unsigned)cid);

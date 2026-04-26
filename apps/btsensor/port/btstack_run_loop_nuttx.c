@@ -11,13 +11,16 @@
 #include <nuttx/config.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <syslog.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "btstack_run_loop.h"
 #include "btstack_run_loop_base.h"
@@ -31,11 +34,17 @@
  ****************************************************************************/
 
 /* poll(2) is our per-iteration wait primitive.  Hard upper bound on the
- * number of fds the run loop will watch.  btsensor needs one for
- * /dev/ttyBT; the extra slot is future-proofing for a Step E IMU fd.
+ * number of fds the run loop will watch.  Sized for the post-Commit-C
+ * btsensor fd set:
+ *   1. /dev/ttyBT  (HCI transport via btstack_uart_nuttx)
+ *   2. /dev/uorb/sensor_imu0  (IMU sampler data source)
+ *   3. /dev/buttons  (BT button)
+ *   4. self-pipe wake (cross-thread execute_on_main_thread)
+ * with two slots of headroom for follow-up work (Commit D RFCOMM rx
+ * notifications etc.).
  */
 
-#define NUTTX_RUN_LOOP_MAX_FDS     4
+#define NUTTX_RUN_LOOP_MAX_FDS     8
 
 /* Maximum time poll() is allowed to sleep without any timer or fd event.
  * With the /dev/ttyBT chardev deferring poll_notify() to HPWORK (mirroring
@@ -65,6 +74,20 @@ static struct timespec g_start_ts;
  */
 
 static pthread_mutex_t g_callback_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Self-pipe wake (Issue #56 Commit C).  execute_on_main_thread() writes
+ * a single byte to g_wake_wfd, which the run loop's poll() picks up as
+ * POLLIN on g_wake_rfd and drains.  This drops the cross-thread wake
+ * latency from up to NUTTX_RUN_LOOP_MAX_WAIT_MS (1 s) to a few hundred
+ * microseconds — essential for responsive BT button handling and short
+ * teardown latency.  g_wake_lock guards open/close vs. write() to
+ * prevent NSH context from writing to a stale fd during teardown.
+ */
+
+static pthread_mutex_t       g_wake_lock = PTHREAD_MUTEX_INITIALIZER;
+static int                   g_wake_rfd  = -1;
+static int                   g_wake_wfd  = -1;
+static btstack_data_source_t g_wake_ds;
 
 /****************************************************************************
  * Private Helpers
@@ -96,12 +119,69 @@ static uint32_t run_loop_nuttx_get_time_ms(void)
  * btstack_run_loop_t callbacks
  ****************************************************************************/
 
+static void wake_process(btstack_data_source_t *ds,
+                         btstack_data_source_callback_type_t type)
+{
+  (void)ds;
+  (void)type;
+  char drain[16];
+  while (read(g_wake_rfd, drain, sizeof(drain)) > 0)
+    {
+      /* Just drain — the wake is the signal; the actual work was queued
+       * on btstack_run_loop_base_callbacks before the byte was written.
+       */
+    }
+}
+
 static void run_loop_nuttx_init(void)
 {
   btstack_run_loop_base_init();
   clock_gettime(CLOCK_MONOTONIC, &g_start_ts);
   g_exit_requested = false;
   g_trigger_event  = false;
+
+  /* Recreate the self-pipe on every init() so a stop/start cycle
+   * starts with fresh fds.  Old fds are closed defensively in case a
+   * previous run left them open.
+   */
+
+  pthread_mutex_lock(&g_wake_lock);
+  if (g_wake_rfd >= 0)
+    {
+      close(g_wake_rfd);
+      g_wake_rfd = -1;
+    }
+
+  if (g_wake_wfd >= 0)
+    {
+      close(g_wake_wfd);
+      g_wake_wfd = -1;
+    }
+
+  int p[2];
+  if (pipe(p) == 0)
+    {
+      fcntl(p[0], F_SETFL, O_NONBLOCK);
+      fcntl(p[1], F_SETFL, O_NONBLOCK);
+      g_wake_rfd = p[0];
+      g_wake_wfd = p[1];
+    }
+  else
+    {
+      syslog(LOG_ERR, "btstack_run_loop_nuttx: pipe() failed errno=%d\n",
+             errno);
+    }
+
+  pthread_mutex_unlock(&g_wake_lock);
+
+  if (g_wake_rfd >= 0)
+    {
+      btstack_run_loop_set_data_source_fd(&g_wake_ds, g_wake_rfd);
+      btstack_run_loop_set_data_source_handler(&g_wake_ds, wake_process);
+      btstack_run_loop_add_data_source(&g_wake_ds);
+      btstack_run_loop_enable_data_source_callbacks(
+          &g_wake_ds, DATA_SOURCE_CALLBACK_READ);
+    }
 }
 
 static void run_loop_nuttx_set_timer(btstack_timer_source_t *ts,
@@ -239,6 +319,30 @@ static void run_loop_nuttx_execute(void)
           (*cbr->callback)(cbr->context);
         }
     }
+
+  /* Run loop exited — release the self-pipe.  Held under g_wake_lock
+   * to keep a concurrent execute_on_main_thread() from writing to a
+   * stale fd; that caller will see g_wake_wfd < 0 and skip the write.
+   */
+
+  btstack_run_loop_disable_data_source_callbacks(
+      &g_wake_ds, DATA_SOURCE_CALLBACK_READ);
+  btstack_run_loop_remove_data_source(&g_wake_ds);
+
+  pthread_mutex_lock(&g_wake_lock);
+  if (g_wake_rfd >= 0)
+    {
+      close(g_wake_rfd);
+      g_wake_rfd = -1;
+    }
+
+  if (g_wake_wfd >= 0)
+    {
+      close(g_wake_wfd);
+      g_wake_wfd = -1;
+    }
+
+  pthread_mutex_unlock(&g_wake_lock);
 }
 
 static void run_loop_nuttx_poll_data_sources_from_irq(void)
@@ -252,7 +356,20 @@ static void run_loop_nuttx_execute_on_main_thread(
   pthread_mutex_lock(&g_callback_lock);
   btstack_run_loop_base_add_callback(callback_registration);
   pthread_mutex_unlock(&g_callback_lock);
-  g_trigger_event = true;
+
+  /* Wake the run loop via self-pipe.  EAGAIN means the pipe already
+   * has at least one queued byte, which is plenty — the run loop only
+   * needs to know there's work pending.
+   */
+
+  pthread_mutex_lock(&g_wake_lock);
+  if (g_wake_wfd >= 0)
+    {
+      char x = 'x';
+      (void)write(g_wake_wfd, &x, 1);
+    }
+
+  pthread_mutex_unlock(&g_wake_lock);
 }
 
 static void run_loop_nuttx_trigger_exit(void)

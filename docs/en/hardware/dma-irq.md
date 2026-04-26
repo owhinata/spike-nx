@@ -158,6 +158,7 @@ Compresses the pybricks **relative** priority order into the 0x80–0xE0 band (b
 | 0xD0 | 13 | USB VBUS EXTI9_5 (future) | base=6 | pending Issue #49 |
 | 0xE0 | 14 | ADC DMA2_S0 | base=7 (MEDIUM) | `stm32_bringup.c` (step 3) |
 | 0xE0 | 14 | TLC5955 SPI1 + DMA2_S2/S3 | base=7 (LOW) | `stm32_bringup.c` (step 2) |
+| 0xE0 | 14 | BUTTON_USER EXTI0 (BT control button) | n/a (NuttX-specific) | `stm32_bringup.c` (step 9, Issue #56) |
 | 0xF0 | 15 | PendSV, SysTick | base=15 | `stm32_bringup.c` (step 1) |
 
 !!! success "Why this was adopted"

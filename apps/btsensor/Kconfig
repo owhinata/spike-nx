@@ -47,4 +47,30 @@ config APP_BTSENSOR_RING_DEPTH
 		send worker.  Deeper rings tolerate longer RF stalls at
 		the cost of RAM.
 
+config APP_BTSENSOR_BTN_LONG_PRESS_MS
+	int "BT button long-press threshold (ms)"
+	default 1500
+	range 200 5000
+	---help---
+		Hold the BT button down at least this long for a
+		long-press event; shorter presses register as short.
+		Long press toggles BT off when paired or advertising;
+		short press starts advertising from BT off.
+
+config APP_BTSENSOR_LED_BLINK_PERIOD_MS
+	int "BT LED slow-blink period (ms)"
+	default 1000
+	range 100 3000
+	---help---
+		Period of the BT LED blink while advertising
+		(half on / half off).
+
+config APP_BTSENSOR_LED_FAIL_BLINKS
+	int "BT LED fail-blink pulse count"
+	default 3
+	range 1 10
+	---help---
+		Number of short blue blinks emitted when SSP pairing
+		fails before the LED returns to off.
+
 endif

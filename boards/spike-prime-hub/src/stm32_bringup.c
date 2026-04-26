@@ -59,6 +59,7 @@ int stm32_bringup(void)
    *         USB VBUS EXTI9_5            (future, Issue #49)
    *   0xE0  ADC DMA2_S0
    *         TLC5955 SPI1 + DMA2_S2/S3
+   *         BUTTON_USER EXTI0
    *   0xF0  PendSV, SysTick
    *
    * See docs/{ja,en}/hardware/dma-irq.md for the full rationale.
@@ -125,6 +126,14 @@ int stm32_bringup(void)
   up_prioritize_irq(STM32_IRQ_DMA1S7,
                     NVIC_SYSH_PRIORITY_DEFAULT + 2 * NVIC_SYSH_PRIORITY_STEP);
 #endif
+
+  /* step 9: BUTTON_USER (PA0 EXTI0, BT control button) at 0xE0.  Lives
+   * with ADC + TLC5955 in the lowest peripheral band — button events are
+   * rare and never time-critical, but the slot must stay below BASEPRI
+   * so the IRQ handler can call NuttX work-queue APIs (Issue #56).
+   */
+  up_prioritize_irq(STM32_IRQ_EXTI0,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 6 * NVIC_SYSH_PRIORITY_STEP);
 #endif
 
 #ifdef CONFIG_STM32_IWDG
@@ -232,6 +241,13 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: stm32_power_initialize() failed: %d\n", ret);
+    }
+
+  ret = stm32_btbutton_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_btbutton_initialize() failed: %d\n",
+             ret);
     }
 #endif
 

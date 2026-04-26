@@ -31,12 +31,14 @@
 #include "btsensor_tx.h"
 #include "imu_sampler.h"
 
-/* Defined in btsensor_main.c — let the daemon's teardown FSM observe
- * RFCOMM open/close.  Forward-declared instead of pulled into a public
- * header to keep the spp/main split intact.
+/* Defined in btsensor_main.c — let the daemon's teardown FSM and BT
+ * state machine observe RFCOMM open/close + SSP pairing completion.
+ * Forward-declared instead of pulled into a public header to keep the
+ * spp/main split intact.
  */
 
 void btsensor_set_rfcomm_cid(uint16_t cid);
+void btsensor_on_pairing_complete(uint8_t status);
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -88,11 +90,15 @@ static void spp_packet_handler(uint8_t packet_type, uint16_t channel,
               break;
 
             case HCI_EVENT_SIMPLE_PAIRING_COMPLETE:
-              hci_event_simple_pairing_complete_get_bd_addr(packet, addr);
-              syslog(LOG_INFO,
-                     "btsensor: SSP pairing with %s status 0x%02x\n",
-                     bd_addr_to_str(addr),
-                     hci_event_simple_pairing_complete_get_status(packet));
+              {
+                uint8_t status =
+                    hci_event_simple_pairing_complete_get_status(packet);
+                hci_event_simple_pairing_complete_get_bd_addr(packet, addr);
+                syslog(LOG_INFO,
+                       "btsensor: SSP pairing with %s status 0x%02x\n",
+                       bd_addr_to_str(addr), status);
+                btsensor_on_pairing_complete(status);
+              }
               break;
 
             case RFCOMM_EVENT_INCOMING_CONNECTION:

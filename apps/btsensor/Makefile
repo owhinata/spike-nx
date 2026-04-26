@@ -18,6 +18,9 @@ CSRCS  += imu_sampler.c
 # Single RFCOMM send arbiter (response queue + frame ring) — Issue #56 B.
 CSRCS  += btsensor_tx.c
 
+# BT button (PA0/EXTI0) + LED state machine helpers — Issue #56 Commit C.
+CSRCS  += btsensor_button.c btsensor_led.c
+
 # Pulled-in chipset init script (TI v1.4 service pack, eHCILL disabled —
 # originally from pybricks, see apps/btsensor/chipset/cc256x_init_script.c).
 CSRCS  += chipset/cc256x_init_script.c

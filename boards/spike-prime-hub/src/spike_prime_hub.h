@@ -35,7 +35,7 @@
 #define MAX_IRQBUTTON   BUTTON_USER
 #define NUM_IRQBUTTONS  1
 
-#define GPIO_BTN_USER   (GPIO_INPUT | GPIO_FLOAT | GPIO_EXTI | \
+#define GPIO_BTN_USER   (GPIO_INPUT | GPIO_PULLUP | GPIO_EXTI | \
                          GPIO_PORTA | GPIO_PIN0)
 
 /* IMU (LSM6DS3TR-C)
@@ -176,6 +176,7 @@ extern const uint16_t g_ladder_dev1_levels[8];
 int stm32_adc_dma_initialize(void);
 uint16_t stm32_adc_read(uint8_t rank);
 int stm32_power_initialize(void);
+int stm32_btbutton_initialize(void);
 #endif
 
 #ifdef CONFIG_BATTERY_GAUGE

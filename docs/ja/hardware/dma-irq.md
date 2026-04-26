@@ -158,6 +158,7 @@ pybricks の**相対優先順序**を 0x80–0xE0 の範囲 (BASEPRI 以下) に
 | 0xD0 | 13 | USB VBUS EXTI9_5 (将来) | base=6 | Issue #49 で設定予定 |
 | 0xE0 | 14 | ADC DMA2_S0 | base=7 (MEDIUM) | `stm32_bringup.c` (step 3) |
 | 0xE0 | 14 | TLC5955 SPI1 + DMA2_S2/S3 | base=7 (LOW) | `stm32_bringup.c` (step 2) |
+| 0xE0 | 14 | BUTTON_USER EXTI0 (BT 制御ボタン) | n/a (NuttX 固有) | `stm32_bringup.c` (step 9, Issue #56) |
 | 0xF0 | 15 | PendSV, SysTick | base=15 | `stm32_bringup.c` (step 1) |
 
 !!! success "採用理由"
