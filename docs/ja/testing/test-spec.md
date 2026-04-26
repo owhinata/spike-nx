@@ -485,14 +485,68 @@ Issue #52 で NuttX 標準 BT スタックを撤去し btstack + Classic BT SPP 
 - **後片付け**: 検証完了後、テスト側で `btsensor imu off` →
   `btsensor bt off` → `btsensor stop` を実行
 
+### H-6: test_bt_button_short_press `@interactive`
+
+- **目的**: BT ボタン短押しで BT 状態が off → advertising に遷移する
+- **セットアップ** (テストが自動実施): `reboot` → `btsensor start`、
+  status の `bt: off` を確認
+- **operator 操作**: BT ボタンを 1 秒未満で短押しして放す → ENTER
+- **判定**: `btsensor status` が 3 秒以内に `bt: advertising` を返し、
+  `dmesg` に `btsensor_button: short press` と
+  `btsensor: BT advertising (was off)` が出る
+
+### H-7: test_bt_button_long_press `@interactive`
+
+- **目的**: BT ボタン長押しで BT 状態が advertising → off に遷移する
+- **セットアップ** (テストが自動実施): `reboot` → `btsensor start` →
+  `btsensor bt on` (advertising 開始は NSH 経由なので、operator は
+  長押し 1 回だけで済む)
+- **operator 操作**: BT ボタンを 1 秒以上長押しして放す → ENTER
+- **判定**: `btsensor status` が 3 秒以内に `bt: off` を返し、
+  `dmesg` に `btsensor_button: long press` と
+  `btsensor: BT off (was advertising)` が出る
+
+### H-8: test_bt_rfcomm_command_suite `@interactive`
+
+半自動: ペアリングまでは operator、その後の ASCII コマンド
+(Issue #56 Commit D の `IMU` / `SET`) は pytest が RFCOMM 経由で
+自動検証する。
+
+- **目的**: 各 ASCII コマンドが正しく parse され、reply が RFCOMM で
+  返り、後続の IMU フレームヘッダに新パラメータが反映されること
+- **前提**: H-5 が合格、Linux ホストの bluetoothctl 利用可、テスト
+  プロセスに CAP_NET_RAW (sudo 実行か `setcap`)。AF_BLUETOOTH が
+  使えなければ自動 skip
+- **Hub 側セットアップ** (テストが自動実施): `reboot` →
+  `btsensor start` → `btsensor bt on`
+- **operator 操作**: `bluetoothctl` で 1 度ペアリング + trust →
+  ENTER (リンクキーが既にあれば skip 可)
+- **pytest connect**: `BTPROTO_RFCOMM` ソケットを `(bdaddr, 1)` に
+  接続し、`btsensor status` を polling して `bt: paired` 待ち
+- **Phase 1 — IMU off で SET が成功**: `SET ODR 416`、
+  `SET BATCH 16`、`SET ACCEL_FSR 4`、`SET GYRO_FSR 1000` 全てが
+  `OK` を返し、`btsensor status` が `odr=416Hz batch=16
+  accel_fsr=4g gyro_fsr=1000dps` を反映
+- **Phase 2 — 不正入力で ERR**: `SET BATCH 200` (1..80 範囲外)、
+  `SET FOO 1`、`BAD` がそれぞれ `ERR` で始まる行を返す
+- **Phase 3 — IMU ON でフレームヘッダ検証**: `IMU ON` が `OK` を返し、
+  約 2 秒分のバイトを受信して magic `0xB66B` を検出。最初の 18 byte
+  ヘッダを parse して `type=0x01` / `sample_count=16` /
+  `sample_rate_hz=416` / `accel_fsr_g=4` / `gyro_fsr_dps=1000` を確認
+- **Phase 4 — IMU on 中の SET は busy**: `SET ODR 833` の返答に
+  `busy` が含まれる
+- **Phase 5 — IMU OFF**: `OK` が返り、status が `imu: off`
+- **後片付け**: `btsensor imu off` → `btsensor bt off` → `btsensor stop`
+
 ### 実行コマンド例
 
 ```bash
 # 自動テストのみ (interactive 除外)
 .venv/bin/pytest tests/test_bt_spp.py -m "not interactive" -D /dev/tty.usbmodem01
 
-# PC 対話テストのみ
-.venv/bin/pytest tests/test_bt_spp.py::test_bt_pc_pair_and_stream -D /dev/tty.usbmodem01
+# ボタン操作 + RFCOMM 個別テスト (H-8 は AF_BLUETOOTH socket のため sudo)
+sudo -E .venv/bin/pytest tests/test_bt_spp.py::test_bt_button_short_press -D /dev/tty.usbmodem01
+sudo -E .venv/bin/pytest tests/test_bt_spp.py::test_bt_rfcomm_command_suite -D /dev/tty.usbmodem01
 ```
 
 ## テスト同期方式 (sendCommand)

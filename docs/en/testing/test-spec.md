@@ -489,14 +489,71 @@ stream automatically by reading `btsensor status` from the Hub.
 - **Cleanup**: the test issues `btsensor imu off`, `btsensor bt off`,
   `btsensor stop` once the checks complete
 
+### H-6: test_bt_button_short_press `@interactive`
+
+- **Goal**: a physical short press flips the BT state machine from
+  off to advertising
+- **Setup** (driven by the test): `reboot` → `btsensor start`,
+  status confirmed at `bt: off`
+- **Operator step**: short press the BT button (< 1 s), press ENTER
+- **Checks**: `btsensor status` shows `bt: advertising` within 3 s and
+  `dmesg` contains `btsensor_button: short press` followed by
+  `btsensor: BT advertising (was off)`
+
+### H-7: test_bt_button_long_press `@interactive`
+
+- **Goal**: a physical long press flips the BT state machine from
+  advertising to off
+- **Setup** (driven by the test): `reboot` → `btsensor start` →
+  `btsensor bt on` (advertising via NSH so the operator only does
+  one press)
+- **Operator step**: long press the BT button (≥ 1 s), press ENTER
+- **Checks**: `btsensor status` shows `bt: off` within 3 s and
+  `dmesg` contains `btsensor_button: long press` followed by
+  `btsensor: BT off (was advertising)`
+
+### H-8: test_bt_rfcomm_command_suite `@interactive`
+
+Semi-manual: operator pairs once, then pytest exercises every
+PC→Hub ASCII command (Issue #56 Commit D) and verifies that the
+parameter changes propagate into the live IMU stream header.
+
+- **Goal**: each ASCII command is parsed correctly, replies travel
+  back over RFCOMM, and the next IMU frame carries the new ODR /
+  batch / FSR fields
+- **Prerequisite**: H-5 passes; a Linux host with bluetoothctl and
+  CAP_NET_RAW for the test process (rerun with sudo if required;
+  the test skips automatically if AF_BLUETOOTH is unavailable)
+- **Hub-side setup** (driven by the test): `reboot` →
+  `btsensor start` → `btsensor bt on`
+- **Operator step**: pair (+ trust) the Hub once via `bluetoothctl`,
+  press ENTER (skip pairing if a link key is already in place)
+- **Pytest connect**: `BTPROTO_RFCOMM` socket to `(bdaddr, 1)`,
+  poll `btsensor status` until `bt: paired`
+- **Phase 1 — SET while IMU off (commands succeed)**:
+  `SET ODR 416`, `SET BATCH 16`, `SET ACCEL_FSR 4`, `SET GYRO_FSR 1000`
+  each return `OK`; `btsensor status` reflects `odr=416Hz batch=16
+  accel_fsr=4g gyro_fsr=1000dps`
+- **Phase 2 — invalid input (ERR replies)**: `SET BATCH 200` (out of
+  1..80), `SET FOO 1`, `BAD` each return a line starting with `ERR`
+- **Phase 3 — IMU ON + frame header validation**: `IMU ON` returns
+  `OK`; pytest drains ~2 s of frames, finds magic `0xB66B`, and
+  parses the first 18-byte header: `type=0x01`, `sample_count=16`,
+  `sample_rate_hz=416`, `accel_fsr_g=4`, `gyro_fsr_dps=1000`
+- **Phase 4 — SET while IMU on (busy)**: `SET ODR 833` returns a
+  reply containing `busy`
+- **Phase 5 — IMU OFF**: returns `OK`; status reflects `imu: off`
+- **Cleanup**: `btsensor imu off`, `btsensor bt off`, `btsensor stop`
+
 ### Example invocations
 
 ```bash
 # Regression only (exclude interactive)
 .venv/bin/pytest tests/test_bt_spp.py -m "not interactive" -D /dev/tty.usbmodem01
 
-# Manual PC test
-.venv/bin/pytest tests/test_bt_spp.py::test_bt_pc_pair_and_stream -D /dev/tty.usbmodem01
+# Manual button + RFCOMM tests (sudo for AF_BLUETOOTH socket on H-8)
+sudo -E .venv/bin/pytest tests/test_bt_spp.py::test_bt_button_short_press -D /dev/tty.usbmodem01
+sudo -E .venv/bin/pytest tests/test_bt_spp.py::test_bt_rfcomm_command_suite -D /dev/tty.usbmodem01
 ```
 
 ## Test Synchronization (sendCommand)
