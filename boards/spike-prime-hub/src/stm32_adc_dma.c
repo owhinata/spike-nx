@@ -15,7 +15,7 @@
  *   Rank 2: CH8  (PB0) - Battery temperature (NTC)
  *   Rank 3: CH3  (PA3) - USB charger current (IBUSBCH)
  *   Rank 4: CH14 (PC4) - Center button resistor ladder
- *   Rank 5: CH5  (PA1) - Left/Right/BT button resistor ladder
+ *   Rank 5: CH1  (PA1) - Left/Right/BT button resistor ladder
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -113,7 +113,7 @@ int stm32_adc_dma_initialize(void)
   stm32_configgpio(GPIO_ANALOG | GPIO_PORTB | GPIO_PIN0);  /* CH8  NTC */
   stm32_configgpio(GPIO_ANALOG | GPIO_PORTA | GPIO_PIN3);  /* CH3  IBUSBCH */
   stm32_configgpio(GPIO_ANALOG | GPIO_PORTC | GPIO_PIN4);  /* CH14 BTN_CTR */
-  stm32_configgpio(GPIO_ANALOG | GPIO_PORTA | GPIO_PIN1);  /* CH5  BTN_LRB */
+  stm32_configgpio(GPIO_ANALOG | GPIO_PORTA | GPIO_PIN1);  /* CH1  BTN_LRB */
 
   /* ADC clock prescaler: PCLK2/4 = 96/4 = 24 MHz */
 
@@ -140,24 +140,28 @@ int stm32_adc_dma_initialize(void)
            (SMPR_56CYCLES << (4 * 3)),   /* CH14 */
            STM32_ADC1_BASE + STM32_ADC_SMPR1_OFFSET);
 
-  putreg32((SMPR_56CYCLES << (3 * 3)) |  /* CH3 */
-           (SMPR_56CYCLES << (5 * 3)) |  /* CH5 */
+  putreg32((SMPR_56CYCLES << (1 * 3)) |  /* CH1 */
+           (SMPR_56CYCLES << (3 * 3)) |  /* CH3 */
            (SMPR_56CYCLES << (8 * 3)),   /* CH8 */
            STM32_ADC1_BASE + STM32_ADC_SMPR2_OFFSET);
 
-  /* Regular sequence: 6 conversions (L=5 in SQR1 bits [23:20])
-   * SQR3 [4:0]=CH10, [9:5]=CH11, [14:10]=CH8, [19:15]=CH3, [24:20]=CH14
-   * SQR2 [4:0]=CH5
+  /* Regular sequence: 6 conversions (L=5 in SQR1 bits [23:20]).
+   * SQR3 holds SQ1..SQ6, each in a 5-bit slot:
+   *   [4:0]=SQ1, [9:5]=SQ2, [14:10]=SQ3,
+   *   [19:15]=SQ4, [24:20]=SQ5, [29:25]=SQ6.
+   * SQR2 (SQ7..SQ12) is unused — leave at reset value 0.
    */
 
   putreg32((ADC_NUM_CHANNELS - 1) << 20,
            STM32_ADC1_BASE + STM32_ADC_SQR1_OFFSET);
 
-  putreg32((10 << 0) | (11 << 5) | (8 << 10) | (3 << 15) | (14 << 20),
+  putreg32((10 << 0)  |   /* SQ1: CH10 IBAT */
+           (11 << 5)  |   /* SQ2: CH11 VBAT */
+           (8  << 10) |   /* SQ3: CH8  NTC */
+           (3  << 15) |   /* SQ4: CH3  IBUSBCH */
+           (14 << 20) |   /* SQ5: CH14 BTN_CTR */
+           (1  << 25),    /* SQ6: CH1  BTN_LRB (PA1) */
            STM32_ADC1_BASE + STM32_ADC_SQR3_OFFSET);
-
-  putreg32(5 << 0,
-           STM32_ADC1_BASE + STM32_ADC_SQR2_OFFSET);
 
   /* DMA2 Stream0 Channel0: peripheral=ADC1_DR, memory=g_adc_dma_buf,
    * circular mode, 16-bit, memory increment.

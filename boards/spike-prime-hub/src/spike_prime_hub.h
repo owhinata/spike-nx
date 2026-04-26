@@ -171,7 +171,7 @@ extern const uint16_t g_ladder_dev1_levels[8];
 #define ADC_RANK_NTC          2   /* CH8  PB0: Battery temperature */
 #define ADC_RANK_IBUSBCH      3   /* CH3  PA3: USB charger current */
 #define ADC_RANK_BTN_CENTER   4   /* CH14 PC4: Center button */
-#define ADC_RANK_BTN_LRB      5   /* CH5  PA1: Left/Right/BT buttons */
+#define ADC_RANK_BTN_LRB      5   /* CH1  PA1: Left/Right/BT buttons */
 
 int stm32_adc_dma_initialize(void);
 uint16_t stm32_adc_read(uint8_t rank);

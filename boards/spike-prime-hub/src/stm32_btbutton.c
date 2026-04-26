@@ -110,19 +110,14 @@ static bool btbtn_sample_adc(void)
   uint16_t val   = stm32_adc_read(ADC_RANK_BTN_LRB);
   uint8_t  flags = resistor_ladder_decode(val, g_ladder_dev1_levels);
 
-  /* On the SPIKE Prime Hub the resistor ladder bit for the BT button
-   * is *cleared* when the button is pressed (the button shorts a pull
-   * out of the divider).  Idle reads as flags including CH2; pressing
-   * BT drops CH2 from the active set.  flags==0xff indicates a
-   * decoder error (out-of-range ADC) and is treated as released.
-   *
-   * NOTE (Issue #56 follow-up): empirical testing showed the PA1 ADC
-   * value oscillates around the CH2 threshold even at idle on this
-   * Hub variant, so the stm32_btbutton driver currently does not
-   * detect physical button presses reliably.  The BT state machine
-   * in apps/btsensor still relies on this path; investigation of
-   * the resistor-ladder threshold table / hardware wiring is tracked
-   * separately.
+  /* Pybricks convention (lib/pbio/drv/resistor_ladder/resistor_ladder.c
+   * + drv/button/button_resistor_ladder.c): a flag is *set* when the
+   * corresponding button is pressed (pressing connects the load
+   * resistor, dropping the divider voltage; the decoder maps the
+   * lower voltage to a flag bitmap that includes that channel).
+   * BT button is ladder DEV_1 / CH2.  flags==0xff indicates a
+   * decoder error (out-of-range ADC, all dividers shorted) and is
+   * treated as released.
    */
 
   if (flags == 0xff)
@@ -130,7 +125,7 @@ static bool btbtn_sample_adc(void)
       return false;
     }
 
-  return (flags & RLAD_CH2) == 0;
+  return (flags & RLAD_CH2) != 0;
 }
 
 static void btbtn_notify_locked(void)
