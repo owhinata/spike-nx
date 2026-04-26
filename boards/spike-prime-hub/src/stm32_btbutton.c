@@ -64,6 +64,7 @@ struct btbtn_dev_s
   bool             pressed;
   bool             pending;          /* candidate next level */
   uint8_t          pending_count;    /* consecutive samples matching pending */
+  bool             fresh;            /* state changed since last read() */
   uint32_t         openrefs;
   FAR struct pollfd *fds[BTBTN_NPOLLWAITERS];
 };
@@ -164,6 +165,7 @@ static void btbtn_work_handler(FAR void *arg)
         {
           g_btbtn.pressed       = sample;
           g_btbtn.pending_count = 0;
+          g_btbtn.fresh         = true;
           btbtn_notify_locked();
         }
     }
@@ -210,6 +212,8 @@ static ssize_t btbtn_read(FAR struct file *filep, FAR char *buffer,
 
   nxmutex_lock(&g_btbtn.lock);
   buffer[0] = g_btbtn.pressed ? 1 : 0;
+  g_btbtn.fresh = false;             /* consumed — no new POLLIN until
+                                      * the next state transition */
   nxmutex_unlock(&g_btbtn.lock);
   return 1;
 }
@@ -241,11 +245,15 @@ static int btbtn_poll(FAR struct file *filep, FAR struct pollfd *fds,
           goto out;
         }
 
-      /* Always assert POLLIN on setup so the caller drains the
-       * current state once, then waits for the next change.
+      /* Only assert POLLIN if the state has actually changed since the
+       * last read() — otherwise the run loop's poll() returns
+       * immediately on every iteration, busy-looping the CPU.
        */
 
-      poll_notify(&fds, 1, POLLIN);
+      if (g_btbtn.fresh)
+        {
+          poll_notify(&fds, 1, POLLIN);
+        }
     }
   else
     {

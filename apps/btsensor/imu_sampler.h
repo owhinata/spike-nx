@@ -35,14 +35,6 @@ extern "C" {
 #define BTSENSOR_HDR_SIZE          18
 #define BTSENSOR_SAMPLE_SIZE       16
 
-/* Override the runtime batch size (samples per RFCOMM frame) before
- * imu_sampler_init().  batch is clamped to [1, 80] (compile-time
- * upper bound for the per-frame sample buffer).  Lets the btsensor
- * entry point reconfigure via argv without rebuilding.
- */
-
-void imu_sampler_configure(uint8_t batch);
-
 /* Initialise the sampler module.  Does NOT start sampling — call
  * imu_sampler_set_enabled(true) (or have the PC send `IMU ON`) to
  * begin streaming.  Returns 0 on success.
@@ -78,6 +70,16 @@ int  imu_sampler_set_odr_hz(uint32_t hz);
 int  imu_sampler_set_batch(uint8_t n);
 int  imu_sampler_set_accel_fsr(uint32_t g);
 int  imu_sampler_set_gyro_fsr(uint32_t dps);
+
+/* Read current cache (mirrors the live driver state).  Returns the
+ * value matching the most recent successful set_*; defaults are 833 Hz
+ * / 8 g / 2000 dps / Kconfig batch.
+ */
+
+uint32_t imu_sampler_get_odr_hz(void);
+uint32_t imu_sampler_get_accel_fsr_g(void);
+uint32_t imu_sampler_get_gyro_fsr_dps(void);
+uint8_t  imu_sampler_get_batch(void);
 
 /* Notify the sampler that the RFCOMM channel is open (cid != 0) or
  * closed (cid == 0).  Forwarded to btsensor_tx so the arbiter knows

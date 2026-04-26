@@ -21,15 +21,22 @@
 
 #include <nuttx/config.h>
 
+#include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <semaphore.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
+
+#include <arch/board/board_lsm6dsl.h>
 
 #include "btstack_config.h"
 #include "btstack_debug.h"
@@ -124,10 +131,6 @@ static enum bt_state       g_bt_state = BT_OFF;
  */
 
 static uint16_t g_rfcomm_cid;
-
-/* Initial argv[1] (batch override) is consumed by the daemon entry. */
-
-static uint8_t g_pending_batch;
 
 /****************************************************************************
  * Private Functions — teardown FSM
@@ -301,53 +304,78 @@ static void bt_enter_fail_blink(void)
   btsensor_led_fail_blink(CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS);
 }
 
-/* Button events: short = "turn BT on" from any off-ish state.  long =
- * "turn BT off" from any visible state, or also "turn BT on" from off
- * (treated identically to short for OFF/FAIL_BLINK so the user does
- * not have to discover the press-duration semantics for the on path).
+/* BT visibility request — usable both from the button handlers and the
+ * `btsensor bt on/off` NSH dispatch.  `on=true` is "make discoverable"
+ * (no-op if already ADVERTISING / PAIRED); `on=false` is "go silent"
+ * (RFCOMM disconnect when paired, no-op if already OFF / FAIL_BLINK).
+ * Must be called on the BTstack main thread.  Returns 0 on success or
+ * -ENXIO if the daemon is in teardown.
+ */
+
+static int bt_visibility_request(bool on)
+{
+  if (g_ts_state != TS_RUNNING)
+    {
+      return -ENXIO;
+    }
+
+  if (on)
+    {
+      switch (g_bt_state)
+        {
+          case BT_OFF:
+          case BT_FAIL_BLINK:
+            bt_enter_advertising();
+            return 0;
+          case BT_ADVERTISING:
+          case BT_PAIRED:
+            return 0;       /* already visible / paired */
+        }
+    }
+  else
+    {
+      switch (g_bt_state)
+        {
+          case BT_ADVERTISING:
+            bt_enter_off();
+            return 0;
+          case BT_PAIRED:
+            if (g_rfcomm_cid != 0)
+              {
+                rfcomm_disconnect(g_rfcomm_cid);
+              }
+            bt_enter_off();
+            return 0;
+          case BT_OFF:
+          case BT_FAIL_BLINK:
+            return 0;       /* already silent */
+        }
+    }
+
+  return 0;
+}
+
+/* Button events.  Short press = "turn BT on" from any off-ish state.
+ * Long press = "toggle" (on if currently off, off if currently on).
  */
 
 static void on_button_short(void)
 {
-  if (g_ts_state != TS_RUNNING)
+  if (g_bt_state == BT_OFF || g_bt_state == BT_FAIL_BLINK)
     {
-      return;
-    }
-
-  switch (g_bt_state)
-    {
-      case BT_OFF:
-      case BT_FAIL_BLINK:
-        bt_enter_advertising();
-        break;
-      default:
-        break;        /* short press is a no-op while ADV / PAIRED */
+      bt_visibility_request(true);
     }
 }
 
 static void on_button_long(void)
 {
-  if (g_ts_state != TS_RUNNING)
+  if (g_bt_state == BT_OFF || g_bt_state == BT_FAIL_BLINK)
     {
-      return;
+      bt_visibility_request(true);
     }
-
-  switch (g_bt_state)
+  else
     {
-      case BT_OFF:
-      case BT_FAIL_BLINK:
-        bt_enter_advertising();
-        break;
-      case BT_ADVERTISING:
-        bt_enter_off();
-        break;
-      case BT_PAIRED:
-        if (g_rfcomm_cid != 0)
-          {
-            rfcomm_disconnect(g_rfcomm_cid);
-          }
-        bt_enter_off();
-        break;
+      bt_visibility_request(false);
     }
 }
 
@@ -425,13 +453,6 @@ static int btsensor_daemon(int argc, char **argv)
   (void)argv;
 
   syslog(LOG_INFO, "btsensor: bringing up btstack on /dev/ttyBT\n");
-
-  if (g_pending_batch > 0)
-    {
-      imu_sampler_configure(g_pending_batch);
-      syslog(LOG_INFO, "btsensor: configure batch=%u\n",
-             (unsigned)g_pending_batch);
-    }
 
   g_ts_state    = TS_RUNNING;
   g_rfcomm_cid  = 0;
@@ -572,31 +593,203 @@ void btsensor_set_rfcomm_cid(uint16_t cid)
 }
 
 /****************************************************************************
+ * Private Functions — NSH -> main-thread action dispatch
+ ****************************************************************************/
+
+/* Cross-thread action dispatch.  NSH-side commands (bt, imu, set) post
+ * a `btsensor_action_s` to the BTstack main thread via
+ * execute_on_main_thread() so the BT state machine and the IMU
+ * sampler stay single-threaded.  The NSH caller blocks on the
+ * action's semaphore (with a 3 s timeout to match the teardown
+ * watchdog) and reports the action's return value.
+ */
+
+enum btsensor_action_kind
+{
+  ACTION_BT_ON = 0,
+  ACTION_BT_OFF,
+  ACTION_IMU_ON,
+  ACTION_IMU_OFF,
+  ACTION_SET_ODR,
+  ACTION_SET_BATCH,
+  ACTION_SET_ACCEL_FSR,
+  ACTION_SET_GYRO_FSR,
+};
+
+/* Heap-allocated action struct with explicit ownership transfer
+ * between the waiter (NSH context) and the runner (BTstack main
+ * thread).  The struct outlives the dispatch_action() stack frame so
+ * a timed-out waiter cannot leave the runner with a dangling pointer
+ * — whichever side discovers the other has already finished frees
+ * the struct.
+ */
+
+struct btsensor_action_s
+{
+  enum btsensor_action_kind kind;
+  uint32_t                  arg;
+  int                       rc;
+  sem_t                     done;
+  pthread_mutex_t           lock;
+  bool                      runner_done;
+  bool                      waiter_gave_up;
+  btstack_context_callback_registration_t reg;
+};
+
+static void action_free(struct btsensor_action_s *a)
+{
+  sem_destroy(&a->done);
+  pthread_mutex_destroy(&a->lock);
+  free(a);
+}
+
+static void action_runner(void *ctx)
+{
+  struct btsensor_action_s *a = (struct btsensor_action_s *)ctx;
+
+  switch (a->kind)
+    {
+      case ACTION_BT_ON:
+        a->rc = bt_visibility_request(true);
+        break;
+      case ACTION_BT_OFF:
+        a->rc = bt_visibility_request(false);
+        break;
+      case ACTION_IMU_ON:
+        a->rc = imu_sampler_set_enabled(true);
+        break;
+      case ACTION_IMU_OFF:
+        a->rc = imu_sampler_set_enabled(false);
+        break;
+      case ACTION_SET_ODR:
+        a->rc = imu_sampler_set_odr_hz(a->arg);
+        break;
+      case ACTION_SET_BATCH:
+        a->rc = imu_sampler_set_batch((uint8_t)a->arg);
+        break;
+      case ACTION_SET_ACCEL_FSR:
+        a->rc = imu_sampler_set_accel_fsr(a->arg);
+        break;
+      case ACTION_SET_GYRO_FSR:
+        a->rc = imu_sampler_set_gyro_fsr(a->arg);
+        break;
+      default:
+        a->rc = -ENOSYS;
+        break;
+    }
+
+  pthread_mutex_lock(&a->lock);
+  a->runner_done    = true;
+  bool waiter_gone  = a->waiter_gave_up;
+  pthread_mutex_unlock(&a->lock);
+
+  if (waiter_gone)
+    {
+      action_free(a);                  /* waiter timed out — clean up */
+    }
+  else
+    {
+      sem_post(&a->done);              /* hand result back to waiter */
+    }
+}
+
+static int dispatch_action(enum btsensor_action_kind kind, uint32_t arg)
+{
+  pthread_mutex_lock(&g_lifecycle_lock);
+  bool running = g_daemon_pid > 0;
+  pthread_mutex_unlock(&g_lifecycle_lock);
+  if (!running)
+    {
+      return -ENOTCONN;
+    }
+
+  struct btsensor_action_s *a = calloc(1, sizeof(*a));
+  if (a == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  a->kind = kind;
+  a->arg  = arg;
+  a->rc   = -ETIMEDOUT;
+  pthread_mutex_init(&a->lock, NULL);
+  sem_init(&a->done, 0, 0);
+  a->reg.callback = action_runner;
+  a->reg.context  = a;
+
+  btstack_run_loop_execute_on_main_thread(&a->reg);
+
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += 3;
+  int wait_rc = sem_timedwait(&a->done, &ts);
+
+  pthread_mutex_lock(&a->lock);
+  bool runner_done = a->runner_done;
+  if (!runner_done)
+    {
+      a->waiter_gave_up = true;
+    }
+
+  int result = (wait_rc < 0) ? -ETIMEDOUT : a->rc;
+  pthread_mutex_unlock(&a->lock);
+
+  if (runner_done)
+    {
+      action_free(a);                  /* runner finished — we own it */
+    }
+  /* else: runner will free when it finishes (may be after we return) */
+
+  return result;
+}
+
+static void print_action_result(int rc)
+{
+  if (rc == 0)
+    {
+      printf("OK\n");
+    }
+  else if (rc == -EBUSY)
+    {
+      printf("ERR busy\n");
+    }
+  else if (rc == -EINVAL)
+    {
+      printf("ERR invalid value\n");
+    }
+  else if (rc == -ENOTCONN)
+    {
+      printf("btsensor: not running\n");
+    }
+  else if (rc == -ENXIO)
+    {
+      printf("btsensor: daemon is stopping\n");
+    }
+  else if (rc == -ETIMEDOUT)
+    {
+      printf("btsensor: action timed out\n");
+    }
+  else
+    {
+      printf("btsensor: rc=%d\n", rc);
+    }
+}
+
+/****************************************************************************
  * Private Functions — NSH builtins
  ****************************************************************************/
 
 static int cmd_start(int argc, char **argv)
 {
+  (void)argc;
+  (void)argv;
+
   pthread_mutex_lock(&g_lifecycle_lock);
   if (g_daemon_pid > 0)
     {
       pthread_mutex_unlock(&g_lifecycle_lock);
       printf("btsensor: already running (pid %d)\n", g_daemon_pid);
       return 1;
-    }
-
-  g_pending_batch = 0;
-  if (argc >= 3)
-    {
-      int batch = atoi(argv[2]);
-      if (batch < 1 || batch > 80)
-        {
-          pthread_mutex_unlock(&g_lifecycle_lock);
-          printf("btsensor: invalid batch=%d (allowed 1..80)\n", batch);
-          return 1;
-        }
-
-      g_pending_batch = (uint8_t)batch;
     }
 
   g_running = true;
@@ -660,6 +853,13 @@ static int cmd_status(void)
     {
       printf("pid:        %d\n", pid);
       printf("bt:         %s\n", bt_state_name(g_bt_state));
+      printf("imu:        %s\n",
+             imu_sampler_is_enabled() ? "on" : "off");
+      printf("config:     odr=%uHz batch=%u accel_fsr=%ug gyro_fsr=%udps\n",
+             (unsigned)imu_sampler_get_odr_hz(),
+             (unsigned)imu_sampler_get_batch(),
+             (unsigned)imu_sampler_get_accel_fsr_g(),
+             (unsigned)imu_sampler_get_gyro_fsr_dps());
     }
 
   printf("rfcomm cid: %u\n", (unsigned)cid);
@@ -668,13 +868,199 @@ static int cmd_status(void)
   return 0;
 }
 
+static int cmd_bt(int argc, char **argv)
+{
+  if (argc < 3)
+    {
+      printf("Usage: btsensor bt <on|off>\n");
+      return 1;
+    }
+
+  enum btsensor_action_kind kind;
+  if (strcmp(argv[2], "on") == 0)
+    {
+      kind = ACTION_BT_ON;
+    }
+  else if (strcmp(argv[2], "off") == 0)
+    {
+      kind = ACTION_BT_OFF;
+    }
+  else
+    {
+      printf("btsensor: invalid bt arg '%s' (expected on|off)\n", argv[2]);
+      return 1;
+    }
+
+  print_action_result(dispatch_action(kind, 0));
+  return 0;
+}
+
+static int cmd_imu(int argc, char **argv)
+{
+  if (argc < 3)
+    {
+      printf("Usage: btsensor imu <on|off>\n");
+      return 1;
+    }
+
+  enum btsensor_action_kind kind;
+  if (strcmp(argv[2], "on") == 0)
+    {
+      kind = ACTION_IMU_ON;
+    }
+  else if (strcmp(argv[2], "off") == 0)
+    {
+      kind = ACTION_IMU_OFF;
+    }
+  else
+    {
+      printf("btsensor: invalid imu arg '%s' (expected on|off)\n",
+             argv[2]);
+      return 1;
+    }
+
+  print_action_result(dispatch_action(kind, 0));
+  return 0;
+}
+
+static int cmd_dump(int argc, char **argv)
+{
+  /* Default 1 s if no duration given.  Independent of `btsensor start`
+   * — opens the uORB topic directly so the kernel driver
+   * auto-activates if no other subscriber is around (and stays active
+   * if one is).  We never write to RFCOMM here; this is the local
+   * "no PC" path the user asked for.
+   */
+
+  uint32_t duration_ms = 1000;
+  if (argc >= 3)
+    {
+      long v = strtol(argv[2], NULL, 10);
+      if (v < 0 || v > 60000)
+        {
+          printf("btsensor: invalid duration_ms (allowed 0..60000)\n");
+          return 1;
+        }
+
+      duration_ms = (uint32_t)v;
+    }
+
+  int fd = open("/dev/uorb/sensor_imu0", O_RDONLY | O_NONBLOCK);
+  if (fd < 0)
+    {
+      printf("btsensor: open sensor_imu0 errno=%d\n", errno);
+      return 1;
+    }
+
+  printf("# ts_us ax ay az gx gy gz (raw int16, chip frame)\n");
+
+  struct timespec t0;
+  clock_gettime(CLOCK_BOOTTIME, &t0);
+  uint64_t deadline_us = (uint64_t)t0.tv_sec * 1000000ULL +
+                         (uint64_t)t0.tv_nsec / 1000ULL +
+                         (uint64_t)duration_ms * 1000ULL;
+
+  uint32_t printed = 0;
+  while (1)
+    {
+      struct timespec now;
+      clock_gettime(CLOCK_BOOTTIME, &now);
+      uint64_t now_us = (uint64_t)now.tv_sec * 1000000ULL +
+                        (uint64_t)now.tv_nsec / 1000ULL;
+      if (now_us >= deadline_us)
+        {
+          break;
+        }
+
+      int ms_left = (int)((deadline_us - now_us) / 1000ULL);
+      if (ms_left <= 0)
+        {
+          break;
+        }
+
+      struct pollfd pfd = { .fd = fd, .events = POLLIN };
+      int pret = poll(&pfd, 1, ms_left);
+      if (pret <= 0)
+        {
+          continue;
+        }
+
+      struct sensor_imu s;
+      while (read(fd, &s, sizeof(s)) == sizeof(s))
+        {
+          printf("%u %d %d %d %d %d %d\n",
+                 (unsigned)s.timestamp,
+                 s.ax, s.ay, s.az, s.gx, s.gy, s.gz);
+          printed++;
+        }
+    }
+
+  close(fd);
+  printf("# %u sample(s) over %u ms\n",
+         (unsigned)printed, (unsigned)duration_ms);
+  return 0;
+}
+
+static int cmd_set(int argc, char **argv)
+{
+  if (argc < 4)
+    {
+      printf("Usage: btsensor set <odr|batch|accel_fsr|gyro_fsr> <value>\n");
+      return 1;
+    }
+
+  enum btsensor_action_kind kind;
+  if (strcmp(argv[2], "odr") == 0)
+    {
+      kind = ACTION_SET_ODR;
+    }
+  else if (strcmp(argv[2], "batch") == 0)
+    {
+      kind = ACTION_SET_BATCH;
+    }
+  else if (strcmp(argv[2], "accel_fsr") == 0)
+    {
+      kind = ACTION_SET_ACCEL_FSR;
+    }
+  else if (strcmp(argv[2], "gyro_fsr") == 0)
+    {
+      kind = ACTION_SET_GYRO_FSR;
+    }
+  else
+    {
+      printf("btsensor: invalid set field '%s'\n", argv[2]);
+      return 1;
+    }
+
+  long val = strtol(argv[3], NULL, 10);
+  if (val < 0)
+    {
+      printf("btsensor: invalid value\n");
+      return 1;
+    }
+
+  print_action_result(dispatch_action(kind, (uint32_t)val));
+  return 0;
+}
+
 static void print_usage(void)
 {
   printf("Usage: btsensor <command>\n");
   printf("Commands:\n");
-  printf("  start [batch]  - launch daemon (default BT adv off)\n");
-  printf("  stop           - request teardown\n");
-  printf("  status         - print state\n");
+  printf("  start                       launch daemon (BT/IMU both off)\n");
+  printf("  stop                        request teardown\n");
+  printf("  status                      print full state + current config\n");
+  printf("  bt    <on|off>              start/stop BT advertising (default off)\n");
+  printf("  imu   <on|off>              start/stop IMU sampling (default off)\n");
+  printf("  dump  [ms]                  dump raw IMU samples for ms (default 1000)\n");
+  printf("  set   odr        <hz>       ODR  13|26|52|104|208|416|833|1660|3330|6660 (default 833)\n");
+  printf("  set   batch      <n>        samples/frame 1..%d (default %d)\n",
+         80, CONFIG_APP_BTSENSOR_BATCH);
+  printf("  set   accel_fsr  <g>        accel FSR 2|4|8|16 (default 8)\n");
+  printf("  set   gyro_fsr   <dps>      gyro FSR  125|250|500|1000|2000 (default 2000)\n");
+  printf("Note: bt/imu/dump/set require `start` first (except dump can\n");
+  printf("      auto-activate the driver standalone).  set * are\n");
+  printf("      rejected with `ERR busy` while imu is on.\n");
 }
 
 /****************************************************************************
@@ -702,6 +1088,26 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "status") == 0)
     {
       return cmd_status();
+    }
+
+  if (strcmp(argv[1], "bt") == 0)
+    {
+      return cmd_bt(argc, argv);
+    }
+
+  if (strcmp(argv[1], "imu") == 0)
+    {
+      return cmd_imu(argc, argv);
+    }
+
+  if (strcmp(argv[1], "set") == 0)
+    {
+      return cmd_set(argc, argv);
+    }
+
+  if (strcmp(argv[1], "dump") == 0)
+    {
+      return cmd_dump(argc, argv);
     }
 
   print_usage();

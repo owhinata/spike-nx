@@ -40,14 +40,6 @@
 
 #define BTN_DEVPATH         "/dev/btbutton"
 
-/* Period of the polling tick that samples /dev/btbutton.  POLLIN from
- * the kernel-side BT button monitor wakes the run loop too, but a
- * 50 ms polling tick gives a safety net while keeping the per-tick
- * I/O cost negligible.
- */
-
-#define BTN_POLL_PERIOD_MS  50
-
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -58,7 +50,6 @@ static btsensor_button_cb_t g_on_long;
 static int                    g_fd = -1;
 static btstack_data_source_t  g_btn_ds;
 static btstack_timer_source_t g_long_timer;
-static btstack_timer_source_t g_poll_timer;
 
 static bool g_initialized;
 static bool g_pressed;        /* last observed level */
@@ -100,16 +91,7 @@ static void btn_process(btstack_data_source_t *ds,
 {
   (void)ds;
   (void)type;
-  /* POLLIN from the upper-half driver — also reaches the polling
-   * timer, which performs the actual sampling.  Reading here just
-   * drains the pending event so the next POLLIN reflects a fresh
-   * change.
-   */
-  (void)read_pressed();
-}
 
-static void poll_button(void)
-{
   bool pressed = read_pressed();
   if (pressed == g_pressed)
     {
@@ -138,19 +120,6 @@ static void poll_button(void)
             }
         }
     }
-}
-
-static void poll_timer_handler(btstack_timer_source_t *ts)
-{
-  if (!g_initialized)
-    {
-      return;
-    }
-
-  poll_button();
-
-  btstack_run_loop_set_timer(ts, BTN_POLL_PERIOD_MS);
-  btstack_run_loop_add_timer(ts);
 }
 
 /****************************************************************************
@@ -193,16 +162,6 @@ int btsensor_button_init(void)
       &g_btn_ds, DATA_SOURCE_CALLBACK_READ);
 
   btstack_run_loop_set_timer_handler(&g_long_timer, long_timer_handler);
-  btstack_run_loop_set_timer_handler(&g_poll_timer, poll_timer_handler);
-
-  /* Kick off the polling tick.  POLLIN-driven dispatch is wired up too
-   * so the latency drops to ~ms once the upper-half POLLIN delivery
-   * issue is resolved; until then this timer guarantees we sample at
-   * BTN_POLL_PERIOD_MS cadence.
-   */
-
-  btstack_run_loop_set_timer(&g_poll_timer, BTN_POLL_PERIOD_MS);
-  btstack_run_loop_add_timer(&g_poll_timer);
 
   g_initialized = true;
   return 0;
@@ -216,7 +175,6 @@ void btsensor_button_deinit(void)
     }
 
   btstack_run_loop_remove_timer(&g_long_timer);
-  btstack_run_loop_remove_timer(&g_poll_timer);
   btstack_run_loop_disable_data_source_callbacks(
       &g_btn_ds, DATA_SOURCE_CALLBACK_READ);
   btstack_run_loop_remove_data_source(&g_btn_ds);

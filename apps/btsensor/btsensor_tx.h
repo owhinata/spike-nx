@@ -63,6 +63,13 @@ int  btsensor_tx_try_enqueue_frame(const uint8_t *buf, size_t len);
 
 void btsensor_tx_on_can_send_now(void);
 
+/* True when an RFCOMM channel is bound (cid != 0).  Lets producers
+ * (e.g. imu_sampler) short-circuit frame encoding when there's no
+ * consumer.
+ */
+
+bool btsensor_tx_has_consumer(void);
+
 /* Telemetry counters (frames sent / dropped). */
 
 void btsensor_tx_get_stats(uint32_t *frames_sent, uint32_t *frames_dropped);

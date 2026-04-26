@@ -273,6 +273,11 @@ void btsensor_tx_on_can_send_now(void)
   request_send_if_needed();
 }
 
+bool btsensor_tx_has_consumer(void)
+{
+  return g_rfcomm_cid != 0;
+}
+
 void btsensor_tx_get_stats(uint32_t *frames_sent, uint32_t *frames_dropped)
 {
   if (frames_sent != NULL)

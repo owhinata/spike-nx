@@ -214,6 +214,15 @@ static void imu_process(btstack_data_source_t *ds,
 {
   (void)type;
 
+  /* Skip the encode + memcpy work entirely when no RFCOMM consumer is
+   * bound — the frames would just be dropped by btsensor_tx anyway,
+   * and uncosumed sensor reads dominate the daemon's CPU footprint
+   * while a PC isn't connected.  We still drain the kernel buffer so
+   * it doesn't grow unbounded.
+   */
+
+  bool has_consumer = btsensor_tx_has_consumer();
+
   while (1)
     {
       struct sensor_imu s;
@@ -223,28 +232,16 @@ static void imu_process(btstack_data_source_t *ds,
           break;
         }
 
-      append_sample(&s);
+      if (has_consumer)
+        {
+          append_sample(&s);
+        }
     }
 }
 
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
-
-void imu_sampler_configure(uint8_t batch)
-{
-  if (batch == 0)
-    {
-      batch = 1;
-    }
-
-  if (batch > BTSENSOR_FRAME_MAX_SAMPLES)
-    {
-      batch = BTSENSOR_FRAME_MAX_SAMPLES;
-    }
-
-  g_batch = batch;
-}
 
 int imu_sampler_init(void)
 {
@@ -448,6 +445,26 @@ int imu_sampler_set_gyro_fsr(uint32_t dps)
     }
 
   return 0;
+}
+
+uint32_t imu_sampler_get_odr_hz(void)
+{
+  return g_odr_hz;
+}
+
+uint32_t imu_sampler_get_accel_fsr_g(void)
+{
+  return g_accel_fsr_g;
+}
+
+uint32_t imu_sampler_get_gyro_fsr_dps(void)
+{
+  return g_gyro_fsr_dps;
+}
+
+uint8_t imu_sampler_get_batch(void)
+{
+  return g_batch;
 }
 
 void imu_sampler_set_rfcomm_cid(uint16_t rfcomm_cid, uint16_t mtu)

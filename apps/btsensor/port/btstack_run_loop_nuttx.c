@@ -298,12 +298,15 @@ static void run_loop_nuttx_execute(void)
 
       btstack_run_loop_base_process_timers(run_loop_nuttx_get_time_ms());
 
-      /* Cross-thread callbacks queued via execute_on_main_thread.  Pop
-       * one at a time under the lock and invoke unlocked so the
-       * callback may itself post further work.
+      /* Cross-thread callbacks queued via execute_on_main_thread.
+       * Skip the mutex acquire entirely on the common (empty) path —
+       * a racy NULL check is safe here because a concurrent enqueue
+       * on another thread also writes to the wake fd (see
+       * run_loop_nuttx_execute_on_main_thread), so the next poll()
+       * iteration is guaranteed to see the new entry.
        */
 
-      while (1)
+      while (btstack_run_loop_base_callbacks != NULL)
         {
           pthread_mutex_lock(&g_callback_lock);
           btstack_context_callback_registration_t *cbr =

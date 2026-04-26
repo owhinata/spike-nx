@@ -150,17 +150,53 @@ NuttX port of the btstack `port/` layer.  Written against
 ## NSH commands
 
 ```
-nsh> btsensor start [batch]   # launch daemon (BT advertising stays off)
-nsh> btsensor status          # running / pid / bt state / rfcomm / stats
-nsh> btsensor stop            # asynchronous teardown (HCI off completes
-                              # within ~3 s; watchdog forces exit)
+nsh> btsensor start                       # launch daemon (BT adv / IMU both off)
+nsh> btsensor status                      # running / pid / bt / imu / config / rfcomm / stats
+nsh> btsensor stop                        # asynchronous teardown (HCI off completes within ~3 s)
+nsh> btsensor bt    <on|off>              # BT visibility (mirrors short/long button press)
+nsh> btsensor imu   <on|off>              # IMU sampling on/off (independent of BT state)
+nsh> btsensor dump  [ms]                  # read /dev/uorb/sensor_imu0 directly, print raw int16 + timestamps
+nsh> btsensor set   odr        <hz>       # ODR (IMU off only)
+nsh> btsensor set   batch      <n>        # samples per RFCOMM frame (IMU off only)
+nsh> btsensor set   accel_fsr  <g>        # accel FSR (IMU off only)
+nsh> btsensor set   gyro_fsr   <dps>      # gyro FSR (IMU off only)
 ```
 
-`start` accepts an optional batch override (1..80 samples per RFCOMM
-frame).  Multiple-start is rejected with `already running`.  `stop`
-posts a teardown_kick callback via
-`btstack_run_loop_execute_on_main_thread()` so the FSM advances on the
-btstack main thread.
+Batch size is changed dynamically at runtime via `btsensor set batch
+<n>` while IMU is off.  Multiple-start is rejected with
+`already running`.  `stop` / `bt` / `imu` / `set` post into the
+BTstack main thread via `btstack_run_loop_execute_on_main_thread()`
+and the NSH caller blocks on a semaphore (3 s timeout) for the
+result, so the FSM and sampler stay single-threaded.  `dump` is the
+only sub-command that runs directly in NSH context — it opens the
+uORB topic itself, which auto-activates the driver if no other
+subscriber holds it open.
+
+`status` output:
+
+```
+running:    yes
+pid:        9
+bt:         off               # off / advertising / fail_blink / paired
+imu:        on                # on / off
+config:     odr=416Hz batch=8 accel_fsr=4g gyro_fsr=2000dps
+rfcomm cid: 0
+frames:     sent=0 dropped=194  # all dropped while rfcomm cid==0
+```
+
+`dump` output (one line per sample):
+
+```
+# ts_us ax ay az gx gy gz (raw int16, chip frame)
+43933310 -76 32 -8220 -5342 -5929 -5789
+43935640 -57 20 -8214 -5342 -5927 -5789
+...
+# 14 sample(s) over 200 ms
+```
+
+This makes the full Commit D PC command set (`IMU ON/OFF`,
+`SET *`) reachable from NSH without a paired PC, and `dump` covers
+the no-RFCOMM "I just want raw samples" use case.
 
 ## BT state machine
 
