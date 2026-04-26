@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:ImuViewer.App.ViewModels"
+        xmlns:ctrl="using:ImuViewer.App.Controls"
         x:Class="ImuViewer.App.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Title="ImuViewer"
@@ -112,11 +113,8 @@
     </ScrollViewer>
 
     <Border Grid.Column="1" Background="#202225">
-      <TextBlock HorizontalAlignment="Center"
-                 VerticalAlignment="Center"
-                 Foreground="#606060"
-                 FontStyle="Italic"
-                 Text="(3D scene placeholder — wired in commit G)" />
+      <ctrl:OpenGlSceneControl x:Name="Scene"
+                               Orientation="{Binding Orientation}" />
     </Border>
   </Grid>
 </Window>
