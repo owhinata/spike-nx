@@ -1,8 +1,9 @@
 # PC で SPP ストリームを受信する
 
-SPIKE Prime Hub (`btsensor` アプリ、Issue #52) は Classic Bluetooth SPP (RFCOMM channel 1) で IMU サンプルを Little-endian バイナリで送出する。本稿では Linux / macOS から受信する具体手順と、パース用 Python スクリプトを示す。
+SPIKE Prime Hub (`btsensor` アプリ) は Classic Bluetooth SPP (RFCOMM channel 1) で IMU サンプルを Little-endian バイナリで送出する。本稿では Linux / macOS から受信する具体手順、フレーム形式、ASCII コマンドプロトコル、パース用 Python スクリプトを示す。
 
-フレーム構造は [CC2564C Bluetooth ドライバ](../drivers/bluetooth.md) の「RFCOMM ペイロード」節を参照。
+!!! warning "Issue #56 Commit E でフレーム形式変更"
+    magic が `0xA55A` から `0xB66B` に変わり、サンプル長が 12 → 16 byte (`ts_delta_us` 追加) になった。Commit E より前の `0xA55A` をハードコードした PC スクリプトでは新ストリームを parse できないので、下記の最新パーサに置き換えること。
 
 ## Linux (BlueZ) で受信
 
@@ -50,17 +51,18 @@ sdptool browse F8:2E:0C:A0:3E:64
 sudo rfcomm bind 0 F8:2E:0C:A0:3E:64 1
 ls -l /dev/rfcomm0
 
-# Hub 側で RFCOMM 接続を開かせる (bind は lazy なのでここで初めて dial)
+# Hub 側 daemon は IMU OFF で起動するので、まず IMU ON を送ってから読み出す
+# (lazy open なのでここで初めて RFCOMM session が張られる)
+printf 'IMU ON\n' | sudo tee /dev/rfcomm0 > /dev/null
 sudo cat /dev/rfcomm0 | xxd | head
 ```
 
-先頭に `5a a5 ...` (magic 0xA55A の little-endian) + 続く 4 byte の seq / timestamp + 2 byte sample_rate + sample_count + type があれば成功。
+先頭が `6b b6 ...` (magic 0xB66B の little-endian) + type / sample_count / rate / FSR / seq / first_sample_ts / frame_len と続けば成功。
 
-スループット測定:
+スループット測定 (default batch=8 / 833 Hz → 18 + 8×16 = 146 B/frame × 104 Hz ≈ 15 KB/s ≈ 121 kbps):
 
 ```bash
 sudo cat /dev/rfcomm0 | pv > /dev/null
-# 833 Hz × 12 byte = 10 KB/s 前後を想定
 ```
 
 終了時は `sudo rfcomm release 0`。
@@ -95,7 +97,7 @@ python3 -m pip install pyobjc-framework-IOBluetooth
 
 ### ペアリング
 
-Hub で `btsensor &` が起動している状態で:
+Hub で daemon が起動している状態で (`btsensor start`):
 
 ```bash
 # 検索 (数秒)
@@ -155,6 +157,70 @@ python3 pc_receive_spp.py
 
 Hub 側に `RFCOMM incoming` → `RFCOMM open cid=...` が出ればデータが流れる。
 
+## フレーム形式 (Commit E layout)
+
+すべて little-endian。1 フレーム = 18 byte ヘッダ + N × 16 byte サンプル (N = `sample_count`、1〜80、デフォルト 8)。
+
+### ヘッダ (18 byte)
+
+| Offset | Size | Field | 備考 |
+|---:|---:|---|---|
+| 0 | 2 | `magic` | 常に `0xB66B` |
+| 2 | 1 | `type` | `0x01` = IMU |
+| 3 | 1 | `sample_count` | 1〜80 |
+| 4 | 2 | `sample_rate_hz` | 現 ODR |
+| 6 | 2 | `accel_fsr_g` | 2 / 4 / 8 / 16 |
+| 8 | 2 | `gyro_fsr_dps` | 125 / 250 / 500 / 1000 / 2000 |
+| 10 | 2 | `seq` | フレーム単調連番 |
+| 12 | 4 | `first_sample_ts_us` | `CLOCK_BOOTTIME` µs の low 32 bit (mod 2³²、約 71m35s で wrap — 長時間キャプチャ時は PC 側で unwrap) |
+| 16 | 2 | `frame_len` | `= 18 + sample_count × 16` |
+
+### サンプル (16 byte/個)
+
+| Offset (内) | Size | Field | 備考 |
+|---:|---:|---|---|
+| 0 | 2 | `ax` | int16 chip frame |
+| 2 | 2 | `ay` | int16 chip frame |
+| 4 | 2 | `az` | int16 chip frame |
+| 6 | 2 | `gx` | int16 chip frame |
+| 8 | 2 | `gy` | int16 chip frame |
+| 10 | 2 | `gz` | int16 chip frame |
+| 12 | 4 | `ts_delta_us` | uint32、サンプルの timestamp − `first_sample_ts_us`、sample[0] = 0 |
+
+**軸方向**: LSM6DSL chip frame の生値。Hub 筐体方向への補正は driver / app 側では行わないので、Hub body frame が必要なら PC 側で回転を当てる。
+
+### 部分ロス時の resync
+
+`frame_len` を使えばフレーム途中切れに耐性を持たせられる:
+
+1. 次の `0xB66B` magic を探す
+2. 18 byte 読んで `type == 0x01` / `1 ≤ sample_count ≤ 80` / `frame_len == 18 + sample_count × 16` を sanity check
+3. `frame_len` がおかしければ +1 して step 1 に戻る
+4. 以降 `frame_len` byte 揃うまで待ち、揃ったら parse
+
+### 物理量への換算
+
+LSM6DSL データシートの per-FSR sensitivity を生値に乗算:
+
+| FSR | accel sensitivity (mg/LSB) | gyro sensitivity (mdps/LSB) |
+|---|---|---|
+| ±2 g  / ±125 dps  | 0.061 | 4.375 |
+| ±4 g  / ±250 dps  | 0.122 | 8.75  |
+| ±8 g  / ±500 dps  | 0.244 | 17.5  |
+| ±16 g / ±1000 dps | 0.488 | 35.0  |
+| (–)   / ±2000 dps | (–)   | 70.0  |
+
+ヘッダ FSR フィールドから動的に算出する場合:
+
+```python
+accel_mg_lsb = (accel_fsr_g  * 1000.0) / 32768.0
+gyro_dps_lsb = (gyro_fsr_dps * 0.035) / 1000.0
+# accel_mps2 = raw * accel_mg_lsb * 9.80665 / 1000
+# gyro_dps   = raw * gyro_dps_lsb
+```
+
+(accel は int16 full-scale が FSR に正確一致。gyro は仕様の都合で約 14.7% headroom — datasheet Table 3 参照。)
+
 ## フレームパーサ (Python 共通)
 
 Linux / macOS 共通で使えるバイナリパーサ:
@@ -163,15 +229,26 @@ Linux / macOS 共通で使えるバイナリパーサ:
 # btsensor_parser.py
 import struct, sys, glob
 
-MAGIC = 0xA55A
-HDR_FMT = "<HHIHBB"     # magic, seq, ts_us, rate, count, type
-HDR_SIZE = 12
-SAMPLE_FMT = "<hhhhhh"  # ax ay az gx gy gz
-SAMPLE_SIZE = 12
+MAGIC       = 0xB66B
+HDR_FMT     = "<HBBHHHHIH"   # magic, type, count, rate, accel_fsr,
+                             # gyro_fsr, seq, first_ts_us, frame_len
+HDR_SIZE    = 18
+SAMPLE_FMT  = "<hhhhhhI"     # ax ay az gx gy gz ts_delta_us
+SAMPLE_SIZE = 16
 
-# LSM6DS3 scales
-ACCEL_MG_LSB = 0.244    # ±8 g
-GYRO_DPS_LSB = 0.070    # ±2000 dps
+
+def parse_frame(buf, offs, accel_mg_lsb, gyro_dps_lsb,
+                seq, first_ts_us, sample_count):
+    for i in range(sample_count):
+        ax, ay, az, gx, gy, gz, dt = struct.unpack(
+            SAMPLE_FMT,
+            buf[offs + i * SAMPLE_SIZE : offs + (i + 1) * SAMPLE_SIZE])
+        ts_us = (first_ts_us + dt) & 0xffffffff
+        print(f"seq={seq} ts_us={ts_us} dt_us={dt} "
+              f"accel_mg=({ax*accel_mg_lsb:7.2f},{ay*accel_mg_lsb:7.2f},"
+              f"{az*accel_mg_lsb:7.2f}) "
+              f"gyro_dps=({gx*gyro_dps_lsb:7.3f},{gy*gyro_dps_lsb:7.3f},"
+              f"{gz*gyro_dps_lsb:7.3f})")
 
 
 def parse_stream(stream):
@@ -182,7 +259,7 @@ def parse_stream(stream):
             break
         buf += chunk
         while len(buf) >= HDR_SIZE:
-            idx = buf.find(b"\x5a\xa5")
+            idx = buf.find(b"\x6b\xb6")
             if idx < 0:
                 buf = buf[-1:]
                 break
@@ -190,28 +267,20 @@ def parse_stream(stream):
                 buf = buf[idx:]
             if len(buf) < HDR_SIZE:
                 break
-            magic, seq, ts, rate, count, typ = struct.unpack(HDR_FMT,
-                                                             buf[:HDR_SIZE])
-            if magic != MAGIC:
+            (magic, typ, count, rate, accel_fsr, gyro_fsr,
+             seq, first_ts, frame_len) = struct.unpack(HDR_FMT,
+                                                       buf[:HDR_SIZE])
+            if magic != MAGIC or typ != 0x01 or not 1 <= count <= 80 \
+                    or frame_len != HDR_SIZE + count * SAMPLE_SIZE:
                 buf = buf[1:]
                 continue
-            need = HDR_SIZE + count * SAMPLE_SIZE
-            if len(buf) < need:
+            if len(buf) < frame_len:
                 break
-            for i in range(count):
-                offs = HDR_SIZE + i * SAMPLE_SIZE
-                ax, ay, az, gx, gy, gz = struct.unpack(
-                    SAMPLE_FMT, buf[offs:offs + SAMPLE_SIZE])
-                ax_mg = ax * ACCEL_MG_LSB
-                ay_mg = ay * ACCEL_MG_LSB
-                az_mg = az * ACCEL_MG_LSB
-                gx_dps = gx * GYRO_DPS_LSB
-                gy_dps = gy * GYRO_DPS_LSB
-                gz_dps = gz * GYRO_DPS_LSB
-                print(f"seq={seq} ts_us={ts} "
-                      f"accel_mg=({ax_mg:.1f},{ay_mg:.1f},{az_mg:.1f}) "
-                      f"gyro_dps=({gx_dps:.2f},{gy_dps:.2f},{gz_dps:.2f})")
-            buf = buf[need:]
+            accel_mg_lsb = (accel_fsr * 1000.0) / 32768.0
+            gyro_dps_lsb = (gyro_fsr  * 0.035) / 1000.0
+            parse_frame(buf, HDR_SIZE, accel_mg_lsb, gyro_dps_lsb,
+                        seq, first_ts, count)
+            buf = buf[frame_len:]
 
 
 def default_port():
@@ -230,14 +299,50 @@ if __name__ == "__main__":
 実行:
 
 ```bash
-# Linux
+# Linux: 先に `printf 'IMU ON\n' | sudo tee /dev/rfcomm0` で sampling 開始
 sudo python3 btsensor_parser.py /dev/rfcomm0
 
-# macOS: Python IOBluetooth で RFCOMM を開いた delegate から生バイトを
-# このパーサに流し込む
+# macOS: IOBluetoothRFCOMMChannel delegate から流れる生バイトを
+# parse_stream に渡す
 ```
 
-Hub 本体を静置すると accel_z ≈ ±1000 mg (±1 g)、振ると peak が立つ。gyro は静置で ≈ 0 dps。
+Hub 本体を静置すると `accel_z ≈ ±1000 mg` (±1g、デフォルト ±8g 設定時)、振ると peak が立つ。gyro は静置 + warm-up 後 ≈ 0 dps。
+
+## ASCII コマンドプロトコル
+
+RFCOMM open 後、同じチャネル上で 1 行 ASCII (`\n` 終端、`\r` 無視) のコマンドを送れる。コマンド応答は IMU バイナリストリームと同じチャネルを共有するが、応答は arbiter 側で次の telemetry フレームより必ず先に送出される。
+
+| コマンド | 動作 | 制約 |
+|---|---|---|
+| `IMU ON\n`  | サンプリング開始 (driver 自動 activate) | — |
+| `IMU OFF\n` | サンプリング停止 (driver 自動 deactivate) | — |
+| `SET ODR <hz>\n` | ODR 変更 (13/26/52/104/208/416/833/1660/3330/6660 Hz) | IMU OFF 時のみ |
+| `SET BATCH <n>\n` | フレームあたりサンプル数 (1〜80) | IMU OFF 時のみ |
+| `SET ACCEL_FSR <g>\n` | 加速度 FSR (2/4/8/16) | IMU OFF 時のみ |
+| `SET GYRO_FSR <dps>\n` | ジャイロ FSR (125/250/500/1000/2000) | IMU OFF 時のみ |
+
+応答パターン:
+- 成功: `OK\n`
+- IMU ON 中の `SET *`: `ERR busy\n`
+- 不正な値 / トークン: `ERR invalid <token>\n`
+- 行が 64 byte 超: `ERR overflow\n`
+- 未知のコマンド: `ERR unknown <cmd>\n`
+
+daemon 起動直後はサンプリング **off** なので、典型的なセッションは:
+
+```text
+PC -> Hub:  IMU OFF\n              (idempotent)
+Hub -> PC:  OK\n
+PC -> Hub:  SET ODR 416\n
+Hub -> PC:  OK\n
+PC -> Hub:  SET BATCH 16\n
+Hub -> PC:  OK\n
+PC -> Hub:  IMU ON\n
+Hub -> PC:  OK\n
+            ... バイナリ IMU フレームが流れる ...
+PC -> Hub:  IMU OFF\n
+Hub -> PC:  OK\n
+```
 
 ## よくあるトラブル
 

@@ -1,12 +1,16 @@
 # Receiving the SPP stream on a PC
 
-The SPIKE Prime Hub `btsensor` app (Issue #52) emits IMU samples over
-Classic Bluetooth SPP (RFCOMM channel 1) as a little-endian binary
-stream.  This page walks through the host-side receive procedure for
-Linux and macOS, plus a reusable Python parser.
+The SPIKE Prime Hub `btsensor` app emits IMU samples over Classic
+Bluetooth SPP (RFCOMM channel 1) as a little-endian binary stream.
+This page walks through the host-side receive procedure for Linux and
+macOS, the on-wire frame format, the ASCII command protocol, and a
+reusable Python parser.
 
-The on-wire format lives under
-[CC2564C Bluetooth driver — RFCOMM payload](../drivers/bluetooth.md).
+!!! warning "Wire-format change in Issue #56 Commit E"
+    The frame magic moved from `0xA55A` to `0xB66B` and the per-sample
+    layout grew from 12 to 16 bytes (added a `ts_delta_us` field).
+    Pre-Commit-E PC scripts that hard-coded `0xA55A` will not parse
+    the new stream — refresh the parser per the section below.
 
 ## Linux (BlueZ)
 
@@ -25,7 +29,10 @@ The `rfcomm` CLI lives in `bluez-tools` on most distros (or
 
 ### Pairing
 
-With `btsensor &` running on the Hub:
+With the daemon running on the Hub (`btsensor start [batch]`; the BT
+button on the Hub or any future control surface enables advertising —
+see the [Bluetooth driver page](../drivers/bluetooth.md) for the BT
+state machine):
 
 ```bash
 bluetoothctl
@@ -57,18 +64,22 @@ You should see `Service Name: SPIKE IMU Stream`, `Channel: 1`,
 sudo rfcomm bind 0 F8:2E:0C:A0:3E:64 1
 ls -l /dev/rfcomm0
 
-# lazy open — Linux initiates the RFCOMM session on first I/O
+# lazy open — Linux initiates the RFCOMM session on first I/O.  Send
+# `IMU ON\n` first so the Hub starts streaming (sampling is OFF by
+# default at daemon start; see the ASCII command section below).
+printf 'IMU ON\n' | sudo tee /dev/rfcomm0 > /dev/null
 sudo cat /dev/rfcomm0 | xxd | head
 ```
 
-The first bytes should be `5a a5 ...` (magic `0xA55A` in little-endian)
-followed by seq / timestamp / rate / sample_count / type + samples.
+The first bytes should be `6b b6 ...` (magic `0xB66B` in little-endian)
+followed by type / sample_count / rate / FSR / seq / first-sample
+timestamp / frame_len + samples.
 
-Throughput probe:
+Throughput probe (default batch=8 at 833 Hz → 18 + 8×16 = 146 B/frame
+× 104 Hz ≈ 15 KB/s ≈ 121 kbps):
 
 ```bash
 sudo cat /dev/rfcomm0 | pv > /dev/null
-# expect ~10 KB/s (833 Hz × 12 bytes)
 ```
 
 Release when done: `sudo rfcomm release 0`.
@@ -114,7 +125,7 @@ python3 -m pip install pyobjc-framework-IOBluetooth
 
 ### Pairing
 
-With `btsensor &` running:
+With the daemon running (`btsensor start`):
 
 ```bash
 blueutil --inquiry
@@ -166,6 +177,76 @@ if __name__ == "__main__":
 Run with `python3 pc_receive_spp.py`.  The Hub console should print
 `RFCOMM incoming` → `RFCOMM open cid=...` as the channel comes up.
 
+## Wire format (Commit E layout)
+
+All fields are little-endian.  Frame = 18-byte header + N × 16-byte
+samples, where N = `sample_count` (1..80, default 8).
+
+### Header (18 bytes)
+
+| Offset | Size | Field | Notes |
+|---:|---:|---|---|
+| 0 | 2 | `magic` | always `0xB66B` |
+| 2 | 1 | `type` | `0x01` = IMU |
+| 3 | 1 | `sample_count` | 1..80 |
+| 4 | 2 | `sample_rate_hz` | current driver ODR |
+| 6 | 2 | `accel_fsr_g` | 2 / 4 / 8 / 16 |
+| 8 | 2 | `gyro_fsr_dps` | 125 / 250 / 500 / 1000 / 2000 |
+| 10 | 2 | `seq` | monotonic per frame |
+| 12 | 4 | `first_sample_ts_us` | low 32 bits of `CLOCK_BOOTTIME` µs (mod 2³², ≈71m35s wrap — PC must unwrap for long captures) |
+| 16 | 2 | `frame_len` | `= 18 + sample_count × 16` |
+
+### Per sample (16 bytes)
+
+| Offset (within sample) | Size | Field | Notes |
+|---:|---:|---|---|
+| 0 | 2 | `ax` | int16, chip frame |
+| 2 | 2 | `ay` | int16, chip frame |
+| 4 | 2 | `az` | int16, chip frame |
+| 6 | 2 | `gx` | int16, chip frame |
+| 8 | 2 | `gy` | int16, chip frame |
+| 10 | 2 | `gz` | int16, chip frame |
+| 12 | 4 | `ts_delta_us` | uint32, sample timestamp − `first_sample_ts_us`; sample[0] = 0 |
+
+**Axis convention**: raw chip frame as published by the LSM6DSL.  No
+hub-body axis remap is applied on the Hub; if you need a hub frame,
+apply the rotation on the PC.
+
+### Resync after byte loss
+
+Use `frame_len` to skip past truncated / corrupted frames:
+
+1. Find the next `0xB66B` magic.
+2. Read 18 bytes; sanity-check `type == 0x01`,
+   `1 ≤ sample_count ≤ 80`, and `frame_len == 18 + sample_count × 16`.
+3. If `frame_len` looks bogus, advance by 1 and rescan from step 1.
+4. Otherwise wait for `frame_len` bytes total and parse.
+
+### Converting raw to physical units
+
+Multiply each int16 LSB by the per-FSR sensitivity from the LSM6DSL
+datasheet:
+
+| FSR | Accel sensitivity (mg/LSB) | Gyro sensitivity (mdps/LSB) |
+|---|---|---|
+| ±2 g  / ±125 dps  | 0.061 | 4.375 |
+| ±4 g  / ±250 dps  | 0.122 | 8.75  |
+| ±8 g  / ±500 dps  | 0.244 | 17.5  |
+| ±16 g / ±1000 dps | 0.488 | 35.0  |
+| (–)   / ±2000 dps | (–)   | 70.0  |
+
+Or programmatically, given the header's FSR fields:
+
+```python
+accel_mg_lsb  = (accel_fsr_g  * 1000.0) / 32768.0
+gyro_dps_lsb  = (gyro_fsr_dps * 0.035) / 1000.0
+# accel_mps2 = raw * accel_mg_lsb * 9.80665 / 1000
+# gyro_dps   = raw * gyro_dps_lsb
+```
+
+(Accel scales are exact int16 full-scale; gyro carries ~14.7%
+headroom over the nominal FSR — see datasheet Table 3.)
+
 ## Shared Python parser
 
 Works the same way on Linux (`/dev/rfcomm0`) and macOS (once you've
@@ -175,14 +256,28 @@ piped the IOBluetooth delegate's bytes into a stream):
 # btsensor_parser.py
 import struct, sys, glob
 
-MAGIC = 0xA55A
-HDR_FMT = "<HHIHBB"     # magic, seq, ts_us, rate, count, type
-HDR_SIZE = 12
-SAMPLE_FMT = "<hhhhhh"  # ax ay az gx gy gz
-SAMPLE_SIZE = 12
+MAGIC       = 0xB66B
+HDR_FMT     = "<HBBHHHHIH"   # magic, type, count, rate, accel_fsr,
+                             # gyro_fsr, seq, first_ts_us, frame_len
+HDR_SIZE    = 18
+SAMPLE_FMT  = "<hhhhhhI"     # ax ay az gx gy gz ts_delta_us
+SAMPLE_SIZE = 16
 
-ACCEL_MG_LSB = 0.244    # LSM6DS3 ±8 g
-GYRO_DPS_LSB = 0.070    # LSM6DS3 ±2000 dps
+GRAVITY_MS2 = 9.80665
+
+
+def parse_frame(buf, offs, accel_mg_lsb, gyro_dps_lsb,
+                seq, first_ts_us, sample_count):
+    for i in range(sample_count):
+        ax, ay, az, gx, gy, gz, dt = struct.unpack(
+            SAMPLE_FMT,
+            buf[offs + i * SAMPLE_SIZE : offs + (i + 1) * SAMPLE_SIZE])
+        ts_us = (first_ts_us + dt) & 0xffffffff
+        print(f"seq={seq} ts_us={ts_us} dt_us={dt} "
+              f"accel_mg=({ax*accel_mg_lsb:7.2f},{ay*accel_mg_lsb:7.2f},"
+              f"{az*accel_mg_lsb:7.2f}) "
+              f"gyro_dps=({gx*gyro_dps_lsb:7.3f},{gy*gyro_dps_lsb:7.3f},"
+              f"{gz*gyro_dps_lsb:7.3f})")
 
 
 def parse_stream(stream):
@@ -193,7 +288,7 @@ def parse_stream(stream):
             break
         buf += chunk
         while len(buf) >= HDR_SIZE:
-            idx = buf.find(b"\x5a\xa5")
+            idx = buf.find(b"\x6b\xb6")
             if idx < 0:
                 buf = buf[-1:]
                 break
@@ -201,24 +296,20 @@ def parse_stream(stream):
                 buf = buf[idx:]
             if len(buf) < HDR_SIZE:
                 break
-            magic, seq, ts, rate, count, typ = struct.unpack(HDR_FMT,
-                                                             buf[:HDR_SIZE])
-            if magic != MAGIC:
+            (magic, typ, count, rate, accel_fsr, gyro_fsr,
+             seq, first_ts, frame_len) = struct.unpack(HDR_FMT,
+                                                       buf[:HDR_SIZE])
+            if magic != MAGIC or typ != 0x01 or not 1 <= count <= 80 \
+                    or frame_len != HDR_SIZE + count * SAMPLE_SIZE:
                 buf = buf[1:]
                 continue
-            need = HDR_SIZE + count * SAMPLE_SIZE
-            if len(buf) < need:
+            if len(buf) < frame_len:
                 break
-            for i in range(count):
-                offs = HDR_SIZE + i * SAMPLE_SIZE
-                ax, ay, az, gx, gy, gz = struct.unpack(
-                    SAMPLE_FMT, buf[offs:offs + SAMPLE_SIZE])
-                print(f"seq={seq} ts_us={ts} "
-                      f"accel_mg=({ax*ACCEL_MG_LSB:.1f},"
-                      f"{ay*ACCEL_MG_LSB:.1f},{az*ACCEL_MG_LSB:.1f}) "
-                      f"gyro_dps=({gx*GYRO_DPS_LSB:.2f},"
-                      f"{gy*GYRO_DPS_LSB:.2f},{gz*GYRO_DPS_LSB:.2f})")
-            buf = buf[need:]
+            accel_mg_lsb = (accel_fsr * 1000.0) / 32768.0
+            gyro_dps_lsb = (gyro_fsr  * 0.035) / 1000.0
+            parse_frame(buf, HDR_SIZE, accel_mg_lsb, gyro_dps_lsb,
+                        seq, first_ts, count)
+            buf = buf[frame_len:]
 
 
 def default_port():
@@ -237,11 +328,52 @@ if __name__ == "__main__":
 Run on Linux:
 
 ```bash
+# Make sure to send `IMU ON\n` to /dev/rfcomm0 first.
 sudo python3 btsensor_parser.py /dev/rfcomm0
 ```
 
-A motionless Hub reports `accel_z ≈ ±1000 mg` (±1 g) with the other
-axes near zero; shake it to see peaks.  `gyro_dps` is ≈ 0 at rest.
+A motionless Hub at the default ±8 g / ±2000 dps reports
+`accel_z ≈ ±1000 mg` (±1 g) with the other axes near zero; shake it to
+see peaks.  `gyro_dps` is ≈ 0 at rest after a brief warm-up.
+
+## ASCII command protocol
+
+After RFCOMM is open the Hub accepts ASCII command lines (`\n`
+terminated, `\r` ignored) on the same channel.  Commands and replies
+share the channel with the binary IMU stream — replies always queue
+ahead of the next telemetry frame.
+
+| Command | Action | Constraint |
+|---|---|---|
+| `IMU ON\n`  | Start sampling (open the driver, auto-activate) | — |
+| `IMU OFF\n` | Stop sampling (close the driver, auto-deactivate) | — |
+| `SET ODR <hz>\n` | Set ODR (13/26/52/104/208/416/833/1660/3330/6660 Hz) | only while IMU OFF |
+| `SET BATCH <n>\n` | Samples per RFCOMM frame (1..80) | only while IMU OFF |
+| `SET ACCEL_FSR <g>\n` | Accel FSR (2/4/8/16) | only while IMU OFF |
+| `SET GYRO_FSR <dps>\n` | Gyro FSR (125/250/500/1000/2000) | only while IMU OFF |
+
+Reply patterns:
+- `OK\n` on success
+- `ERR busy\n` if a `SET *` arrives while sampling is on
+- `ERR invalid <token>\n` for malformed values / unknown subcommands
+- `ERR overflow\n` for lines longer than 64 bytes
+- `ERR unknown <cmd>\n` for an unrecognised first token
+
+Sampling is **off** at daemon start, so a typical session looks like:
+
+```text
+PC -> Hub:  IMU OFF\n              (idempotent)
+Hub -> PC:  OK\n
+PC -> Hub:  SET ODR 416\n
+Hub -> PC:  OK\n
+PC -> Hub:  SET BATCH 16\n
+Hub -> PC:  OK\n
+PC -> Hub:  IMU ON\n
+Hub -> PC:  OK\n
+            ... binary IMU frames flow ...
+PC -> Hub:  IMU OFF\n
+Hub -> PC:  OK\n
+```
 
 ## Troubleshooting
 

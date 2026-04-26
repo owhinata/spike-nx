@@ -1,7 +1,7 @@
 /****************************************************************************
  * apps/btsensor/imu_sampler.c
  *
- * IMU sampler — frame producer for btsensor (Issue #56 Commit B).
+ * IMU sampler — frame producer for btsensor.
  *
  * The LSM6DSL uORB driver (Commit A) publishes a single struct
  * sensor_imu on /dev/uorb/sensor_imu0 carrying paired accel + gyro raw
@@ -11,24 +11,32 @@
  * unit conversion), and hand each completed batch to btsensor_tx for
  * arbitrated send.
  *
- * Wire format (all little-endian) — unchanged in Commit A/B; the header
- * gets reshaped (magic / FSR fields / per-sample ts_delta) in Commit E:
+ * Wire format (all little-endian) — Commit E layout (incompatible
+ * with the Commit A/B 0xA55A layout):
  *
- *   struct spp_frame_hdr {
- *     uint16_t magic;          // 0xA55A
- *     uint16_t seq;            // monotonic per frame
- *     uint32_t timestamp_us;   // first sample's hardware timestamp,
- *                              // microseconds since session start
- *                              // (mod 2^32, ~71m35s wrap)
- *     uint16_t sample_rate;    // informational (833 Hz today)
- *     uint8_t  sample_count;   // <= BTSENSOR_FRAME_MAX_SAMPLES (80)
+ *   struct spp_frame_hdr {                  // 18 bytes
+ *     uint16_t magic;          // 0xB66B
  *     uint8_t  type;           // 0x01 = IMU
- *   };                         // 12 bytes
+ *     uint8_t  sample_count;   // 1..BTSENSOR_FRAME_MAX_SAMPLES (80)
+ *     uint16_t sample_rate_hz; // current ODR
+ *     uint16_t accel_fsr_g;    // 2 / 4 / 8 / 16
+ *     uint16_t gyro_fsr_dps;   // 125 / 250 / 500 / 1000 / 2000
+ *     uint16_t seq;            // monotonic
+ *     uint32_t first_sample_ts_us;  // low 32 bits of CLOCK_BOOTTIME us
+ *                              // (mod 2^32, ~71m35s wrap — PC unwrap)
+ *     uint16_t frame_len;      // = 18 + sample_count * 16
+ *   };
  *
- *   struct imu_sample {
- *     int16_t ax, ay, az;      // raw LSM6DSL accel LSB, chip frame
- *     int16_t gx, gy, gz;      // raw LSM6DSL gyro  LSB, chip frame
- *   };                         // 12 bytes each
+ *   struct imu_sample {                     // 16 bytes
+ *     int16_t  ax, ay, az;     // accel raw LSB, chip frame
+ *     int16_t  gx, gy, gz;     // gyro  raw LSB, chip frame
+ *     uint32_t ts_delta_us;    // sample.ts - first_sample_ts_us
+ *                              // (sample[0] = 0)
+ *   };
+ *
+ * The header carries ODR + FSR so the PC can convert raw -> physical
+ * units without an out-of-band probe; ts_delta_us per sample lets the
+ * receiver reconstruct exact ISR timing for jitter analysis.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -63,13 +71,14 @@
 #  define CONFIG_APP_BTSENSOR_BATCH       8
 #endif
 
-#define BTSENSOR_FRAME_HDR_SIZE           12
-#define BTSENSOR_SAMPLE_SIZE              12
+/* BTSENSOR_HDR_SIZE / BTSENSOR_SAMPLE_SIZE come from the public
+ * imu_sampler.h so any in-tree consumer sees the same constants.
+ * Frame max = 18 + 80 * 16 = 1298 bytes (fits BTSENSOR_TX_FRAME_MAX_SIZE).
+ */
+
 #define BTSENSOR_FRAME_MAX_SAMPLES        80
 #define BTSENSOR_FRAME_MAX_SIZE \
-    (BTSENSOR_FRAME_HDR_SIZE + BTSENSOR_SAMPLE_SIZE * BTSENSOR_FRAME_MAX_SAMPLES)
-
-#define IMU_SAMPLE_RATE_HZ                833
+    (BTSENSOR_HDR_SIZE + BTSENSOR_SAMPLE_SIZE * BTSENSOR_FRAME_MAX_SAMPLES)
 
 /****************************************************************************
  * Private Data
@@ -117,14 +126,30 @@ static uint32_t g_start_us;
  * Private Functions
  ****************************************************************************/
 
-static void encode_sample(uint8_t *dst, const struct sensor_imu *s)
+static inline void put_u16le(uint8_t *dst, uint16_t v)
 {
-  dst[0]  = (uint8_t)(s->ax & 0xff); dst[1]  = (uint8_t)(s->ax >> 8);
-  dst[2]  = (uint8_t)(s->ay & 0xff); dst[3]  = (uint8_t)(s->ay >> 8);
-  dst[4]  = (uint8_t)(s->az & 0xff); dst[5]  = (uint8_t)(s->az >> 8);
-  dst[6]  = (uint8_t)(s->gx & 0xff); dst[7]  = (uint8_t)(s->gx >> 8);
-  dst[8]  = (uint8_t)(s->gy & 0xff); dst[9]  = (uint8_t)(s->gy >> 8);
-  dst[10] = (uint8_t)(s->gz & 0xff); dst[11] = (uint8_t)(s->gz >> 8);
+  dst[0] = (uint8_t)(v & 0xff);
+  dst[1] = (uint8_t)((v >> 8) & 0xff);
+}
+
+static inline void put_u32le(uint8_t *dst, uint32_t v)
+{
+  dst[0] = (uint8_t)(v & 0xff);
+  dst[1] = (uint8_t)((v >> 8) & 0xff);
+  dst[2] = (uint8_t)((v >> 16) & 0xff);
+  dst[3] = (uint8_t)((v >> 24) & 0xff);
+}
+
+static void encode_sample(uint8_t *dst, const struct sensor_imu *s,
+                          uint32_t ts_delta_us)
+{
+  put_u16le(dst + 0,  (uint16_t)s->ax);
+  put_u16le(dst + 2,  (uint16_t)s->ay);
+  put_u16le(dst + 4,  (uint16_t)s->az);
+  put_u16le(dst + 6,  (uint16_t)s->gx);
+  put_u16le(dst + 8,  (uint16_t)s->gy);
+  put_u16le(dst + 10, (uint16_t)s->gz);
+  put_u32le(dst + 12, ts_delta_us);
 }
 
 static void flush_current_frame(void)
@@ -134,20 +159,17 @@ static void flush_current_frame(void)
       return;
     }
 
-  /* Patch header fields decided at flush time. */
+  /* Patch the header fields that depend on flush-time state. */
 
-  uint32_t ts = g_current_first_ts - g_start_us;   /* mod 2^32 */
+  uint16_t frame_len     = BTSENSOR_HDR_SIZE +
+                           BTSENSOR_SAMPLE_SIZE * g_current_count;
+  uint32_t first_ts_off  = g_current_first_ts - g_start_us; /* mod 2^32 */
 
-  g_current[4]  = (uint8_t)(ts & 0xff);
-  g_current[5]  = (uint8_t)((ts >> 8) & 0xff);
-  g_current[6]  = (uint8_t)((ts >> 16) & 0xff);
-  g_current[7]  = (uint8_t)((ts >> 24) & 0xff);
-  g_current[10] = g_current_count;
+  g_current[3] = g_current_count;             /* sample_count */
+  put_u32le(&g_current[12], first_ts_off);    /* first_sample_ts_us */
+  put_u16le(&g_current[16], frame_len);       /* frame_len */
 
-  uint16_t len = BTSENSOR_FRAME_HDR_SIZE +
-                 BTSENSOR_SAMPLE_SIZE * g_current_count;
-
-  (void)btsensor_tx_try_enqueue_frame(g_current, len);
+  (void)btsensor_tx_try_enqueue_frame(g_current, frame_len);
   g_current_count = 0;
 }
 
@@ -155,31 +177,30 @@ static void append_sample(const struct sensor_imu *sample)
 {
   if (g_current_count == 0)
     {
-      uint16_t magic     = BTSENSOR_FRAME_MAGIC;
-      uint16_t seq       = g_seq++;
-      uint16_t rate      = IMU_SAMPLE_RATE_HZ;
-      uint8_t  type      = BTSENSOR_FRAME_TYPE_IMU;
-      uint8_t  reserved  = 0;
-
       g_current_first_ts = sample->timestamp;
 
-      g_current[0]  = (uint8_t)(magic & 0xff);
-      g_current[1]  = (uint8_t)(magic >> 8);
-      g_current[2]  = (uint8_t)(seq & 0xff);
-      g_current[3]  = (uint8_t)(seq >> 8);
-      g_current[4]  = 0;             /* ts_us — patched at flush */
-      g_current[5]  = 0;
-      g_current[6]  = 0;
-      g_current[7]  = 0;
-      g_current[8]  = (uint8_t)(rate & 0xff);
-      g_current[9]  = (uint8_t)(rate >> 8);
-      g_current[10] = 0;             /* sample_count — patched at flush */
-      g_current[11] = (type & 0x7f) | ((reserved & 1) << 7);
+      /* Lay down the static portion of the header.  Fields patched at
+       * flush time (sample_count, first_sample_ts_us, frame_len) are
+       * left zeroed here for clarity.
+       */
+
+      put_u16le(&g_current[0],  BTSENSOR_FRAME_MAGIC);  /* magic   */
+      g_current[2]  = BTSENSOR_FRAME_TYPE_IMU;          /* type    */
+      g_current[3]  = 0;                                /* count   */
+      put_u16le(&g_current[4],  (uint16_t)g_odr_hz);    /* rate    */
+      put_u16le(&g_current[6],  (uint16_t)g_accel_fsr_g);
+      put_u16le(&g_current[8],  (uint16_t)g_gyro_fsr_dps);
+      put_u16le(&g_current[10], g_seq++);               /* seq     */
+      put_u32le(&g_current[12], 0);                     /* first ts */
+      put_u16le(&g_current[16], 0);                     /* frame_len */
     }
 
-  uint8_t *slot = &g_current[BTSENSOR_FRAME_HDR_SIZE +
+  /* Per-sample slot, including 4-byte ts_delta_us at offset 12. */
+
+  uint32_t ts_delta = sample->timestamp - g_current_first_ts;
+  uint8_t *slot = &g_current[BTSENSOR_HDR_SIZE +
                              BTSENSOR_SAMPLE_SIZE * g_current_count];
-  encode_sample(slot, sample);
+  encode_sample(slot, sample, ts_delta);
   g_current_count++;
 
   if (g_current_count >= g_batch)

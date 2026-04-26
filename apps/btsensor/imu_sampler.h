@@ -17,13 +17,23 @@
 extern "C" {
 #endif
 
-/* Wire-format frame header magic and type.  Reshaped in Commit E to
- * embed FSR + per-sample ts_delta; for Commit A/B these mirror the
- * existing layout so PC scripts keep parsing.
+/* Wire-format frame header magic and type (Commit E).  The new magic
+ * 0xB66B intentionally breaks compatibility with pre-Commit-E PC
+ * scripts (which expected 0xA55A); the header now embeds the runtime
+ * FSR / ODR plus a per-sample ts_delta_us so the receiver can derive
+ * physical units and per-sample timing without out-of-band state.
  */
 
-#define BTSENSOR_FRAME_MAGIC       0xA55A
+#define BTSENSOR_FRAME_MAGIC       0xB66B
 #define BTSENSOR_FRAME_TYPE_IMU    0x01
+
+/* Wire-format sizes (used by both the producer and any in-tree
+ * consumers / parsers that need the layout).  See the wire-format
+ * table in apps/btsensor/imu_sampler.c.
+ */
+
+#define BTSENSOR_HDR_SIZE          18
+#define BTSENSOR_SAMPLE_SIZE       16
 
 /* Override the runtime batch size (samples per RFCOMM frame) before
  * imu_sampler_init().  batch is clamped to [1, 80] (compile-time
