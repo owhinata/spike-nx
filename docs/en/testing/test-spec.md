@@ -453,10 +453,41 @@ Issue #52 replaced the NuttX stock BT host stack with btstack + Classic BT SPP, 
 
 ### H-5: test_bt_pc_pair_and_stream `@interactive`
 
-- **Goal**: end-to-end SPP pair + RFCOMM stream read from a PC
-- **Prerequisite**: H-4 passes; a Linux or macOS host with blueutil / bluetoothctl is available
-- **Procedure**: follow `docs/development/pc-receive-spp.md` — pair → open RFCOMM → look for magic `5a a5`
-- **Check**: operator confirms the stream visually
+Semi-manual: the operator handles the parts that cannot be driven from
+the Hub (pair the device, open RFCOMM); pytest then verifies the
+stream automatically by reading `btsensor status` from the Hub.
+
+- **Goal**: end-to-end SPP pair + RFCOMM stream is alive after the PC
+  finishes pairing
+- **Prerequisite**: H-4 passes; a Linux or macOS host with
+  blueutil / bluetoothctl is available
+- **Hub-side setup** (driven by the test): `reboot` →
+  `btsensor start` → `btsensor bt on` (advertising) → `btsensor imu on`
+  (samples flowing).  Issue #56 made BT/IMU both off-by-default, so
+  the test must explicitly enable advertising and IMU sampling before
+  prompting the operator.
+- **Operator step**: pair (and trust) the Hub once via
+  `bluetoothctl` so BlueZ has a link key — see
+  `docs/development/pc-receive-spp.md`.  No `rfcomm bind` /
+  `cat /dev/rfcomm0` step: pytest opens `BTPROTO_RFCOMM` directly.
+  Press ENTER once pairing is in place (skip pairing if it has
+  already been done — link keys persist).
+- **Pytest connect**: `socket.socket(AF_BLUETOOTH, SOCK_STREAM,
+  BTPROTO_RFCOMM)` → `connect((bdaddr, 1))`.  Skipped automatically
+  if the socket cannot be created (Linux + CAP_NET_RAW required;
+  rerun pytest with sudo).
+- **Pytest checks** (after socket connect):
+    1. Poll `btsensor status` for up to 5 s for `bt: paired` and
+       `rfcomm cid != 0` (absorbs the gap between socket connect and
+       the channel-open event reaching the Hub)
+    2. PC-side: receive ≥ 1 byte over 3 s and find frame magic
+       `0xB66B` (Issue #56 Commit E; on the wire it is little-endian
+       `6b b6`); at least 50 magic markers must appear
+    3. Hub-side: `frames: sent` advances by ≥ 100 over the same
+       window (~312 expected at ODR 833 Hz / batch 8 ≈ 104 fps)
+    4. `frames: dropped` does not exceed 25 % of the sent delta
+- **Cleanup**: the test issues `btsensor imu off`, `btsensor bt off`,
+  `btsensor stop` once the checks complete
 
 ### Example invocations
 

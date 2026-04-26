@@ -337,23 +337,30 @@ essential for responsive button handling and short stop latency.
 
 ## RFCOMM payload (IMU frame)
 
-Little-endian, 12-byte header + 8 samples × 12 bytes = 108 bytes per
+Little-endian, 18-byte header + 8 samples × 16 bytes = 146 bytes per
 frame at the Kconfig default; up to 80 samples per frame are supported.
+Issue #56 Commit E reworked the wire format (new magic, FSR fields in
+the header, per-sample `ts_delta_us`) — see
+`docs/development/pc-receive-spp.md` for the full spec / parser.
 
 ```c
-struct spp_frame_hdr {
-    uint16_t magic;          // 0xA55A
-    uint16_t seq;            // monotonic per frame
-    uint32_t timestamp_us;   // first sample's hardware timestamp,
-                             // microseconds since session start
-    uint16_t sample_rate;    // 833 Hz, informational
-    uint8_t  sample_count;   // typically 8 (Kconfig default), up to 80
-    uint8_t  type;           // 0x01 = IMU
+struct spp_frame_hdr {                // 18 bytes
+    uint16_t magic;            // 0xB66B
+    uint8_t  type;             // 0x01 = IMU
+    uint8_t  sample_count;     // 1..80
+    uint16_t sample_rate_hz;   // current ODR (Hz)
+    uint16_t accel_fsr_g;      // 2 / 4 / 8 / 16
+    uint16_t gyro_fsr_dps;     // 125 / 250 / 500 / 1000 / 2000
+    uint16_t seq;              // monotonic per frame
+    uint32_t first_sample_ts_us; // low 32 bits of CLOCK_BOOTTIME us
+    uint16_t frame_len;        // = 18 + sample_count * 16
 };
 
-struct imu_sample {
-    int16_t ax, ay, az;      // LSM6DSL accel chip-frame raw LSB
-    int16_t gx, gy, gz;      // LSM6DSL gyro  chip-frame raw LSB
+struct imu_sample {                   // 16 bytes
+    int16_t  ax, ay, az;       // LSM6DSL accel chip-frame raw LSB
+    int16_t  gx, gy, gz;       // LSM6DSL gyro  chip-frame raw LSB
+    uint32_t ts_delta_us;      // sample.ts - first_sample_ts_us
+                               // (sample[0] = 0)
 };
 /* Convert with the driver's startup FSR (default ±8 g / ±2000 dps):
  *   accel_ms2  = raw * fsr_g  * 9.80665 / 32768
@@ -484,9 +491,11 @@ rate-limited send path or vendor-specific TX-queue flush.  In practice,
 - ❌ **MediaTek** (most cheap USB dongles and Logitech "Unifying"
   adapters)
 
-To verify a given adapter run `tools/rfcomm_receive.py --duration 30
---decode`; if the trailing `link ODR` does not collapse to ~0 within a
-few seconds, the adapter is OK.
+To verify a given adapter run the semi-automated H-5 test
+(`tests/test_bt_spp.py::test_bt_pc_pair_and_stream`); it opens
+`BTPROTO_RFCOMM` directly, captures ~3 s of frames, and asserts that
+the Hub-side `frames: sent` advances and `dropped` stays under 25 %
+of `sent`.  An adapter that survives H-5 cleanly is OK.
 
 ## Host-side receive
 

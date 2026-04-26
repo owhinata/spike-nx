@@ -450,10 +450,40 @@ Issue #52 で NuttX 標準 BT スタックを撤去し btstack + Classic BT SPP 
 
 ### H-5: test_bt_pc_pair_and_stream `@interactive`
 
-- **目的**: Linux または macOS の PC から SPP 接続 + フレーム受信までの手動検証
-- **前提**: Hub が H-4 まで合格している、PC (Linux or macOS) と blueutil/bluetoothctl が利用可能
-- **手順**: `docs/development/pc-receive-spp.md` の pair → RFCOMM open → magic `5a a5` 確認
-- **判定**: operator が目視で magic 付きストリームを確認
+半自動: Hub から動かせない部分 (ペアリング・RFCOMM open) は operator
+が実施し、その後の **ストリーム稼働確認は pytest が `btsensor status`
+を読んで自動判定** する。
+
+- **目的**: PC からのペアリング後、RFCOMM ストリームが正常に流れて
+  いることを Hub 側カウンタで検証する
+- **前提**: Hub が H-4 まで合格している、PC (Linux or macOS) と
+  blueutil/bluetoothctl が利用可能
+- **Hub 側セットアップ** (テストが自動実施): `reboot` →
+  `btsensor start` → `btsensor bt on` (advertising 開始) →
+  `btsensor imu on` (サンプル送出開始)。Issue #56 で BT/IMU は共に
+  既定 off となったため、operator にプロンプトを出す前に明示的に
+  advertising と IMU サンプリングを有効化する
+- **operator 操作**: `bluetoothctl` で 1 度ペアリング + trust する
+  だけ (BlueZ にリンクキーが残るので 2 回目以降はスキップ可)。
+  詳細は `docs/development/pc-receive-spp.md`。`rfcomm bind` /
+  `cat /dev/rfcomm0` は不要 — pytest が `BTPROTO_RFCOMM` ソケットを
+  直接開く。ペアリング済みの状態でテストプロンプトに ENTER
+- **pytest 側 connect**: `socket.socket(AF_BLUETOOTH, SOCK_STREAM,
+  BTPROTO_RFCOMM)` → `connect((bdaddr, 1))`。ソケットが作れない場合
+  (Linux 以外 / CAP_NET_RAW 不足) は自動 skip。Linux で sudo 実行が
+  必要
+- **pytest 検証** (socket connect 後):
+    1. `btsensor status` を最大 5 秒 polling して `bt:` が `paired` /
+       `rfcomm cid` が非 0 になるのを待つ (socket connect と Hub 側
+       channel open イベントの到着タイミングのずれを吸収)
+    2. PC 側: 3 秒間で 1 byte 以上を受信し、フレーム magic
+       `0xB66B` (Issue #56 Commit E。リトルエンディアンなので wire 上は
+       `6b b6`) を検出。magic マーカー数が 50 個以上
+    3. Hub 側: `frames: sent` が同じ 3 秒で +100 以上進む (ODR 833 Hz
+       / batch 8 ≒ 104 fps なので約 312 フレーム期待)
+    4. `frames: dropped` の増分が `sent` の増分の 25 % 以下
+- **後片付け**: 検証完了後、テスト側で `btsensor imu off` →
+  `btsensor bt off` → `btsensor stop` を実行
 
 ### 実行コマンド例
 
