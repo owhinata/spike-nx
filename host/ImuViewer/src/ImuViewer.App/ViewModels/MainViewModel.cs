@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -13,11 +14,17 @@ namespace ImuViewer.App.ViewModels;
 
 public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 {
+    private const int CalibrationSampleCount = 120; // ~2 seconds at 60 Hz tick
+
     private readonly IBluetoothPortEnumerator _portEnumerator;
     private readonly SessionOrchestrator _orchestrator;
     private readonly SensorAggregator _aggregator;
     private readonly MadgwickFilter _filter;
     private readonly FpsCounter _fps = new();
+
+    private Vector3 _gyroBiasRadS = Vector3.Zero;
+    private Vector3 _calibrationSum = Vector3.Zero;
+    private int _calibrationSamplesRemaining;
 
     public MainViewModel(
         IBluetoothPortEnumerator portEnumerator,
@@ -53,12 +60,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private string _statusText = "ready";
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(OrientationText))]
     private Quaternion _orientation = Quaternion.Identity;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AccelGText))]
     private Vector3 _accelG;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(GyroDpsText))]
     private Vector3 _gyroDps;
 
     [ObservableProperty]
@@ -79,9 +89,47 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     [ObservableProperty]
     private float _madgwickBeta = 0.1f;
 
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CalibrationStatusText))]
+    private bool _isCalibrating;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CalibrationStatusText))]
+    private bool _isGyroBiasCalibrated;
+
     public bool CanConnect => !IsConnected && SelectedPort is not null;
     public bool CanDisconnect => IsConnected;
     public bool CanToggleImu => IsConnected;
+
+    /// <summary>
+    /// Workaround for Avalonia binding paths not resolving fields on
+    /// System.Numerics.Quaternion (W/X/Y/Z are public fields, not properties).
+    /// </summary>
+    public string OrientationText =>
+        $"W={Fmt3(Orientation.W)}  X={Fmt3(Orientation.X)}  Y={Fmt3(Orientation.Y)}  Z={Fmt3(Orientation.Z)}";
+
+    public string AccelGText =>
+        $"{Fmt3(AccelG.X)} / {Fmt3(AccelG.Y)} / {Fmt3(AccelG.Z)}";
+
+    public string GyroDpsText =>
+        $"{Fmt1(GyroDps.X)} / {Fmt1(GyroDps.Y)} / {Fmt1(GyroDps.Z)}";
+
+    public string CalibrationStatusText
+    {
+        get
+        {
+            if (IsCalibrating)
+            {
+                return "calibrating gyro — keep Hub still";
+            }
+            if (!IsGyroBiasCalibrated)
+            {
+                return "gyro not calibrated (Cube may drift)";
+            }
+            const float radToDps = 180f / MathF.PI;
+            return $"bias: {Fmt2(_gyroBiasRadS.X * radToDps)} / {Fmt2(_gyroBiasRadS.Y * radToDps)} / {Fmt2(_gyroBiasRadS.Z * radToDps)} dps";
+        }
+    }
 
     partial void OnMadgwickBetaChanged(float value)
     {
@@ -97,7 +145,24 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         if (_aggregator.TryConsumeNext(out AggregatedSample sample))
         {
-            _filter.Update(sample.AccelG, sample.GyroRadS, 1f / 60f);
+            if (IsCalibrating)
+            {
+                _calibrationSum += sample.GyroRadS;
+                _calibrationSamplesRemaining--;
+                if (_calibrationSamplesRemaining <= 0)
+                {
+                    _gyroBiasRadS = _calibrationSum / CalibrationSampleCount;
+                    IsCalibrating = false;
+                    IsGyroBiasCalibrated = true;
+                    StatusText = "gyro calibrated";
+                    _filter.Reset();
+                }
+            }
+            else
+            {
+                Vector3 corrected = sample.GyroRadS - _gyroBiasRadS;
+                _filter.Update(sample.AccelG, corrected, 1f / 60f);
+            }
             AccelG = sample.AccelG;
             GyroDps = sample.GyroDps;
         }
@@ -213,6 +278,22 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         Orientation = _filter.Orientation;
     }
 
+    /// <summary>
+    /// Capture <see cref="CalibrationSampleCount"/> aggregated gyro samples,
+    /// average them, and use the result as a per-axis bias subtracted before
+    /// each Madgwick step. The user must hold the Hub stationary during the
+    /// ~2-second window. Yaw is unobservable from the accelerometer alone, so
+    /// without this step gyro Z DC offset accumulates as visible Cube spin.
+    /// </summary>
+    [RelayCommand]
+    public void CalibrateGyro()
+    {
+        _calibrationSum = Vector3.Zero;
+        _calibrationSamplesRemaining = CalibrationSampleCount;
+        IsCalibrating = true;
+        StatusText = "calibrating gyro — keep Hub still";
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _orchestrator.DisposeAsync();
@@ -226,4 +307,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             throw new InvalidOperationException($"{desc} -> {r}");
         }
     }
+
+    private static string Fmt1(float v) => v.ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture);
+    private static string Fmt2(float v) => v.ToString("+0.00;-0.00;0.00", CultureInfo.InvariantCulture);
+    private static string Fmt3(float v) => v.ToString("+0.000;-0.000;0.000", CultureInfo.InvariantCulture);
 }

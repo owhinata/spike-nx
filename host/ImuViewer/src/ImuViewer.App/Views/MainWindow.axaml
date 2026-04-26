@@ -70,44 +70,37 @@
           <TextBlock Grid.Column="0" Classes="label" Text="β (gain)" VerticalAlignment="Center" />
           <NumericUpDown Grid.Column="1" Minimum="0" Maximum="1" Increment="0.01" Value="{Binding MadgwickBeta}" />
         </Grid>
-        <Button Content="Reset orientation"
-                HorizontalAlignment="Stretch"
-                Command="{Binding ResetOrientationCommand}" />
+        <Grid ColumnDefinitions="*,*">
+          <Button Grid.Column="0" Content="Reset orientation"
+                  HorizontalAlignment="Stretch"
+                  Command="{Binding ResetOrientationCommand}" />
+          <Button Grid.Column="1" Content="Calibrate gyro"
+                  HorizontalAlignment="Stretch"
+                  Command="{Binding CalibrateGyroCommand}"
+                  IsEnabled="{Binding CanToggleImu}" />
+        </Grid>
+        <TextBlock Classes="value"
+                   Text="{Binding CalibrationStatusText}"
+                   FontSize="11"
+                   Foreground="#A0A0A0"
+                   TextWrapping="Wrap" />
 
         <TextBlock Classes="header" Text="Telemetry" />
-        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
-          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="quat W" />
+        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="quat" />
           <TextBlock Grid.Row="0" Grid.Column="1" Classes="value"
-                     Text="{Binding Orientation.W, StringFormat={}{0:+0.000;-0.000}}" />
-          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="quat X / Y / Z" />
-          <TextBlock Grid.Row="1" Grid.Column="1" Classes="value">
-            <Run Text="{Binding Orientation.X, StringFormat={}{0:+0.000;-0.000}}" />
-            <Run Text=" / " />
-            <Run Text="{Binding Orientation.Y, StringFormat={}{0:+0.000;-0.000}}" />
-            <Run Text=" / " />
-            <Run Text="{Binding Orientation.Z, StringFormat={}{0:+0.000;-0.000}}" />
-          </TextBlock>
-          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="accel (g)" />
-          <TextBlock Grid.Row="2" Grid.Column="1" Classes="value">
-            <Run Text="{Binding AccelG.X, StringFormat={}{0:+0.000;-0.000}}" />
-            <Run Text=" / " />
-            <Run Text="{Binding AccelG.Y, StringFormat={}{0:+0.000;-0.000}}" />
-            <Run Text=" / " />
-            <Run Text="{Binding AccelG.Z, StringFormat={}{0:+0.000;-0.000}}" />
-          </TextBlock>
-          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="gyro (dps)" />
-          <TextBlock Grid.Row="3" Grid.Column="1" Classes="value">
-            <Run Text="{Binding GyroDps.X, StringFormat={}{0:+0.0;-0.0}}" />
-            <Run Text=" / " />
-            <Run Text="{Binding GyroDps.Y, StringFormat={}{0:+0.0;-0.0}}" />
-            <Run Text=" / " />
-            <Run Text="{Binding GyroDps.Z, StringFormat={}{0:+0.0;-0.0}}" />
-          </TextBlock>
-          <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="frames/s" />
-          <TextBlock Grid.Row="4" Grid.Column="1" Classes="value"
+                     Text="{Binding OrientationText}" TextWrapping="Wrap" />
+          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="accel (g)" />
+          <TextBlock Grid.Row="1" Grid.Column="1" Classes="value"
+                     Text="{Binding AccelGText}" />
+          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="gyro (dps)" />
+          <TextBlock Grid.Row="2" Grid.Column="1" Classes="value"
+                     Text="{Binding GyroDpsText}" />
+          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="frames/s" />
+          <TextBlock Grid.Row="3" Grid.Column="1" Classes="value"
                      Text="{Binding MeasuredFps, StringFormat={}{0:0.0}}" />
-          <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="status" />
-          <TextBlock Grid.Row="5" Grid.Column="1" Classes="value" Text="{Binding StatusText}" />
+          <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="status" />
+          <TextBlock Grid.Row="4" Grid.Column="1" Classes="value" Text="{Binding StatusText}" />
         </Grid>
       </StackPanel>
     </ScrollViewer>
