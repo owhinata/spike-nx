@@ -1,7 +1,122 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:ImuViewer.App.ViewModels"
         x:Class="ImuViewer.App.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
         Title="ImuViewer"
-        Width="1024" Height="640">
-  <TextBlock Text="ImuViewer scaffold (Commit A)" Margin="16" />
+        Width="1024" Height="640"
+        Background="#1A1A1A">
+  <Window.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Foreground" Value="#A0A0A0" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="TextBlock.value">
+      <Setter Property="FontFamily" Value="Inter, monospace" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Foreground" Value="#E0E0E0" />
+    </Style>
+    <Style Selector="TextBlock.header">
+      <Setter Property="Foreground" Value="#80B0FF" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Margin" Value="0,8,0,4" />
+    </Style>
+  </Window.Styles>
+
+  <Grid ColumnDefinitions="320,*">
+    <ScrollViewer Grid.Column="0" Background="#222222" Padding="12">
+      <StackPanel Spacing="8">
+        <TextBlock Classes="header" Text="Bluetooth" />
+        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+          <ComboBox Grid.Row="0" Grid.Column="0"
+                    ItemsSource="{Binding Ports}"
+                    SelectedItem="{Binding SelectedPort}"
+                    PlaceholderText="(no port)" />
+          <Button Grid.Row="0" Grid.Column="1"
+                  Content="Refresh"
+                  Command="{Binding RefreshPortsCommand}" />
+          <Button Grid.Row="1" Grid.Column="0"
+                  Content="Connect"
+                  Command="{Binding ConnectCommand}"
+                  IsEnabled="{Binding CanConnect}" />
+          <Button Grid.Row="1" Grid.Column="1"
+                  Content="Disconnect"
+                  Command="{Binding DisconnectCommand}"
+                  IsEnabled="{Binding CanDisconnect}" />
+        </Grid>
+
+        <TextBlock Classes="header" Text="IMU control" />
+        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto">
+          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="ODR (Hz)" VerticalAlignment="Center" />
+          <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="13" Maximum="6660" Value="{Binding OdrHz}" />
+          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="BATCH" VerticalAlignment="Center" />
+          <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="1" Maximum="80" Value="{Binding Batch}" />
+          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Accel FSR (g)" VerticalAlignment="Center" />
+          <NumericUpDown Grid.Row="2" Grid.Column="1" Minimum="2" Maximum="16" Value="{Binding AccelFsrG}" />
+          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="Gyro FSR (dps)" VerticalAlignment="Center" />
+          <NumericUpDown Grid.Row="3" Grid.Column="1" Minimum="125" Maximum="2000" Value="{Binding GyroFsrDps}" />
+        </Grid>
+
+        <Grid ColumnDefinitions="*,*">
+          <Button Grid.Column="0" Content="IMU ON" HorizontalAlignment="Stretch"
+                  Command="{Binding ImuOnCommand}" IsEnabled="{Binding CanToggleImu}" />
+          <Button Grid.Column="1" Content="IMU OFF" HorizontalAlignment="Stretch"
+                  Command="{Binding ImuOffCommand}" IsEnabled="{Binding CanToggleImu}" />
+        </Grid>
+
+        <TextBlock Classes="header" Text="Madgwick" />
+        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto">
+          <TextBlock Grid.Column="0" Classes="label" Text="β (gain)" VerticalAlignment="Center" />
+          <NumericUpDown Grid.Column="1" Minimum="0" Maximum="1" Increment="0.01" Value="{Binding MadgwickBeta}" />
+        </Grid>
+        <Button Content="Reset orientation"
+                HorizontalAlignment="Stretch"
+                Command="{Binding ResetOrientationCommand}" />
+
+        <TextBlock Classes="header" Text="Telemetry" />
+        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
+          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="quat W" />
+          <TextBlock Grid.Row="0" Grid.Column="1" Classes="value"
+                     Text="{Binding Orientation.W, StringFormat={}{0:+0.000;-0.000}}" />
+          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="quat X / Y / Z" />
+          <TextBlock Grid.Row="1" Grid.Column="1" Classes="value">
+            <Run Text="{Binding Orientation.X, StringFormat={}{0:+0.000;-0.000}}" />
+            <Run Text=" / " />
+            <Run Text="{Binding Orientation.Y, StringFormat={}{0:+0.000;-0.000}}" />
+            <Run Text=" / " />
+            <Run Text="{Binding Orientation.Z, StringFormat={}{0:+0.000;-0.000}}" />
+          </TextBlock>
+          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="accel (g)" />
+          <TextBlock Grid.Row="2" Grid.Column="1" Classes="value">
+            <Run Text="{Binding AccelG.X, StringFormat={}{0:+0.000;-0.000}}" />
+            <Run Text=" / " />
+            <Run Text="{Binding AccelG.Y, StringFormat={}{0:+0.000;-0.000}}" />
+            <Run Text=" / " />
+            <Run Text="{Binding AccelG.Z, StringFormat={}{0:+0.000;-0.000}}" />
+          </TextBlock>
+          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="gyro (dps)" />
+          <TextBlock Grid.Row="3" Grid.Column="1" Classes="value">
+            <Run Text="{Binding GyroDps.X, StringFormat={}{0:+0.0;-0.0}}" />
+            <Run Text=" / " />
+            <Run Text="{Binding GyroDps.Y, StringFormat={}{0:+0.0;-0.0}}" />
+            <Run Text=" / " />
+            <Run Text="{Binding GyroDps.Z, StringFormat={}{0:+0.0;-0.0}}" />
+          </TextBlock>
+          <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="frames/s" />
+          <TextBlock Grid.Row="4" Grid.Column="1" Classes="value"
+                     Text="{Binding MeasuredFps, StringFormat={}{0:0.0}}" />
+          <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="status" />
+          <TextBlock Grid.Row="5" Grid.Column="1" Classes="value" Text="{Binding StatusText}" />
+        </Grid>
+      </StackPanel>
+    </ScrollViewer>
+
+    <Border Grid.Column="1" Background="#202225">
+      <TextBlock HorizontalAlignment="Center"
+                 VerticalAlignment="Center"
+                 Foreground="#606060"
+                 FontStyle="Italic"
+                 Text="(3D scene placeholder — wired in commit G)" />
+    </Border>
+  </Grid>
 </Window>
