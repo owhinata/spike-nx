@@ -29,16 +29,40 @@ def test_battery_monitor(p):
     assert len(data_lines) >= 3, f"Expected 3+ data lines, got {len(data_lines)}"
 
 
-def test_imu_accel(p):
-    """B-4: accelerometer sensor test."""
-    output = p.sendCommand("sensortest -n 3 accel0", timeout=15)
-    assert "number:3/3" in output
+def test_imu_uorb_topic(p):
+    """B-4: combined IMU uORB topic is registered.
+
+    After the Issue #56 rework the LSM6DSL driver publishes a single
+    /dev/uorb/sensor_imu0 with raw int16 accel+gyro instead of separate
+    sensor_accel0 / sensor_gyro0 topics, so sensortest cannot drive it
+    (no `imu` entry in NuttX's sensor_info table).  Verifying the device
+    node is the closest direct check that the driver bound at boot.
+    """
+    output = p.sendCommand("ls /dev/uorb/sensor_imu0")
+    assert "sensor_imu0" in output, (
+        f"sensor_imu0 topic not registered: {output!r}"
+    )
+    assert "No such file" not in output
 
 
-def test_imu_gyro(p):
-    """B-5: gyroscope sensor test."""
-    output = p.sendCommand("sensortest -n 3 gyro0", timeout=15)
-    assert "number:3/3" in output
+def test_imu_raw_dump(p):
+    """B-5: combined IMU topic publishes samples (driver runs at 833 Hz).
+
+    Drives the imu daemon to activate the topic and uses `imu accel raw
+    200` to dump int16 samples for 200 ms.  At ODR=833 Hz we expect ~167
+    samples — assert at least 50 to give plenty of margin for jitter and
+    poll wake-up delay.
+    """
+    p.sendCommand("imu start", timeout=5)
+    try:
+        time.sleep(1)  # let the daemon open the topic and start polling
+        output = p.sendCommand("imu accel raw 200", timeout=5)
+        m = re.search(r"#\s*(\d+)\s+sample\(s\)\s+over\s+200\s+ms", output)
+        assert m, f"trailer line missing: {output!r}"
+        n = int(m.group(1))
+        assert n >= 50, f"too few samples in 200 ms: {n}"
+    finally:
+        p.sendCommand("imu stop", timeout=5)
 
 
 def test_imu_fusion(p):

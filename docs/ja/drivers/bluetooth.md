@@ -287,13 +287,19 @@ Issue #47 で使っていた `CONFIG_WIRELESS_BLUETOOTH_HOST` / `CONFIG_NET_BLUE
 nsh> ls /dev/ttyBT
 /dev/ttyBT
 
-nsh> dmesg | grep BT
-BT: CC2564C powered, /dev/ttyBT ready
+nsh> dmesg                                 # この defconfig には grep が無い
+... BT: CC2564C powered, /dev/ttyBT ready
+...
 
-nsh> btsensor &
-btsensor [5:100]
-btsensor: bringing up btstack on /dev/ttyBT
-btsensor: HCI working, BD_ADDR F8:2E:0C:A0:3E:64 — advertising as "SPIKE-BT-Sensor"
+nsh> btsensor start                        # daemon を起動 (BT/IMU は共に off)
+btsensor: started (pid 6)
+
+nsh> dmesg                                 # バナーは syslog -> RAMLOG 経由
+... btsensor: bringing up btstack on /dev/ttyBT
+... btsensor: HCI working, BD_ADDR F8:2E:0C:A0:3E:64 — adv off ("SPIKE-BT-Sensor" hidden until BT button)
+
+nsh> btsensor bt on                        # BT advertising を有効化 (BT ボタン短押しでも可)
+OK
 ```
 
 ## ホスト adapter 互換性 (sustained streaming)

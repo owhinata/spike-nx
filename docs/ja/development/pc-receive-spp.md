@@ -21,7 +21,8 @@ sudo dnf install bluez bluez-tools
 
 ### ペアリング
 
-Hub で `btsensor &` が起動している状態で:
+Hub で daemon が起動し BT advertising が出ている状態で
+(`btsensor start [batch]` → BT ボタン短押し、または PC から `btsensor bt on`):
 
 ```bash
 bluetoothctl

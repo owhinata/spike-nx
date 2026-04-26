@@ -1,8 +1,12 @@
-"""Category H: btstack-based Classic BT SPP (Issue #52).
+"""Category H: btstack-based Classic BT SPP (Issue #52, #56).
 
 These tests verify the Hub-side half of the IMU→SPP stream:
 the CC2564C brings HCI to WORKING on /dev/ttyBT, the btsensor NSH
-command is registered and powers on the SPP service.
+builtin spawns its daemon, and the daemon reaches HCI_STATE_WORKING.
+
+After Issue #56 btsensor is a start/stop daemon (no longer `btsensor &`)
+and its banners go through syslog → RAMLOG instead of stdout, so the
+HCI_WORKING check polls `dmesg` rather than the live console.
 
 PC-side receive verification (pair, RFCOMM bind, magic decode) lives
 under docs/{ja,en}/development/pc-receive-spp.md and requires a Linux or
@@ -11,6 +15,7 @@ than an automated test.
 """
 
 import re
+import time
 
 import pytest
 
@@ -33,36 +38,66 @@ def test_bt_powered_banner(p):
 
 
 def test_bt_btsensor_builtin(p):
-    """H-3: the btsensor NSH builtin is available."""
-    output = p.sendCommand("help | grep btsensor")
+    """H-3: the btsensor NSH builtin is available.
+
+    `grep` is not enabled in the usbnsh defconfig, so we read the full
+    `help` listing and substring-match instead of piping.
+    """
+    output = p.sendCommand("help")
     assert "btsensor" in output, (
         f"btsensor builtin not registered: {output!r}"
     )
 
 
 def test_bt_btsensor_hci_working(p):
-    """H-4: `btsensor &` reaches HCI_STATE_WORKING within a few seconds
-    and prints a valid BD address.  The background launch leaves the
-    task alive so subsequent tests exercise the same stack instance —
-    those tests must tolerate an already-running daemon.
+    """H-4: `btsensor start` reaches HCI_STATE_WORKING within a few
+    seconds and logs a valid BD address.
+
+    Banners come from syslog → RAMLOG (CONFIG_RAMLOG_SYSLOG=y, no
+    SYSLOG_CONSOLE), so we poll `dmesg` instead of expecting on the
+    live serial console.  We reboot first so the btstack state is
+    pristine — empirically, `btsensor start` after the rest of the
+    test session has run sometimes fails to reach HCI_STATE_WORKING
+    (the action queue then returns ``timed out``).  A clean boot
+    consistently brings HCI up within ~1 s.
     """
-    p.sendCommand("btsensor &", timeout=2)
+    p.reboot(timeout=15)
 
-    # The HCI_STATE_WORKING banner lands asynchronously; scan the
-    # console output until it appears (the default sendCommand prompt
-    # wait races with the async print, so we drive pexpect directly).
-    p.proc.expect(r"btsensor: HCI working, BD_ADDR "
-                  r"([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:"
-                  r"[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2})",
-                  timeout=5)
+    # Drain pre-existing RAMLOG content so the banner search is not
+    # confused by leftovers from earlier sessions.  RAMLOG_NONBLOCK is
+    # off so dmesg blocks-then-returns the buffered text.
+    p.sendCommand("dmesg", timeout=5)
 
-    bdaddr = p.proc.match.group(1).decode()
-    assert bdaddr != "00:00:00:00:00:00", f"BD address all zeros: {bdaddr}"
-    assert bdaddr != "ff:ff:ff:ff:ff:ff", f"BD address all ones: {bdaddr}"
+    out = p.sendCommand("btsensor start", timeout=5)
+    assert "started (pid" in out, f"btsensor start failed: {out!r}"
 
-    # Consume the prompt that follows the banner so later tests start
-    # from a clean state.
-    p.proc.expect(r"nsh> ", timeout=2)
+    # HCI bring-up over the CC2564C UART completes in ~1 s on a fresh
+    # boot; allow up to 6 s to absorb jitter.
+    # bd_addr_to_str() prints uppercase hex (e.g. F8:2E:0C:...).
+    pattern = re.compile(
+        r"btsensor: HCI working, BD_ADDR "
+        r"((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})"
+    )
+    bdaddr = None
+    deadline = time.time() + 6.0
+    try:
+        while time.time() < deadline:
+            time.sleep(0.5)
+            log = p.sendCommand("dmesg", timeout=5)
+            m = pattern.search(log)
+            if m:
+                bdaddr = m.group(1)
+                break
+
+        assert bdaddr is not None, (
+            "btsensor: HCI working banner not seen within 6 s"
+        )
+        assert bdaddr != "00:00:00:00:00:00", f"BD address all zeros: {bdaddr}"
+        assert bdaddr != "ff:ff:ff:ff:ff:ff", f"BD address all ones: {bdaddr}"
+    finally:
+        # Always stop so subsequent tests start from a clean state.
+        p.sendCommand("btsensor stop", timeout=5)
+        time.sleep(1)
 
 
 @pytest.mark.interactive

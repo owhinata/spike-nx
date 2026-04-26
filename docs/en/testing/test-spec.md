@@ -101,17 +101,26 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 - **Command**: `battery monitor 3`
 - **Pass criteria**: 3+ data lines, no `FAULT`
 
-### B-4: test_imu_accel
+### B-4: test_imu_uorb_topic
 
-- **Purpose**: Accelerometer operation
-- **Command**: `sensortest -n 3 accel0`
-- **Pass criteria**: Contains `number:3/3`
+- **Purpose**: Combined IMU uORB topic is registered (the LSM6DSL
+  driver was reworked under Issue #56 to publish a single
+  `sensor_imu0` topic with raw int16 accel + gyro instead of separate
+  `sensor_accel0` / `sensor_gyro0` topics)
+- **Command**: `ls /dev/uorb/sensor_imu0`
+- **Pass criteria**: Output contains `sensor_imu0`, no `No such file`
+- **Notes**: NuttX `sensortest` has no `imu` entry in its sensor table
+  (`apps/system/sensortest/sensortest.c`), so the device-node check is
+  the closest direct verification that the driver bound at boot
 
-### B-5: test_imu_gyro
+### B-5: test_imu_raw_dump
 
-- **Purpose**: Gyroscope operation
-- **Command**: `sensortest -n 3 gyro0`
-- **Pass criteria**: Contains `number:3/3`
+- **Purpose**: Combined IMU topic publishes samples at the configured
+  ODR (833 Hz default after Issue #56)
+- **Command**: `imu start` → `imu accel raw 200` → `imu stop`
+- **Pass criteria**: Trailer line `# N sample(s) over 200 ms` with
+  N ≥ 50 (≈167 samples expected at ODR 833 Hz, with margin for poll
+  jitter)
 
 ### B-6: test_imu_fusion
 
@@ -417,15 +426,30 @@ Issue #52 replaced the NuttX stock BT host stack with btstack + Classic BT SPP, 
 ### H-3: test_bt_btsensor_builtin
 
 - **Goal**: the btsensor NSH builtin is registered
-- **Command**: `help | grep btsensor`
+- **Command**: `help` (substring match — `grep` is not enabled in the
+  usbnsh defconfig)
 - **Check**: output lists `btsensor`
 
 ### H-4: test_bt_btsensor_hci_working
 
-- **Goal**: `btsensor &` drives btstack into HCI_STATE_WORKING and returns a plausible BD address
-- **Command**: `btsensor &`
-- **Check**: expect `btsensor: HCI working, BD_ADDR <xx:xx:xx:xx:xx:xx>`; BD address is not all zeros nor all ones
-- **Side effect**: the btstack daemon stays alive until the next `reboot` or power cycle
+- **Goal**: `btsensor start` drives btstack into HCI_STATE_WORKING and
+  logs a plausible BD address
+- **Procedure**:
+    1. `reboot` — empirically the first `btsensor start` after a fresh
+       boot consistently reaches WORKING in ~1 s; restarts after the
+       rest of the test session can fall into a stuck state where the
+       action queue returns `timed out`
+    2. drain RAMLOG once with `dmesg`
+    3. `btsensor start` → expect `started (pid N)`
+    4. poll `dmesg` (0.5 s interval, 6 s deadline) for
+       `btsensor: HCI working, BD_ADDR <XX:XX:XX:XX:XX:XX>`
+- **Pass criteria**: banner is found and BD address is neither
+  all-zeros nor all-ones (uppercase hex per `bd_addr_to_str()`)
+- **Cleanup**: `btsensor stop` so the daemon does not leak into
+  subsequent tests
+- **Notes**: banners go through `syslog()` → RAMLOG
+  (`CONFIG_RAMLOG_SYSLOG=y` without `SYSLOG_CONSOLE`), so they are
+  read via `dmesg`, not from the live serial console
 
 ### H-5: test_bt_pc_pair_and_stream `@interactive`
 

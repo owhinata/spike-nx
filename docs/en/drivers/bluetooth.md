@@ -445,13 +445,19 @@ Step A.
 nsh> ls /dev/ttyBT
 /dev/ttyBT
 
-nsh> dmesg | grep BT
-BT: CC2564C powered, /dev/ttyBT ready
+nsh> dmesg                                # `grep` is not in this defconfig
+... BT: CC2564C powered, /dev/ttyBT ready
+...
 
-nsh> btsensor &
-btsensor [5:100]
-btsensor: bringing up btstack on /dev/ttyBT
-btsensor: HCI working, BD_ADDR F8:2E:0C:A0:3E:64 — advertising as "SPIKE-BT-Sensor"
+nsh> btsensor start                       # spawn the daemon (BT/IMU both off)
+btsensor: started (pid 6)
+
+nsh> dmesg                                # banner is logged via syslog -> RAMLOG
+... btsensor: bringing up btstack on /dev/ttyBT
+... btsensor: HCI working, BD_ADDR F8:2E:0C:A0:3E:64 — adv off ("SPIKE-BT-Sensor" hidden until BT button)
+
+nsh> btsensor bt on                       # turn BT advertising on (or short-press BT button)
+OK
 ```
 
 ## Host adapter compatibility (sustained streaming)

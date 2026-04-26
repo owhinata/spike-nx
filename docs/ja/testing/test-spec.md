@@ -101,17 +101,24 @@ export NUTTX_DEVICE=/dev/tty.usbmodem01
 - **コマンド**: `battery monitor 3`
 - **判定**: 3 行以上のデータ行、`FAULT` なし
 
-### B-4: test_imu_accel
+### B-4: test_imu_uorb_topic
 
-- **目的**: 加速度センサーの動作確認
-- **コマンド**: `sensortest -n 3 accel0`
-- **判定**: `number:3/3` を含む
+- **目的**: 統合 IMU uORB トピックの登録確認 (Issue #56 で LSM6DSL
+  ドライバを生値 int16 の単一トピック `sensor_imu0` 公開に変更。旧
+  `sensor_accel0` / `sensor_gyro0` は廃止)
+- **コマンド**: `ls /dev/uorb/sensor_imu0`
+- **判定**: 出力に `sensor_imu0` を含み、`No such file` が出ないこと
+- **備考**: NuttX `sensortest` のセンサテーブル
+  (`apps/system/sensortest/sensortest.c`) には `imu` エントリが無いため、
+  デバイスノード存在確認がドライバ起動の最も直接的な検証になる
 
-### B-5: test_imu_gyro
+### B-5: test_imu_raw_dump
 
-- **目的**: ジャイロスコープの動作確認
-- **コマンド**: `sensortest -n 3 gyro0`
-- **判定**: `number:3/3` を含む
+- **目的**: 統合 IMU トピックが設定 ODR (Issue #56 後の既定 833 Hz) で
+  サンプルを publish していること
+- **コマンド**: `imu start` → `imu accel raw 200` → `imu stop`
+- **判定**: 末尾行 `# N sample(s) over 200 ms` の N が 50 以上
+  (ODR 833 Hz だと約 167 サンプル。poll jitter のマージンを含めて 50)
 
 ### B-6: test_imu_fusion
 
@@ -417,15 +424,29 @@ Issue #52 で NuttX 標準 BT スタックを撤去し btstack + Classic BT SPP 
 ### H-3: test_bt_btsensor_builtin
 
 - **目的**: btsensor NSH builtin が登録されていること
-- **コマンド**: `help | grep btsensor`
+- **コマンド**: `help` (usbnsh defconfig には `grep` が無いため部分一致で判定)
 - **判定**: 出力に `btsensor` を含む
 
 ### H-4: test_bt_btsensor_hci_working
 
-- **目的**: `btsensor &` で btstack が HCI_STATE_WORKING に到達し、正当な BD アドレスが得られること
-- **コマンド**: `btsensor &`
-- **判定**: `btsensor: HCI working, BD_ADDR <xx:xx:xx:xx:xx:xx>` を expect し、BD アドレスがオール 0 / オール F でない
-- **副作用**: btstack が起動しっぱなしになる (NSH を `reboot` するか電源 off しない限り停止しない)
+- **目的**: `btsensor start` で btstack が HCI_STATE_WORKING に到達し、
+  正当な BD アドレスが logged されること
+- **手順**:
+    1. `reboot` — 経験的に、起動直後の最初の `btsensor start` は
+       ~1 秒で確実に WORKING に到達する一方、他テスト後の再起動では
+       action queue が `timed out` を返すケースが観測されているため、
+       クリーンな状態から始める
+    2. `dmesg` で RAMLOG を一度 drain
+    3. `btsensor start` を実行し `started (pid N)` を確認
+    4. `dmesg` を 0.5 秒間隔・最大 6 秒で polling し
+       `btsensor: HCI working, BD_ADDR <XX:XX:XX:XX:XX:XX>` を検索
+- **判定**: バナーが見つかり、BD アドレスがオール 0 / オール F でない
+  (`bd_addr_to_str()` は大文字 hex を返すため正規表現は両ケース許容)
+- **後片付け**: `btsensor stop` で daemon を確実に止め、後続テストへ
+  リークさせない
+- **備考**: バナーは `syslog()` → RAMLOG (`CONFIG_RAMLOG_SYSLOG=y` で
+  `SYSLOG_CONSOLE` 無し) を経由するため、ライブのシリアルコンソール
+  ではなく `dmesg` で読む必要がある
 
 ### H-5: test_bt_pc_pair_and_stream `@interactive`
 
