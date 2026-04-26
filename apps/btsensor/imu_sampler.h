@@ -10,6 +10,7 @@
 #ifndef __APPS_BTSENSOR_IMU_SAMPLER_H
 #define __APPS_BTSENSOR_IMU_SAMPLER_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #if defined __cplusplus
@@ -32,20 +33,41 @@ extern "C" {
 
 void imu_sampler_configure(uint8_t batch);
 
-/* Open /dev/uorb/sensor_imu0 and register it as a btstack data source.
- * Must be called after btstack_run_loop_init().  Returns 0 on success
- * or a negated errno; on failure the data source is not registered and
- * subsequent set_rfcomm_cid / on_can_send_now calls are no-ops.
+/* Initialise the sampler module.  Does NOT start sampling — call
+ * imu_sampler_set_enabled(true) (or have the PC send `IMU ON`) to
+ * begin streaming.  Returns 0 on success.
  */
 
 int  imu_sampler_init(void);
 
-/* Reverse of imu_sampler_init(): remove the data source, close the fd,
- * and reset internal state so the next init() starts clean.  Safe to
- * call from the BTstack main thread; not safe from interrupt context.
+/* Module shutdown.  Implicitly disables sampling first so the kernel
+ * driver is dropped to OFF.  Safe from the BTstack main thread.
  */
 
 void imu_sampler_deinit(void);
+
+/* Toggle IMU sampling.  Returns 0 on success.  The driver is opened
+ * (auto-activates) when on=true and closed (auto-deactivates) when
+ * on=false; subsequent set_* / get-state calls work without an open
+ * data fd because they use a transient O_WRONLY ioctl fd that does
+ * not subscribe.
+ */
+
+int  imu_sampler_set_enabled(bool on);
+
+/* Current sampling state. */
+
+bool imu_sampler_is_enabled(void);
+
+/* Reconfiguration helpers — return -EBUSY while sampling is enabled.
+ * On ioctl failure the local cache is rolled back to the previous value
+ * so reads via get-state stay consistent with the hardware.
+ */
+
+int  imu_sampler_set_odr_hz(uint32_t hz);
+int  imu_sampler_set_batch(uint8_t n);
+int  imu_sampler_set_accel_fsr(uint32_t g);
+int  imu_sampler_set_gyro_fsr(uint32_t dps);
 
 /* Notify the sampler that the RFCOMM channel is open (cid != 0) or
  * closed (cid == 0).  Forwarded to btsensor_tx so the arbiter knows

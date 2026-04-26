@@ -150,7 +150,11 @@ struct lsm6dsl_dev_s
   mutex_t devlock;
   sem_t run;                   /* Polling thread wakeup */
   struct work_s work;          /* HPWORK for interrupt mode */
-  enum lsm6dsl_odr_e odr;
+  enum lsm6dsl_odr_e odr;        /* Live HW ODR (OFF when deactivated) */
+  enum lsm6dsl_odr_e cfg_odr;    /* User-configured ODR; persists across
+                                  * activate cycles so SET ODR while OFF
+                                  * is remembered and applied at the next
+                                  * SNIOC_ACTIVATE(true). */
   int fsr_gy;
   int fsr_xl;
   bool active;                 /* Sampling enabled */
@@ -457,7 +461,7 @@ static int lsm6dsl_activate(FAR struct sensor_lowerhalf_s *lower,
 
   if (enable && !dev->active)
     {
-      err = lsm6dsl_set_odr(dev, DEFAULT_ODR);
+      err = lsm6dsl_set_odr(dev, dev->cfg_odr);
       if (err < 0)
         {
           goto unlock;
@@ -540,11 +544,14 @@ static int lsm6dsl_set_interval(FAR struct sensor_lowerhalf_s *lower,
       goto unlock;
     }
 
-  err = lsm6dsl_set_odr(dev, odr);
-  if (err >= 0)
-    {
-      *period_us = g_odr_interval[odr];
-    }
+  /* Just remember the new ODR; the chip is in OFF state while !active,
+   * and lsm6dsl_activate() will write the configured ODR to the
+   * hardware on the next SNIOC_ACTIVATE(true).
+   */
+
+  dev->cfg_odr = odr;
+  *period_us   = g_odr_interval[odr];
+  err = OK;
 
 unlock:
   nxmutex_unlock(&dev->devlock);
@@ -570,7 +577,10 @@ static int set_samplerate_hz(FAR struct lsm6dsl_dev_s *dev, uint32_t hz)
     default:    return -EINVAL;
     }
 
-  return lsm6dsl_set_odr(dev, odr);
+  /* Caller (lsm6dsl_control) already enforces -EBUSY when active. */
+
+  dev->cfg_odr = odr;
+  return OK;
 }
 
 static int lsm6dsl_get_info(FAR struct sensor_lowerhalf_s *lower,
@@ -779,11 +789,12 @@ int lsm6dsl_register_uorb(FAR struct i2c_master_s *i2c, uint8_t addr,
       return -ENOMEM;
     }
 
-  priv->i2c    = i2c;
-  priv->addr   = addr;
-  priv->odr    = ODR_OFF;
-  priv->fsr_gy = DEFAULT_FSR_GY;
-  priv->fsr_xl = DEFAULT_FSR_XL;
+  priv->i2c     = i2c;
+  priv->addr    = addr;
+  priv->odr     = ODR_OFF;
+  priv->cfg_odr = DEFAULT_ODR;
+  priv->fsr_gy  = DEFAULT_FSR_GY;
+  priv->fsr_xl  = DEFAULT_FSR_XL;
 
   err = nxmutex_init(&priv->devlock);
   if (err < 0)

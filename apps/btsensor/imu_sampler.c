@@ -38,9 +38,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <syslog.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <nuttx/sensors/ioctl.h>
 
 #include <arch/board/board_lsm6dsl.h>
 
@@ -75,6 +78,17 @@
 static btstack_data_source_t g_imu_ds;
 static int                   g_imu_fd = -1;
 static bool                  g_initialized;
+static bool                  g_enabled;
+
+/* Cached configuration.  Mirrors the LSM6DSL driver's startup state
+ * (Commit A) so the first PC-side `SET *` while disabled lines up with
+ * the actual hardware.  These are kept in sync with the driver via
+ * ioctl in imu_sampler_set_*; on ioctl failure we roll back the cache.
+ */
+
+static uint32_t g_odr_hz       = 833;
+static uint32_t g_accel_fsr_g  = 8;
+static uint32_t g_gyro_fsr_dps = 2000;
 
 /* Frame in progress (assembled sample-by-sample in a stack-resident
  * scratch buffer flushed via btsensor_tx_try_enqueue_frame()).
@@ -218,6 +232,11 @@ int imu_sampler_init(void)
       return 0;
     }
 
+  /* Module bring-up only: do not open the driver fd yet — sampling
+   * starts when the PC sends `IMU ON` (or the daemon explicitly calls
+   * imu_sampler_set_enabled(true)).
+   */
+
   struct timespec start;
   clock_gettime(CLOCK_BOOTTIME, &start);
   uint64_t start_us = (uint64_t)start.tv_sec * 1000000ULL +
@@ -225,21 +244,8 @@ int imu_sampler_init(void)
   g_start_us       = (uint32_t)start_us;
   g_seq            = 0;
   g_current_count  = 0;
-
-  g_imu_fd = open(IMU_DEVPATH, O_RDONLY | O_NONBLOCK);
-  if (g_imu_fd < 0)
-    {
-      syslog(LOG_ERR, "btsensor: open %s errno %d\n", IMU_DEVPATH, errno);
-      return -errno;
-    }
-
-  btstack_run_loop_set_data_source_fd(&g_imu_ds, g_imu_fd);
-  btstack_run_loop_set_data_source_handler(&g_imu_ds, imu_process);
-  btstack_run_loop_add_data_source(&g_imu_ds);
-  btstack_run_loop_enable_data_source_callbacks(
-      &g_imu_ds, DATA_SOURCE_CALLBACK_READ);
-
-  g_initialized = true;
+  g_enabled        = false;
+  g_initialized    = true;
   return 0;
 }
 
@@ -250,19 +256,177 @@ void imu_sampler_deinit(void)
       return;
     }
 
-  btstack_run_loop_disable_data_source_callbacks(
-      &g_imu_ds, DATA_SOURCE_CALLBACK_READ);
-  btstack_run_loop_remove_data_source(&g_imu_ds);
+  imu_sampler_set_enabled(false);
+  g_initialized = false;
+}
 
-  if (g_imu_fd >= 0)
+bool imu_sampler_is_enabled(void)
+{
+  return g_enabled;
+}
+
+int imu_sampler_set_enabled(bool on)
+{
+  if (!g_initialized)
     {
-      close(g_imu_fd);
-      g_imu_fd = -1;
+      return -EINVAL;
     }
 
-  g_current_count = 0;
-  g_seq           = 0;
-  g_initialized   = false;
+  if (on == g_enabled)
+    {
+      return 0;
+    }
+
+  if (on)
+    {
+      g_imu_fd = open(IMU_DEVPATH, O_RDONLY | O_NONBLOCK);
+      if (g_imu_fd < 0)
+        {
+          syslog(LOG_ERR, "btsensor: open %s errno %d\n",
+                 IMU_DEVPATH, errno);
+          return -errno;
+        }
+
+      btstack_run_loop_set_data_source_fd(&g_imu_ds, g_imu_fd);
+      btstack_run_loop_set_data_source_handler(&g_imu_ds, imu_process);
+      btstack_run_loop_add_data_source(&g_imu_ds);
+      btstack_run_loop_enable_data_source_callbacks(
+          &g_imu_ds, DATA_SOURCE_CALLBACK_READ);
+
+      g_current_count = 0;
+      g_enabled       = true;
+      syslog(LOG_INFO, "btsensor: IMU sampling on (%u Hz / %ug / %udps)\n",
+             (unsigned)g_odr_hz, (unsigned)g_accel_fsr_g,
+             (unsigned)g_gyro_fsr_dps);
+    }
+  else
+    {
+      btstack_run_loop_disable_data_source_callbacks(
+          &g_imu_ds, DATA_SOURCE_CALLBACK_READ);
+      btstack_run_loop_remove_data_source(&g_imu_ds);
+
+      if (g_imu_fd >= 0)
+        {
+          close(g_imu_fd);
+          g_imu_fd = -1;
+        }
+
+      g_current_count = 0;
+      g_enabled       = false;
+      syslog(LOG_INFO, "btsensor: IMU sampling off\n");
+    }
+
+  return 0;
+}
+
+/* Open a transient O_WRONLY fd to issue a reconfiguration ioctl without
+ * subscribing to the topic (sensor upper-half only auto-activates on
+ * O_RDOK).  Returns the fd or a negated errno.
+ */
+
+static int imu_open_ctrl_fd(void)
+{
+  int fd = open(IMU_DEVPATH, O_WRONLY);
+  if (fd < 0)
+    {
+      return -errno;
+    }
+
+  return fd;
+}
+
+int imu_sampler_set_odr_hz(uint32_t hz)
+{
+  if (g_enabled)
+    {
+      return -EBUSY;
+    }
+
+  int fd = imu_open_ctrl_fd();
+  if (fd < 0)
+    {
+      return fd;
+    }
+
+  uint32_t prev = g_odr_hz;
+  g_odr_hz = hz;
+  int rc = ioctl(fd, SNIOC_SETSAMPLERATE, hz);
+  close(fd);
+  if (rc < 0)
+    {
+      g_odr_hz = prev;
+      return -errno;
+    }
+
+  return 0;
+}
+
+int imu_sampler_set_batch(uint8_t n)
+{
+  if (g_enabled)
+    {
+      return -EBUSY;
+    }
+
+  if (n == 0 || n > BTSENSOR_FRAME_MAX_SAMPLES)
+    {
+      return -EINVAL;
+    }
+
+  g_batch = n;
+  return 0;
+}
+
+int imu_sampler_set_accel_fsr(uint32_t g)
+{
+  if (g_enabled)
+    {
+      return -EBUSY;
+    }
+
+  int fd = imu_open_ctrl_fd();
+  if (fd < 0)
+    {
+      return fd;
+    }
+
+  uint32_t prev = g_accel_fsr_g;
+  g_accel_fsr_g = g;
+  int rc = ioctl(fd, LSM6DSL_IOC_SETACCELFSR, g);
+  close(fd);
+  if (rc < 0)
+    {
+      g_accel_fsr_g = prev;
+      return -errno;
+    }
+
+  return 0;
+}
+
+int imu_sampler_set_gyro_fsr(uint32_t dps)
+{
+  if (g_enabled)
+    {
+      return -EBUSY;
+    }
+
+  int fd = imu_open_ctrl_fd();
+  if (fd < 0)
+    {
+      return fd;
+    }
+
+  uint32_t prev = g_gyro_fsr_dps;
+  g_gyro_fsr_dps = dps;
+  int rc = ioctl(fd, LSM6DSL_IOC_SETGYROFSR, dps);
+  close(fd);
+  if (rc < 0)
+    {
+      g_gyro_fsr_dps = prev;
+      return -errno;
+    }
+
+  return 0;
 }
 
 void imu_sampler_set_rfcomm_cid(uint16_t rfcomm_cid, uint16_t mtu)

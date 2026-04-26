@@ -27,6 +27,7 @@
 #include "gap.h"
 #include "hci.h"
 
+#include "btsensor_cmd.h"
 #include "btsensor_spp.h"
 #include "btsensor_tx.h"
 #include "imu_sampler.h"
@@ -152,9 +153,7 @@ static void spp_packet_handler(uint8_t packet_type, uint16_t channel,
         break;
 
       case RFCOMM_DATA_PACKET:
-        /* Commit D wires the ASCII command parser here. */
-
-        syslog(LOG_DEBUG, "btsensor: RFCOMM rx %u bytes\n", size);
+        btsensor_cmd_feed(packet, size);
         break;
 
       default:

@@ -47,6 +47,7 @@
 #include "btstack_run_loop_nuttx.h"
 #include "btstack_uart_nuttx.h"
 #include "btsensor_button.h"
+#include "btsensor_cmd.h"
 #include "btsensor_led.h"
 #include "btsensor_spp.h"
 #include "btsensor_tx.h"
@@ -474,6 +475,7 @@ static int btsensor_daemon(int argc, char **argv)
    */
 
   btsensor_tx_init();
+  btsensor_cmd_init();
 
   if (imu_sampler_init() != 0)
     {
