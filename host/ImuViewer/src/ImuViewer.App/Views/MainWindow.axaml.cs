@@ -19,10 +19,11 @@ public partial class MainWindow : Window
 
         SensorAggregator aggregator = new();
         MadgwickFilter filter = new();
+        GyroBiasTracker biasTracker = new();
         LinuxRfcommTransport transport = new();
         SessionOrchestrator orchestrator = new(transport, aggregator);
         LinuxPortEnumerator enumerator = new();
-        _viewModel = new MainViewModel(enumerator, orchestrator, aggregator, filter);
+        _viewModel = new MainViewModel(enumerator, orchestrator, aggregator, filter, biasTracker);
         DataContext = _viewModel;
 
         _tick = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000.0 / 60.0) };

@@ -30,9 +30,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly SessionOrchestrator _orchestrator;
     private readonly SensorAggregator _aggregator;
     private readonly MadgwickFilter _filter;
+    private readonly GyroBiasTracker _biasTracker;
     private readonly FpsCounter _fps = new();
 
-    private Vector3 _gyroBiasRadS = Vector3.Zero;
     private Vector3 _calibrationSum = Vector3.Zero;
     private int _calibrationSamplesRemaining;
     private uint _previousSampleTsUs;
@@ -42,12 +42,14 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         IBluetoothPortEnumerator portEnumerator,
         SessionOrchestrator orchestrator,
         SensorAggregator aggregator,
-        MadgwickFilter filter)
+        MadgwickFilter filter,
+        GyroBiasTracker biasTracker)
     {
         _portEnumerator = portEnumerator;
         _orchestrator = orchestrator;
         _aggregator = aggregator;
         _filter = filter;
+        _biasTracker = biasTracker;
         _orchestrator.FrameReceived += _ => _fps.Mark();
     }
 
@@ -114,6 +116,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     [NotifyPropertyChangedFor(nameof(CalibrationStatusText))]
     private bool _isGyroBiasCalibrated;
 
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CalibrationStatusText))]
+    private bool _isStationary;
+
     public bool CanConnect => !IsConnected && SelectedPort is not null;
     public bool CanDisconnect => IsConnected;
     public bool CanToggleImu => IsConnected;
@@ -139,12 +145,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             {
                 return "calibrating gyro — keep Hub still";
             }
-            if (!IsGyroBiasCalibrated)
-            {
-                return "gyro not calibrated (Cube may drift)";
-            }
             const float radToDps = 180f / MathF.PI;
-            return $"bias: {Fmt2(_gyroBiasRadS.X * radToDps)} / {Fmt2(_gyroBiasRadS.Y * radToDps)} / {Fmt2(_gyroBiasRadS.Z * radToDps)} dps";
+            Vector3 b = _biasTracker.BiasRadS;
+            string biasPart = IsGyroBiasCalibrated || b != Vector3.Zero
+                ? $"bias: {Fmt2(b.X * radToDps)} / {Fmt2(b.Y * radToDps)} / {Fmt2(b.Z * radToDps)} dps"
+                : "bias: not yet measured";
+            string autoPart = IsStationary ? "auto: tracking" : "auto: hold";
+            return $"{biasPart} · {autoPart}";
         }
     }
 
@@ -172,16 +179,23 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 _calibrationSamplesRemaining--;
                 if (_calibrationSamplesRemaining <= 0)
                 {
-                    _gyroBiasRadS = _calibrationSum / CalibrationSampleCount;
+                    _biasTracker.SetBias(_calibrationSum / CalibrationSampleCount);
                     IsCalibrating = false;
                     IsGyroBiasCalibrated = true;
                     StatusText = "gyro calibrated";
                     _filter.Reset();
                 }
+                // Skip orientation integration during the calibration window
+                // — gyro hasn't been bias-corrected yet.
             }
             else
             {
-                Vector3 corrected = sample.GyroRadS - _gyroBiasRadS;
+                // Bias tracker subtracts the running bias and, when stationary,
+                // pushes the bias toward the live gyro reading via LPF (Issue
+                // #61). After enough stationary time the bias becomes usable
+                // even without a manual Calibrate gyro press.
+                Vector3 corrected = _biasTracker.Update(
+                    sample.AccelG, sample.GyroRadS, dt);
                 _filter.Update(sample.AccelG, corrected, dt);
             }
 
@@ -193,6 +207,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             AccelG = lastSample.AccelG;
             GyroDps = lastSample.GyroDps;
         }
+        // Latch UI-visible flags from the tracker once per tick so XAML bindings
+        // only update at 60 Hz.
+        IsStationary = _biasTracker.IsStationary;
+        if (!IsGyroBiasCalibrated && _biasTracker.IsStationary
+            && _biasTracker.BiasRadS != Vector3.Zero)
+        {
+            IsGyroBiasCalibrated = true;
+        }
+        OnPropertyChanged(nameof(CalibrationStatusText));
         Orientation = _filter.Orientation;
         MeasuredFps = _fps.Compute();
     }
@@ -287,7 +310,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         await _orchestrator.DisconnectAsync();
         IsConnected = false;
         IsImuOn = false;
+        IsStationary = false;
         _fps.Reset();
+        _biasTracker.Detector.Reset();
         ResetSampleClock();
         StatusText = "disconnected";
     }
