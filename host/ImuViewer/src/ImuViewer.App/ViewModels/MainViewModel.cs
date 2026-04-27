@@ -14,7 +14,17 @@ namespace ImuViewer.App.ViewModels;
 
 public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 {
-    private const int CalibrationSampleCount = 120; // ~2 seconds at 60 Hz tick
+    /// <summary>~2 seconds of samples at the default ODR (833 Hz).</summary>
+    private const int CalibrationSampleCount = 1500;
+
+    /// <summary>
+    /// Fallback dt used for the very first sample (no previous timestamp) and
+    /// when the timestamp delta is non-positive or larger than 100 ms (covers
+    /// uint32 wrap and frame drops).
+    /// </summary>
+    private const float FallbackDt = 1f / 833f;
+
+    private const float MaxReasonableDt = 0.1f;
 
     private readonly IBluetoothPortEnumerator _portEnumerator;
     private readonly SessionOrchestrator _orchestrator;
@@ -25,6 +35,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private Vector3 _gyroBiasRadS = Vector3.Zero;
     private Vector3 _calibrationSum = Vector3.Zero;
     private int _calibrationSamplesRemaining;
+    private uint _previousSampleTsUs;
+    private bool _hasPreviousSampleTs;
 
     public MainViewModel(
         IBluetoothPortEnumerator portEnumerator,
@@ -86,8 +98,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     [ObservableProperty]
     private int _gyroFsrDps = 2000;
 
+    /// <summary>
+    /// Default β for per-sample integration at chip ODR. The original 0.1
+    /// was tuned for a 60 Hz integration rate; running ~14× faster needs
+    /// roughly √(833/60) ≈ 3.7× lower β to keep a similar gain density.
+    /// </summary>
     [ObservableProperty]
-    private float _madgwickBeta = 0.1f;
+    private float _madgwickBeta = 0.03f;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CalibrationStatusText))]
@@ -137,14 +154,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     }
 
     /// <summary>
-    /// Pulls the latest aggregated sample, runs the Madgwick filter at fixed
-    /// dt = 1/60 s (Issue #60 requirement), and pushes the result to the UI.
-    /// Called by MainWindow's 60 Hz DispatcherTimer.
+    /// Drains all samples currently queued in the aggregator and runs Madgwick
+    /// once per sample with the actual inter-sample dt recovered from the Hub
+    /// timestamps. Called by MainWindow's 60 Hz DispatcherTimer; on a typical
+    /// frame stream (BATCH=13, ODR=833) this drains ~14 samples per tick.
     /// </summary>
     public void Tick()
     {
-        if (_aggregator.TryConsumeNext(out AggregatedSample sample))
+        AggregatedSample? lastSample = null;
+        while (_aggregator.TryRead(out AggregatedSample sample))
         {
+            float dt = ComputeDt(sample.TimestampUs);
+
             if (IsCalibrating)
             {
                 _calibrationSum += sample.GyroRadS;
@@ -161,13 +182,48 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             else
             {
                 Vector3 corrected = sample.GyroRadS - _gyroBiasRadS;
-                _filter.Update(sample.AccelG, corrected, 1f / 60f);
+                _filter.Update(sample.AccelG, corrected, dt);
             }
-            AccelG = sample.AccelG;
-            GyroDps = sample.GyroDps;
+
+            lastSample = sample;
+        }
+
+        if (lastSample is not null)
+        {
+            AccelG = lastSample.AccelG;
+            GyroDps = lastSample.GyroDps;
         }
         Orientation = _filter.Orientation;
         MeasuredFps = _fps.Compute();
+    }
+
+    private float ComputeDt(uint sampleTsUs)
+    {
+        if (!_hasPreviousSampleTs)
+        {
+            _previousSampleTsUs = sampleTsUs;
+            _hasPreviousSampleTs = true;
+            return FallbackDt;
+        }
+        // uint32 subtraction wraps cleanly across the 32-bit boundary.
+        uint deltaUs = unchecked(sampleTsUs - _previousSampleTsUs);
+        _previousSampleTsUs = sampleTsUs;
+        if (deltaUs == 0)
+        {
+            return FallbackDt;
+        }
+        float dt = deltaUs / 1_000_000f;
+        if (dt > MaxReasonableDt)
+        {
+            return FallbackDt;
+        }
+        return dt;
+    }
+
+    private void ResetSampleClock()
+    {
+        _hasPreviousSampleTs = false;
+        _previousSampleTsUs = 0;
     }
 
     [RelayCommand]
@@ -204,6 +260,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
         try
         {
+            ResetSampleClock();
             StatusText = $"connecting {SelectedPort.BdAddr}...";
             await _orchestrator.ConnectAsync(SelectedPort.BdAddr, channel: 1, ct);
             await EnsureReplyAsync(_orchestrator.ImuOffAsync(ct), "IMU OFF");
@@ -231,6 +288,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         IsConnected = false;
         IsImuOn = false;
         _fps.Reset();
+        ResetSampleClock();
         StatusText = "disconnected";
     }
 
