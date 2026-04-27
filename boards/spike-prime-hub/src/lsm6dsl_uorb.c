@@ -85,7 +85,16 @@
 
 #define BIT_BDU         (1 << 6)  /* Block Data Update in CTRL3_C */
 #define BIT_IF_INC      (1 << 2)  /* Auto-increment in CTRL3_C */
-#define ROUNDING_GY_XL  (3 << 2)  /* Rounding for gyro+accel in CTRL5_C */
+/* CTRL5_C layout (datasheet Table 49):
+ *   bits 7-5: ROUNDING[2:0]  (Table 50: 0b011 = gyro+accel rounding)
+ *   bit  4:   DEN_LH
+ *   bits 3-2: ST_G[1:0]      (gyro self-test; 0b11 is reserved/invalid)
+ *   bits 1-0: ST_XL[1:0]
+ * Setting (3 << 2) accidentally enables ST_G=0b11, which puts the gyro in a
+ * reserved self-test mode and adds a large constant offset to all three axes
+ * (~-400 dps observed on hardware).  Use (3 << 5) so ROUNDING[2:0]=0b011.
+ */
+#define ROUNDING_GY_XL  (3 << 5)  /* Rounding for gyro+accel in CTRL5_C */
 #define BIT_DRDY_PULSED (1 << 7)  /* Pulsed DRDY mode */
 #define BIT_INT1_DRDY_G (1 << 1)  /* Gyro DRDY on INT1 */
 #define BIT_SW_RESET    (1 << 0)  /* Software reset in CTRL3_C */
