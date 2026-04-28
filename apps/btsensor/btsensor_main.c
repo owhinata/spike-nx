@@ -99,6 +99,10 @@ enum bt_state
   BT_ADVERTISING,
   BT_FAIL_BLINK,
   BT_PAIRED,
+  BT_CONNECTABLE,   /* connectable=1 / discoverable=0 — paired peer can
+                     * reconnect by BD_ADDR but inquiry is silent. Used as
+                     * the post-RFCOMM-drop landing state instead of
+                     * BT_ADVERTISING (Issue #68). */
 };
 
 /****************************************************************************
@@ -258,6 +262,7 @@ static const char *bt_state_name(enum bt_state s)
       case BT_ADVERTISING: return "advertising";
       case BT_FAIL_BLINK:  return "fail_blink";
       case BT_PAIRED:      return "paired";
+      case BT_CONNECTABLE: return "connectable";
       default:             return "?";
     }
 }
@@ -297,6 +302,26 @@ static void bt_enter_paired(void)
   btsensor_led_solid_blue();
 }
 
+static void bt_enter_connectable(void)
+{
+  /* Post-RFCOMM-drop landing state (Issue #68): paired peer can still
+   * reconnect by BD_ADDR (link key remains in btstack's in-RAM DB), but
+   * inquiry is silent so a stranger cannot opportunistically pair just
+   * because the previous PC went away.  Visually shares
+   * BT_ADVERTISING's blink so users see "Hub is waiting for the PC" —
+   * the discoverability difference is observable through `btsensor
+   * status`.  bt_visibility_request() promotes back to BT_ADVERTISING
+   * if the user explicitly toggles via button or NSH.
+   */
+
+  syslog(LOG_INFO, "btsensor: BT connectable (was %s)\n",
+         bt_state_name(g_bt_state));
+  g_bt_state = BT_CONNECTABLE;
+  gap_connectable_control(1);
+  gap_discoverable_control(0);
+  btsensor_led_blink_blue(CONFIG_APP_BTSENSOR_LED_BLINK_PERIOD_MS);
+}
+
 static void bt_enter_fail_blink(void)
 {
   syslog(LOG_WARNING, "btsensor: BT pairing failed (was %s)\n",
@@ -330,6 +355,14 @@ static int bt_visibility_request(bool on)
           case BT_FAIL_BLINK:
             bt_enter_advertising();
             return 0;
+          case BT_CONNECTABLE:
+            /* Promote back to fully discoverable so a fresh PC can find
+             * us; the previously-paired link key stays in the RAM DB
+             * so the original peer also keeps reconnecting silently.
+             */
+
+            bt_enter_advertising();
+            return 0;
           case BT_ADVERTISING:
           case BT_PAIRED:
             return 0;       /* already visible / paired */
@@ -340,6 +373,7 @@ static int bt_visibility_request(bool on)
       switch (g_bt_state)
         {
           case BT_ADVERTISING:
+          case BT_CONNECTABLE:
             bt_enter_off();
             return 0;
           case BT_PAIRED:
@@ -403,10 +437,13 @@ void btsensor_on_pairing_complete(uint8_t status)
    * on SSP completion so the LED goes solid blue immediately, even
    * before the PC opens the RFCOMM channel.  If RFCOMM is opened
    * later, btsensor_set_rfcomm_cid() observes us already in BT_PAIRED
-   * and is a no-op for the LED state machine.
+   * and is a no-op for the LED state machine.  BT_CONNECTABLE is
+   * included so a peer that re-pairs (e.g. after PC-side link key
+   * removal) while we were waiting in connectable mode still drives
+   * the LED solid on SSP success rather than only on RFCOMM open.
    */
 
-  if (g_bt_state == BT_ADVERTISING)
+  if (g_bt_state == BT_ADVERTISING || g_bt_state == BT_CONNECTABLE)
     {
       bt_enter_paired();
     }
@@ -604,17 +641,32 @@ void btsensor_set_rfcomm_cid(uint16_t cid)
 
   if (g_ts_state == TS_RUNNING)
     {
-      if (cid != 0 && g_bt_state == BT_ADVERTISING)
+      if (cid != 0 &&
+          (g_bt_state == BT_ADVERTISING || g_bt_state == BT_CONNECTABLE))
         {
+          /* Either fresh-pair-then-RFCOMM-open (BT_ADVERTISING) or a
+           * silent reconnect by a peer that still has the stored link
+           * key (BT_CONNECTABLE — Issue #68).  Either way, RFCOMM
+           * coming up means the session is live; flip to BT_PAIRED so
+           * the LED goes solid blue and `btsensor status` reflects
+           * the active stream.
+           */
+
           bt_enter_paired();
         }
       else if (cid == 0 && g_bt_state == BT_PAIRED)
         {
-          /* Link drop while we still want to be reachable — go back to
-           * advertising (LED resumes blinking).
+          /* Link drop after a successful session: stay connectable so
+           * the same paired peer can come back via its stored BD_ADDR
+           * + link key, but stop advertising in inquiry — strangers
+           * should not be able to opportunistically discover the Hub
+           * just because the previous PC went away.  The LED resumes
+           * blinking to communicate "waiting for reconnect".  Promotion
+           * back to fully discoverable BT_ADVERTISING is opt-in via
+           * the button / `btsensor bt on` (Issue #68).
            */
 
-          bt_enter_advertising();
+          bt_enter_connectable();
         }
     }
 

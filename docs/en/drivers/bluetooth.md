@@ -216,15 +216,26 @@ the no-RFCOMM "I just want raw samples" use case.
                                   ▼                          ▼
                              FAIL_BLINK ─auto──▶ OFF         OFF
                                                               ▲
-                                  PAIRED ─link drop──▶ ADVERTISING
+                                  PAIRED ─link drop──▶ CONNECTABLE
+                                                       │  ▲
+                                  short/long press     │  │  RFCOMM open
+                                  / `bt on`            │  │  (silent reconnect
+                                                       │  │   with stored key)
+                                                       ▼  │
+                                                  ADVERTISING ────▶ PAIRED
 ```
 
-- States: `OFF`, `ADVERTISING`, `FAIL_BLINK`, `PAIRED`.  `status`
-  prints `bt: <state>`.
+- States: `OFF`, `ADVERTISING`, `CONNECTABLE`, `FAIL_BLINK`, `PAIRED`.
+  `status` prints `bt: <state>`.
 - Short press: only OFF/FAIL_BLINK → ADVERTISING; no-op otherwise.
-- Long press: OFF/FAIL_BLINK → ADVERTISING, ADVERTISING → OFF,
-  PAIRED → RFCOMM disconnect + OFF.
-- LED: OFF=off, ADVERTISING=blue 1 Hz blink, PAIRED=solid blue,
+- Long press: OFF/FAIL_BLINK → ADVERTISING, ADVERTISING/CONNECTABLE
+  → OFF, PAIRED → RFCOMM disconnect + OFF.
+- `btsensor bt on` from CONNECTABLE → ADVERTISING (re-enable
+  inquiry visibility so a brand-new PC can also pair); from any
+  other state same as before.
+- LED: OFF=off, ADVERTISING / CONNECTABLE=blue 1 Hz blink (the two
+  states are visually identical; distinguish via `btsensor status`),
+  PAIRED=solid blue,
   FAIL_BLINK=`CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS` short blue
   pulses (~150 ms × 2N).
 - Pairing completion routes through
@@ -232,8 +243,10 @@ the no-RFCOMM "I just want raw samples" use case.
   immediately, matching the Issue #56 spec "ペアリング成功で BT LED
   点灯"), status≠0 → FAIL_BLINK.  A subsequent
   `RFCOMM_EVENT_CHANNEL_OPENED` keeps the state at PAIRED (no LED
-  change), and a link drop / disconnect routes back to ADVERTISING
-  (LED resumes the slow blink).
+  change), and a link drop / disconnect routes to CONNECTABLE
+  (connectable=1, discoverable=0; LED resumes the slow blink) so
+  the same paired PC can reconnect by BD_ADDR while strangers stay
+  unable to discover the Hub via inquiry. Issue #68.
 - All transitions run on the BTstack main thread (worker / shell
   callers go through `btstack_run_loop_execute_on_main_thread()`).
 
