@@ -332,10 +332,44 @@ static void bt_enter_fail_blink(void)
   btsensor_led_fail_blink(CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS);
 }
 
+/* Returns true iff btstack's link key DB has at least one stored entry
+ * (= we have previously paired with a peer this session).  Used by
+ * bt_visibility_request() to choose whether `bt on` should advertise
+ * (DB empty — need to pair) or stay connectable-only (DB non-empty —
+ * just wait for the known peer).
+ */
+
+static bool bt_has_stored_link_key(void)
+{
+  btstack_link_key_iterator_t it;
+  if (!gap_link_key_iterator_init(&it))
+    {
+      /* No link key DB attached or iterator_init not provided; treat
+       * as empty so we fall back to BT_ADVERTISING.
+       */
+
+      return false;
+    }
+
+  bd_addr_t addr;
+  link_key_t link_key;
+  link_key_type_t type;
+  bool any = gap_link_key_iterator_get_next(&it, addr, link_key, &type) != 0;
+  gap_link_key_iterator_done(&it);
+  return any;
+}
+
 /* BT visibility request — usable both from the button handlers and the
- * `btsensor bt on/off` NSH dispatch.  `on=true` is "make discoverable"
- * (no-op if already ADVERTISING / PAIRED); `on=false` is "go silent"
- * (RFCOMM disconnect when paired, no-op if already OFF / FAIL_BLINK).
+ * `btsensor bt on/off` NSH dispatch.  `on=true` is "be reachable":
+ * link-key-aware, going to BT_CONNECTABLE if the DB already has a paired
+ * peer (silent reconnect, no inquiry exposure — Issue #71) or
+ * BT_ADVERTISING otherwise (fresh pair).  No-op if already in any of
+ * the reachable states (CONNECTABLE / ADVERTISING / PAIRED).  `on=false`
+ * is "go silent" (RFCOMM disconnect when paired, no-op if already OFF /
+ * FAIL_BLINK).  The escape hatch for forcing BT_ADVERTISING despite
+ * stored keys is the long-button-press path (on_button_long), which
+ * calls bt_enter_advertising() directly.
+ *
  * Must be called on the BTstack main thread.  Returns 0 on success or
  * -ENXIO if the daemon is in teardown.
  */
@@ -353,16 +387,16 @@ static int bt_visibility_request(bool on)
         {
           case BT_OFF:
           case BT_FAIL_BLINK:
-            bt_enter_advertising();
+            if (bt_has_stored_link_key())
+              {
+                bt_enter_connectable();
+              }
+            else
+              {
+                bt_enter_advertising();
+              }
             return 0;
           case BT_CONNECTABLE:
-            /* Promote back to fully discoverable so a fresh PC can find
-             * us; the previously-paired link key stays in the RAM DB
-             * so the original peer also keeps reconnecting silently.
-             */
-
-            bt_enter_advertising();
-            return 0;
           case BT_ADVERTISING:
           case BT_PAIRED:
             return 0;       /* already visible / paired */
@@ -408,7 +442,15 @@ static void on_button_long(void)
 {
   if (g_bt_state == BT_OFF || g_bt_state == BT_FAIL_BLINK)
     {
-      bt_visibility_request(true);
+      /* Long-press from OFF / FAIL_BLINK is the "force discoverable"
+       * escape hatch: bt_visibility_request(true) is link-key-aware
+       * and would land in BT_CONNECTABLE when a previously-paired peer
+       * is in the DB, making it impossible to add a new PC without a
+       * reboot.  Calling bt_enter_advertising() directly forces
+       * discoverable=1 regardless (Issue #71).
+       */
+
+      bt_enter_advertising();
     }
   else
     {

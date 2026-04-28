@@ -227,12 +227,17 @@ the no-RFCOMM "I just want raw samples" use case.
 
 - States: `OFF`, `ADVERTISING`, `CONNECTABLE`, `FAIL_BLINK`, `PAIRED`.
   `status` prints `bt: <state>`.
-- Short press: only OFF/FAIL_BLINK → ADVERTISING; no-op otherwise.
-- Long press: OFF/FAIL_BLINK → ADVERTISING, ADVERTISING/CONNECTABLE
+- `btsensor bt on` and short press are **link-key-aware** (Issue #71):
+  if btstack's link-key DB already has a paired peer, OFF/FAIL_BLINK
+  go to `CONNECTABLE` (silent reconnect, no inquiry exposure); if the
+  DB is empty, OFF/FAIL_BLINK go to `ADVERTISING` so a fresh PC can
+  pair. CONNECTABLE/ADVERTISING/PAIRED are no-ops.
+- Long press: OFF/FAIL_BLINK → **forced ADVERTISING** (ignores the
+  link-key DB; this is the escape hatch for adding another PC while
+  a previous pairing still occupies the DB), ADVERTISING/CONNECTABLE
   → OFF, PAIRED → RFCOMM disconnect + OFF.
-- `btsensor bt on` from CONNECTABLE → ADVERTISING (re-enable
-  inquiry visibility so a brand-new PC can also pair); from any
-  other state same as before.
+- `btsensor bt off` is unconditional (turns OFF from any reachable
+  state).
 - LED: OFF=off, ADVERTISING / CONNECTABLE=blue 1 Hz blink (the two
   states are visually identical; distinguish via `btsensor status`),
   PAIRED=solid blue,
