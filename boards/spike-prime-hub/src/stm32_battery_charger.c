@@ -144,6 +144,7 @@ struct spike_charger_s
   struct battery_charger_dev_s dev;
   struct work_s poll_work;
   struct work_s bcd_work;             /* BCD detection on LPWORK */
+  struct work_s vbus_work;            /* VBUS EXTI deferred handler */
   bool chg_samples[CHG_NUM_SAMPLES];
   uint8_t chg_index;
   int charger_status;
@@ -418,6 +419,39 @@ static void handle_vbus_transition(FAR struct spike_charger_s *priv)
 static void charger_enable_if_usb(FAR struct spike_charger_s *priv)
 {
   charger_set_mode(priv, vbus_present());
+}
+
+/****************************************************************************
+ * Name: vbus_worker
+ *
+ * Description:
+ *   HPWORK handler dispatched from the VBUS EXTI ISR.  Re-uses the polled
+ *   handle_vbus_transition() state machine so an interrupt edge produces
+ *   exactly the same MODE / ISET / BCD trajectory as the safety-net poll.
+ ****************************************************************************/
+
+static void vbus_worker(FAR void *arg)
+{
+  FAR struct spike_charger_s *priv = (FAR struct spike_charger_s *)arg;
+  handle_vbus_transition(priv);
+}
+
+/****************************************************************************
+ * Name: vbus_exti_isr
+ *
+ * Description:
+ *   PA9 EXTI9_5 ISR.  Defers state-machine handling to HPWORK so the MODE
+ *   pin / ISET / BCD are updated within ~1 tick of plug or unplug instead
+ *   of waiting for the 250 ms charger poll cycle.  A burst of edges is
+ *   absorbed by re-queueing the same priv->vbus_work entry.
+ ****************************************************************************/
+
+static int vbus_exti_isr(int irq, FAR void *context, FAR void *arg)
+{
+  FAR struct spike_charger_s *priv = (FAR struct spike_charger_s *)arg;
+
+  work_queue(HPWORK, &priv->vbus_work, vbus_worker, priv, 0);
+  return OK;
 }
 
 /****************************************************************************
@@ -799,6 +833,23 @@ int stm32_battery_charger_initialize(void)
   /* Register charger device */
 
   ret = battery_charger_register("/dev/charge0", &priv->dev);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  /* Hook PA9 (VBUS) EXTI for instantaneous plug/unplug response.  The poll
+   * loop below stays as a safety net (handles charge-pause MODE re-assert,
+   * idempotent due to prev_vbus edge gating).  Priority for STM32_IRQ_EXTI95
+   * is set to 0xD0 in stm32_bringup.c so the ISR can call work_queue()
+   * safely (Issue #49).
+   */
+
+  ret = stm32_gpiosetevent(GPIO_OTGFS_VBUS,
+                           true,    /* rising edge (plug-in) */
+                           true,    /* falling edge (unplug) */
+                           false,
+                           vbus_exti_isr, priv);
   if (ret < 0)
     {
       return ret;

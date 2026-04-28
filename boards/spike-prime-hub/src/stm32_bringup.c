@@ -56,7 +56,7 @@ int stm32_bringup(void)
    *   0xD0  W25Q256 DMA1_S3/S4
    *         W25Q256 SPI2 IRQ
    *         USB OTG FS
-   *         USB VBUS EXTI9_5            (future, Issue #49)
+   *         USB VBUS EXTI9_5            (Issue #49)
    *   0xE0  ADC DMA2_S0
    *         TLC5955 SPI1 + DMA2_S2/S3
    *         BUTTON_USER EXTI0
@@ -134,6 +134,14 @@ int stm32_bringup(void)
    */
   up_prioritize_irq(STM32_IRQ_EXTI0,
                     NVIC_SYSH_PRIORITY_DEFAULT + 6 * NVIC_SYSH_PRIORITY_STEP);
+
+  /* step 10: USB VBUS detect (PA9 EXTI9_5) at 0xD0.  Co-resident with USB
+   * OTG FS and W25Q256 SPI2/DMA so VBUS edge handling sits in the same
+   * preempt level as the USB stack it ultimately drives, matching the
+   * pybricks `platform.c:965` ordering (Issue #49).
+   */
+  up_prioritize_irq(STM32_IRQ_EXTI95,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 5 * NVIC_SYSH_PRIORITY_STEP);
 #endif
 
 #ifdef CONFIG_STM32_IWDG

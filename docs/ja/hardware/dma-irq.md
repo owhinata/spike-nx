@@ -155,7 +155,7 @@ pybricks の**相対優先順序**を 0x80–0xE0 の範囲 (BASEPRI 以下) に
 | 0xD0 | 13 | W25Q256 DMA1_S3/S4 | base=5 | `stm32_bringup.c` (step 7) |
 | 0xD0 | 13 | W25Q256 SPI2 IRQ | base=6 | `stm32_bringup.c` (step 7) |
 | 0xD0 | 13 | USB OTG FS | base=6 | `stm32_bringup.c` (step 4) |
-| 0xD0 | 13 | USB VBUS EXTI9_5 (将来) | base=6 | Issue #49 で設定予定 |
+| 0xD0 | 13 | USB VBUS EXTI9_5 | base=6 | `stm32_bringup.c` (step 10, Issue #49) |
 | 0xE0 | 14 | ADC DMA2_S0 | base=7 (MEDIUM) | `stm32_bringup.c` (step 3) |
 | 0xE0 | 14 | TLC5955 SPI1 + DMA2_S2/S3 | base=7 (LOW) | `stm32_bringup.c` (step 2) |
 | 0xE0 | 14 | BUTTON_USER EXTI0 (BT 制御ボタン) | n/a (NuttX 固有) | `stm32_bringup.c` (step 9, Issue #56) |
@@ -357,7 +357,8 @@ NuttX 既定の `LPWORKPRIORITY=100` だと user app と同じ優先度になり
 | USB OTG FS | 0xB0 | (driver 内部処理) | — |
 | ADC DMA2_S0 | 0xD0 | (cb 直 → battery driver) | — |
 | TLC5955 SPI1 + DMA2_S2/S3 | 0xD0 | **HPWORK** (224) | LED frame sync 2ms cadence を保つ |
-| Battery charger poll | (timer) | **HPWORK** (224) | VBUS 状態の周期監視 |
+| Battery charger poll | (timer) | **HPWORK** (224) | 安全網 (CHG サンプリング、charge-pause 後の MODE 再 assert) |
+| Battery charger VBUS edge (PA9 EXTI9_5) | 0xD0 | **HPWORK** (224) | 抜き差しに対する MODE/ISET/BCD のサブティック応答 (Issue #49) |
 | Battery charger BCD detect | (HPWORK 内で再 schedule) | **LPWORK** (176) | BCD は blocking I2C も含む heavy 処理を user 帯から切り離す |
 | Power button monitor | (timer) | **HPWORK** (224) | 周期 poll |
 | PendSV / SysTick | 0xF0 | — | — |

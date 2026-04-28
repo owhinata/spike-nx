@@ -155,7 +155,7 @@ Compresses the pybricks **relative** priority order into the 0x80–0xE0 band (b
 | 0xD0 | 13 | W25Q256 DMA1_S3/S4 | base=5 | `stm32_bringup.c` (step 7) |
 | 0xD0 | 13 | W25Q256 SPI2 IRQ | base=6 | `stm32_bringup.c` (step 7) |
 | 0xD0 | 13 | USB OTG FS | base=6 | `stm32_bringup.c` (step 4) |
-| 0xD0 | 13 | USB VBUS EXTI9_5 (future) | base=6 | pending Issue #49 |
+| 0xD0 | 13 | USB VBUS EXTI9_5 | base=6 | `stm32_bringup.c` (step 10, Issue #49) |
 | 0xE0 | 14 | ADC DMA2_S0 | base=7 (MEDIUM) | `stm32_bringup.c` (step 3) |
 | 0xE0 | 14 | TLC5955 SPI1 + DMA2_S2/S3 | base=7 (LOW) | `stm32_bringup.c` (step 2) |
 | 0xE0 | 14 | BUTTON_USER EXTI0 (BT control button) | n/a (NuttX-specific) | `stm32_bringup.c` (step 9, Issue #56) |
@@ -357,7 +357,8 @@ With NuttX's default `LPWORKPRIORITY=100`, LPWORK shares a priority with user ap
 | USB OTG FS | 0xB0 | (driver-internal) | — |
 | ADC DMA2_S0 | 0xD0 | (callback into battery driver) | — |
 | TLC5955 SPI1 + DMA2_S2/S3 | 0xD0 | **HPWORK** (224) | Maintain 2 ms LED frame-sync cadence |
-| Battery charger poll | (timer) | **HPWORK** (224) | Periodic VBUS state monitor |
+| Battery charger poll | (timer) | **HPWORK** (224) | Periodic safety net (CHG sample, charge-pause MODE re-assert) |
+| Battery charger VBUS edge (PA9 EXTI9_5) | 0xD0 | **HPWORK** (224) | Sub-tick MODE/ISET/BCD response on plug or unplug (Issue #49) |
 | Battery charger BCD detect | (re-scheduled from HPWORK) | **LPWORK** (176) | BCD includes blocking I2C — push it off the HPWORK band |
 | Power button monitor | (timer) | **HPWORK** (224) | Periodic poll |
 | PendSV / SysTick | 0xF0 | — | — |
