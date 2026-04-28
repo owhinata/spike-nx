@@ -1,6 +1,7 @@
 using System.Numerics;
 using Avalonia;
 using Avalonia.Input;
+using Avalonia.Media;
 using Avalonia.OpenGL;
 using Avalonia.OpenGL.Controls;
 using ImuViewer.Rendering;
@@ -67,6 +68,21 @@ public sealed class OpenGlSceneControl : OpenGlControlBase
         _renderer.Dispose();
         _gl = null;
         _ctx = null;
+    }
+
+    /// <summary>
+    /// OpenGlControlBase composites the GL framebuffer through a separate
+    /// pipeline that does not register a hit-test visual with Avalonia's input
+    /// system, so without an explicit drawing op the control has no hit-test
+    /// geometry and pointer events bubble straight to the parent Border. Fill
+    /// the bounds with a transparent brush — the pixels stay invisible but the
+    /// region becomes hit-testable, so OnPointerPressed/Moved/Released and
+    /// OnPointerWheelChanged actually fire on the GL surface.
+    /// </summary>
+    public override void Render(DrawingContext context)
+    {
+        context.FillRectangle(Brushes.Transparent, new Rect(Bounds.Size));
+        base.Render(context);
     }
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
