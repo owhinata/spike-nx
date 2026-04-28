@@ -42,6 +42,16 @@ void btsensor_led_solid_blue(void);
 
 void btsensor_led_blink_blue(uint16_t period_ms);
 
+/* Double-blink (Issue #73): two short ON pulses + a long OFF rest,
+ * repeating with the given total period.  Used for BT_CONNECTABLE so
+ * the rhythm is visually distinct from BT_ADVERTISING's symmetric
+ * blink.  period_ms == 0 -> off; period_ms < 400 -> falls back to
+ * btsensor_led_blink_blue() (the two short pulses + gap need at least
+ * ~300 ms, so anything tighter would not be a recognisable double).
+ */
+
+void btsensor_led_double_blink_blue(uint16_t period_ms);
+
 /* N short pulses (~150 ms on / 150 ms off) then leave the LED off. */
 
 void btsensor_led_fail_blink(uint8_t count);

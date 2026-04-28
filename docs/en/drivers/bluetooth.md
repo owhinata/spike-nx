@@ -244,11 +244,18 @@ the no-RFCOMM "I just want raw samples" use case.
   then routes through the link-key-aware path with an empty DB and
   lands in BT_ADVERTISING for a fresh pair. Use this to retire an
   old PC without rebooting.
-- LED: OFF=off, ADVERTISING / CONNECTABLE=blue 1 Hz blink (the two
-  states are visually identical; distinguish via `btsensor status`),
-  PAIRED=solid blue,
-  FAIL_BLINK=`CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS` short blue
-  pulses (~150 ms × 2N).
+- LED (Issue #73 — each state has a distinct rhythm; all-blue
+  family is preserved):
+    - `OFF` — off
+    - `ADVERTISING` — symmetric blink (50% duty) at the
+      `CONFIG_APP_BTSENSOR_LED_BLINK_PERIOD_MS` period (default 1 s)
+    - `CONNECTABLE` — double-blink: two short ON pulses (~100 ms each
+      with a 100 ms gap) then a long OFF rest filling the rest of the
+      period. Reads as "ti-tick . . . . . . ti-tick" — clearly
+      different rhythm from ADVERTISING.
+    - `PAIRED` — solid blue
+    - `FAIL_BLINK` — `CONFIG_APP_BTSENSOR_LED_FAIL_BLINKS` short blue
+      pulses (~150 ms × 2N) one-shot, then off
 - Pairing completion routes through
   `HCI_EVENT_SIMPLE_PAIRING_COMPLETE`: status==0 → PAIRED (LED solid
   immediately, matching the Issue #56 spec "ペアリング成功で BT LED

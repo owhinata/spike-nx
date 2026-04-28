@@ -319,7 +319,14 @@ static void bt_enter_connectable(void)
   g_bt_state = BT_CONNECTABLE;
   gap_connectable_control(1);
   gap_discoverable_control(0);
-  btsensor_led_blink_blue(CONFIG_APP_BTSENSOR_LED_BLINK_PERIOD_MS);
+
+  /* Issue #73: use the double-blink rhythm here so the LED is visually
+   * distinct from BT_ADVERTISING's symmetric blink — both states are
+   * "blue blinking", but ADVERTISING is 50% duty while CONNECTABLE is
+   * "ti-tick . . . . . . ti-tick", clearly different at a glance.
+   */
+
+  btsensor_led_double_blink_blue(CONFIG_APP_BTSENSOR_LED_BLINK_PERIOD_MS);
 }
 
 static void bt_enter_fail_blink(void)

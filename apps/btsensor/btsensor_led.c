@@ -48,6 +48,20 @@
 
 #define FAIL_BLINK_HALF_MS  150
 
+/* Double-blink sub-pattern (Issue #73).  Each cycle is
+ *   ON (DOUBLE_BLINK_ON_MS)
+ *   OFF (DOUBLE_BLINK_GAP_MS)
+ *   ON (DOUBLE_BLINK_ON_MS)
+ *   OFF (period_ms - 3 * DOUBLE_BLINK_ON_MS)
+ * so the rhythm is "ti-tick . . . . . . ti-tick" — the long rest
+ * dominates the period, giving a clearly distinct feel from the
+ * symmetric blink used for BT_ADVERTISING.
+ */
+
+#define DOUBLE_BLINK_ON_MS   100
+#define DOUBLE_BLINK_GAP_MS  100
+#define DOUBLE_BLINK_MIN_PERIOD_MS  400  /* 2*ON + GAP + 100ms rest */
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
@@ -57,6 +71,7 @@ enum led_mode_e
   LED_MODE_OFF = 0,
   LED_MODE_SOLID,
   LED_MODE_BLINK,
+  LED_MODE_DOUBLE_BLINK,
   LED_MODE_FAIL,
 };
 
@@ -72,6 +87,17 @@ static enum led_mode_e        g_mode = LED_MODE_OFF;
 static btstack_timer_source_t g_blink_timer;
 static bool                   g_blink_on;
 static uint16_t               g_blink_period_ms;
+
+/* Double-blink state (Issue #73).  step cycles 0..3 inside each period:
+ *   step 0: LED on  for DOUBLE_BLINK_ON_MS
+ *   step 1: LED off for DOUBLE_BLINK_GAP_MS
+ *   step 2: LED on  for DOUBLE_BLINK_ON_MS
+ *   step 3: LED off for the remainder of period_ms
+ */
+
+static btstack_timer_source_t g_double_blink_timer;
+static uint16_t               g_double_blink_period_ms;
+static uint8_t                g_double_blink_step;
 
 /* Fail-blink state. */
 
@@ -134,6 +160,50 @@ static void blink_timer_handler(btstack_timer_source_t *ts)
   btstack_run_loop_add_timer(ts);
 }
 
+static void double_blink_timer_handler(btstack_timer_source_t *ts)
+{
+  if (g_mode != LED_MODE_DOUBLE_BLINK)
+    {
+      return;          /* mode changed under us */
+    }
+
+  /* Step state machine: 0 ON / 1 OFF / 2 ON / 3 OFF (long rest), wrap. */
+
+  uint16_t next_ms;
+  switch (g_double_blink_step)
+    {
+      case 0:
+        set_blue(true);
+        next_ms = DOUBLE_BLINK_ON_MS;
+        break;
+      case 1:
+        set_blue(false);
+        next_ms = DOUBLE_BLINK_GAP_MS;
+        break;
+      case 2:
+        set_blue(true);
+        next_ms = DOUBLE_BLINK_ON_MS;
+        break;
+      case 3:
+      default:
+        set_blue(false);
+        /* Long rest = total period − the three short slots above.
+         * btsensor_led_double_blink_blue() guarantees period_ms >=
+         * DOUBLE_BLINK_MIN_PERIOD_MS so this stays positive.
+         */
+
+        next_ms = (uint16_t)(g_double_blink_period_ms
+                             - 2 * DOUBLE_BLINK_ON_MS
+                             - DOUBLE_BLINK_GAP_MS);
+        break;
+    }
+
+  g_double_blink_step = (uint8_t)((g_double_blink_step + 1) & 0x3);
+
+  btstack_run_loop_set_timer(ts, next_ms);
+  btstack_run_loop_add_timer(ts);
+}
+
 static void fail_timer_handler(btstack_timer_source_t *ts)
 {
   if (g_mode != LED_MODE_FAIL)
@@ -163,10 +233,12 @@ static void fail_timer_handler(btstack_timer_source_t *ts)
 static void cancel_animations(void)
 {
   btstack_run_loop_remove_timer(&g_blink_timer);
+  btstack_run_loop_remove_timer(&g_double_blink_timer);
   btstack_run_loop_remove_timer(&g_fail_timer);
-  g_blink_on       = false;
-  g_fail_on        = false;
-  g_fail_remaining = 0;
+  g_blink_on          = false;
+  g_double_blink_step = 0;
+  g_fail_on           = false;
+  g_fail_remaining    = 0;
 }
 
 /****************************************************************************
@@ -189,6 +261,8 @@ int btsensor_led_init(void)
     }
 
   btstack_run_loop_set_timer_handler(&g_blink_timer, blink_timer_handler);
+  btstack_run_loop_set_timer_handler(&g_double_blink_timer,
+                                     double_blink_timer_handler);
   btstack_run_loop_set_timer_handler(&g_fail_timer, fail_timer_handler);
 
   g_mode = LED_MODE_OFF;
@@ -240,6 +314,35 @@ void btsensor_led_blink_blue(uint16_t period_ms)
 
   btstack_run_loop_set_timer(&g_blink_timer, period_ms / 2);
   btstack_run_loop_add_timer(&g_blink_timer);
+}
+
+void btsensor_led_double_blink_blue(uint16_t period_ms)
+{
+  if (period_ms == 0)
+    {
+      btsensor_led_off();
+      return;
+    }
+
+  /* The double-blink rhythm needs ~300 ms for its two short pulses + the
+   * gap between them; anything tighter would just look like a fast
+   * regular blink, so collapse to the symmetric blink helper instead.
+   */
+
+  if (period_ms < DOUBLE_BLINK_MIN_PERIOD_MS)
+    {
+      btsensor_led_blink_blue(period_ms);
+      return;
+    }
+
+  cancel_animations();
+  g_mode                   = LED_MODE_DOUBLE_BLINK;
+  g_double_blink_period_ms = period_ms;
+  g_double_blink_step      = 1;          /* next handler call advances */
+  set_blue(true);                        /* start of cycle: first pulse */
+
+  btstack_run_loop_set_timer(&g_double_blink_timer, DOUBLE_BLINK_ON_MS);
+  btstack_run_loop_add_timer(&g_double_blink_timer);
 }
 
 void btsensor_led_fail_blink(uint8_t count)
