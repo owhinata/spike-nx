@@ -69,16 +69,23 @@ public sealed class BtsensorSession : IAsyncDisposable
         {
             await _cts.CancelAsync().ConfigureAwait(false);
         }
+        // Dispose the stream BEFORE awaiting the reader task. The reader is
+        // most likely parked inside a blocking recv() syscall (see
+        // LinuxRfcommStream.ReadAsync — Task.Run wraps a libc recv that the
+        // CancellationToken cannot interrupt), and only fd close unblocks
+        // it. Awaiting the reader first would deadlock indefinitely. The
+        // reader's catch handlers below cover the resulting IOException /
+        // ObjectDisposedException.
+        if (_ownsStream)
+        {
+            await _stream.DisposeAsync().ConfigureAwait(false);
+        }
         if (_readerTask is not null)
         {
             try { await _readerTask.ConfigureAwait(false); }
             catch (OperationCanceledException) { }
             catch (IOException) { }
             catch (ObjectDisposedException) { }
-        }
-        if (_ownsStream)
-        {
-            await _stream.DisposeAsync().ConfigureAwait(false);
         }
         _writeLock.Dispose();
         _cts.Dispose();

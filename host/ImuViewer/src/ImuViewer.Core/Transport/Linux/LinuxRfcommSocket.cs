@@ -18,6 +18,8 @@ internal sealed class LinuxRfcommSocket : IDisposable
     private const int SOCK_STREAM = 1;
     private const int BTPROTO_RFCOMM = 3;
 
+    private const int SHUT_RDWR = 2;
+
     private const int EINTR = 4;
 
     private readonly SafeFileHandle _handle;
@@ -121,13 +123,33 @@ internal sealed class LinuxRfcommSocket : IDisposable
         return total;
     }
 
-    public void Dispose() => _handle.Dispose();
+    public void Dispose()
+    {
+        // shutdown() wakes any thread parked in recv()/send() on this fd —
+        // close(fd) alone is not sufficient on Linux RFCOMM sockets and
+        // leaves the reader thread spinning inside the kernel until the
+        // peer closes the link itself. SHUT_RDWR forces both directions
+        // to abort, recv() returns 0 (orderly shutdown), and the
+        // BtsensorSession reader breaks out via its read <= 0 guard.
+        // We swallow shutdown errors because the fd may already be in a
+        // half-disposed state (e.g. concurrent Dispose call); close()
+        // always runs via SafeFileHandle.Dispose() to release the fd.
+        if (!_handle.IsInvalid && !_handle.IsClosed)
+        {
+            int fd = (int)_handle.DangerousGetHandle();
+            shutdown(fd, SHUT_RDWR);
+        }
+        _handle.Dispose();
+    }
 
     [DllImport("libc", SetLastError = true)]
     private static extern int socket(int domain, int type, int protocol);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int connect(int fd, IntPtr addr, uint addrlen);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int shutdown(int fd, int how);
 
     [DllImport("libc", SetLastError = true, EntryPoint = "recv")]
     private static extern long recv(int fd, IntPtr buf, UIntPtr len, int flags);
