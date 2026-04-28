@@ -379,13 +379,26 @@ static int push_data(FAR struct lsm6dsl_dev_s *dev)
 
   dev->sample_index++;
 
+  /* Rotate chip frame -> SPIKE Prime Hub body frame.  The LSM6DSL on
+   * this board is mounted such that body frame is the chip frame
+   * rotated 180 deg around X, so Y and Z flip while X is unchanged.
+   * Doing the rotation here lets every consumer (uORB clients,
+   * btsensor, the PC viewer) treat the published sample as body
+   * frame directly instead of carrying a per-board transform.
+   *
+   * raw[i] == INT16_MIN would overflow on negation, but that value
+   * is the LSM6DSL's full-scale saturation sentinel and does not
+   * occur from a usable signal -- accept the implementation-defined
+   * wrap (-INT16_MIN -> INT16_MIN on this target) rather than
+   * complicating the per-sample inner loop with saturation arithmetic.
+   */
   sample.timestamp       = dev->ts_irq;
-  sample.gx              = raw[0];
-  sample.gy              = raw[1];
-  sample.gz              = raw[2];
-  sample.ax              = raw[3];
-  sample.ay              = raw[4];
-  sample.az              = raw[5];
+  sample.gx              =  raw[0];
+  sample.gy              = -raw[1];
+  sample.gz              = -raw[2];
+  sample.ax              =  raw[3];
+  sample.ay              = -raw[4];
+  sample.az              = -raw[5];
   sample.temperature_raw = dev->temperature_raw;
   sample.reserved        = 0;
 

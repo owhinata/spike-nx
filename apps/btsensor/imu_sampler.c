@@ -28,8 +28,8 @@
  *   };
  *
  *   struct imu_sample {                     // 16 bytes
- *     int16_t  ax, ay, az;     // accel raw LSB, chip frame
- *     int16_t  gx, gy, gz;     // gyro  raw LSB, chip frame
+ *     int16_t  ax, ay, az;     // accel raw LSB, Hub body frame
+ *     int16_t  gx, gy, gz;     // gyro  raw LSB, Hub body frame
  *     uint32_t ts_delta_us;    // sample.ts - first_sample_ts_us
  *                              // (sample[0] = 0)
  *   };

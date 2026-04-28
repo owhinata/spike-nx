@@ -89,8 +89,8 @@ Defined in `nuttx/include/nuttx/uorb.h`:
 | Field | Type | Description |
 |---|---|---|
 | timestamp | uint32_t | Low 32 bits of CLOCK_BOOTTIME us (~71m35s wraparound).  ARMv7-M 4-byte aligned word load/store is single-copy atomic, so ISR -> worker handoff is tearing-free. |
-| ax / ay / az | int16_t | Accel raw LSB, chip frame |
-| gx / gy / gz | int16_t | Gyro raw LSB, chip frame |
+| ax / ay / az | int16_t | Accel raw LSB, Hub body frame (chip frame Y/Z negated by the driver) |
+| gx / gy / gz | int16_t | Gyro raw LSB, Hub body frame (chip frame Y/Z negated by the driver) |
 | temperature_raw | int16_t | OUT_TEMP raw, refreshed every 16 samples (stale in between) |
 | reserved | int16_t | Alignment padding |
 

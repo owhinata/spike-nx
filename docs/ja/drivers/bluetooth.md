@@ -115,7 +115,7 @@ frames:     sent=0 dropped=194  # rfcomm cid==0 中はすべて drop
 `dump` 出力例 (1 行 = 1 サンプル):
 
 ```
-# ts_us ax ay az gx gy gz (raw int16, chip frame)
+# ts_us ax ay az gx gy gz (raw int16, Hub body frame)
 43933310 -76 32 -8220 -5342 -5929 -5789
 43935640 -57 20 -8214 -5342 -5927 -5789
 ...

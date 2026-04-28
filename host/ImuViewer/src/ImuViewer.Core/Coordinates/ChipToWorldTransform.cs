@@ -3,9 +3,12 @@ using System.Numerics;
 namespace ImuViewer.Core.Coordinates;
 
 /// <summary>
-/// Rotates LSM6DSL chip-frame vectors into the application's world frame
-/// (right-handed, X forward / Y left / Z up). The default identity is a
-/// placeholder until the SPIKE Prime Hub mount orientation is calibrated.
+/// Rotates Hub-published vectors into the application's world frame
+/// (right-handed, X forward / Y left / Z up). As of Issue #67 the
+/// SPIKE Prime Hub LSM6DSL driver already publishes Hub body frame
+/// (chip frame Y/Z negated on the Hub), so the default identity now
+/// matches the wire contract. Kept around as an extension point for
+/// future boards whose mount orientation differs from the Hub's.
 /// </summary>
 public sealed class ChipToWorldTransform
 {

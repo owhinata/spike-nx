@@ -196,7 +196,7 @@ frames:     sent=0 dropped=194  # all dropped while rfcomm cid==0
 `dump` output (one line per sample):
 
 ```
-# ts_us ax ay az gx gy gz (raw int16, chip frame)
+# ts_us ax ay az gx gy gz (raw int16, Hub body frame)
 43933310 -76 32 -8220 -5342 -5929 -5789
 43935640 -57 20 -8214 -5342 -5927 -5789
 ...

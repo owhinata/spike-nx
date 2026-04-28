@@ -990,7 +990,7 @@ static int cmd_dump(int argc, char **argv)
       return 1;
     }
 
-  printf("# ts_us ax ay az gx gy gz (raw int16, chip frame)\n");
+  printf("# ts_us ax ay az gx gy gz (raw int16, Hub body frame)\n");
 
   struct timespec t0;
   clock_gettime(CLOCK_BOOTTIME, &t0);

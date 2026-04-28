@@ -85,8 +85,8 @@ boards/spike-prime-hub/include/board_lsm6dsl.h   - ボードローカル ioctl (
 | フィールド | 型 | 内容 |
 |---|---|---|
 | timestamp | uint32_t | CLOCK_BOOTTIME us の low 32bit (~71m35s で wrap)。ARMv7-M の 4-byte aligned word は single-copy atomic ⇒ ISR と worker 間で tearing 無し |
-| ax / ay / az | int16_t | 加速度 chip frame 生 LSB |
-| gx / gy / gz | int16_t | ジャイロ chip frame 生 LSB |
+| ax / ay / az | int16_t | 加速度 生 LSB、Hub body frame (chip frame の Y/Z をドライバで反転) |
+| gx / gy / gz | int16_t | ジャイロ 生 LSB、Hub body frame (chip frame の Y/Z をドライバで反転) |
 | temperature_raw | int16_t | OUT_TEMP 生値（16 サンプルごとに更新、間は前回値 stale） |
 | reserved | int16_t | アラインメント用パディング |
 

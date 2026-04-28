@@ -67,12 +67,12 @@ struct sensor_imu
                              * aligned word load/store is single-copy
                              * atomic, so ISR/worker handoff is tearing-
                              * free without a critical section. */
-  int16_t  ax;              /* Accel X raw LSB, chip frame */
-  int16_t  ay;              /* Accel Y raw LSB, chip frame */
-  int16_t  az;              /* Accel Z raw LSB, chip frame */
-  int16_t  gx;              /* Gyro X raw LSB, chip frame */
-  int16_t  gy;              /* Gyro Y raw LSB, chip frame */
-  int16_t  gz;              /* Gyro Z raw LSB, chip frame */
+  int16_t  ax;              /* Accel X raw LSB, Hub body frame */
+  int16_t  ay;              /* Accel Y raw LSB, Hub body frame */
+  int16_t  az;              /* Accel Z raw LSB, Hub body frame */
+  int16_t  gx;              /* Gyro X raw LSB, Hub body frame */
+  int16_t  gy;              /* Gyro Y raw LSB, Hub body frame */
+  int16_t  gz;              /* Gyro Z raw LSB, Hub body frame */
   int16_t  temperature_raw; /* OUT_TEMP raw, stale (refreshed every
                              * N samples by the lower half) */
   int16_t  reserved;        /* Padding, struct = 20B */

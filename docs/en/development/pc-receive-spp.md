@@ -200,17 +200,20 @@ samples, where N = `sample_count` (1..80, default 8).
 
 | Offset (within sample) | Size | Field | Notes |
 |---:|---:|---|---|
-| 0 | 2 | `ax` | int16, chip frame |
-| 2 | 2 | `ay` | int16, chip frame |
-| 4 | 2 | `az` | int16, chip frame |
-| 6 | 2 | `gx` | int16, chip frame |
-| 8 | 2 | `gy` | int16, chip frame |
-| 10 | 2 | `gz` | int16, chip frame |
+| 0 | 2 | `ax` | int16, Hub body frame |
+| 2 | 2 | `ay` | int16, Hub body frame |
+| 4 | 2 | `az` | int16, Hub body frame |
+| 6 | 2 | `gx` | int16, Hub body frame |
+| 8 | 2 | `gy` | int16, Hub body frame |
+| 10 | 2 | `gz` | int16, Hub body frame |
 | 12 | 4 | `ts_delta_us` | uint32, sample timestamp − `first_sample_ts_us`; sample[0] = 0 |
 
-**Axis convention**: raw chip frame as published by the LSM6DSL.  No
-hub-body axis remap is applied on the Hub; if you need a hub frame,
-apply the rotation on the PC.
+**Axis convention**: SPIKE Prime Hub body frame.  The LSM6DSL is
+mounted with chip Y/Z anti-parallel to the Hub body Y/Z, so the
+driver negates Y and Z on the Hub before publishing.  X is unchanged.
+With the Hub flat on a desk and its Z axis pointing up, accel reads
+≈ (0, 0, +1 g) at rest.  No further rotation is needed on the PC
+side.
 
 ### Resync after byte loss
 
