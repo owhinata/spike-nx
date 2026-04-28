@@ -18,9 +18,10 @@ public sealed class StationaryDetector
     /// LSM6DSL's uncalibrated ZRL (typically a few dps per axis) still
     /// passes — otherwise the auto-bias LPF cannot bootstrap on its own.
     /// Real intentional motion is typically &gt;10 dps, so this still
-    /// rejects rotation reliably.
+    /// rejects rotation reliably. Settable so the GUI can tune it for the
+    /// individual chip and operating environment.
     /// </summary>
-    public float GyroEpsilonDps { get; init; } = 5.0f;
+    public float GyroEpsilonDps { get; set; } = 5.0f;
 
     /// <summary>Number of consecutive stationary samples needed before
     /// <see cref="IsStationary"/> latches true. Default is ~0.5 s at 833 Hz.</summary>

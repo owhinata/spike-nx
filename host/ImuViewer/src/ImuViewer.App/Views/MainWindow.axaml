@@ -49,13 +49,23 @@
         <TextBlock Classes="header" Text="IMU control" />
         <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto">
           <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="ODR (Hz)" VerticalAlignment="Center" />
-          <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="13" Maximum="6660" Value="{Binding OdrHz}" />
+          <ComboBox Grid.Row="0" Grid.Column="1" HorizontalAlignment="Stretch"
+                    ItemsSource="{x:Static vm:MainViewModel.OdrOptions}"
+                    SelectedItem="{Binding OdrHz}"
+                    IsEnabled="{Binding CanEditImuConfig}" />
           <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="BATCH" VerticalAlignment="Center" />
-          <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="1" Maximum="80" Value="{Binding Batch}" />
+          <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="1" Maximum="80" Value="{Binding Batch}"
+                         IsEnabled="{Binding CanEditImuConfig}" />
           <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Accel FSR (g)" VerticalAlignment="Center" />
-          <NumericUpDown Grid.Row="2" Grid.Column="1" Minimum="2" Maximum="16" Value="{Binding AccelFsrG}" />
+          <ComboBox Grid.Row="2" Grid.Column="1" HorizontalAlignment="Stretch"
+                    ItemsSource="{x:Static vm:MainViewModel.AccelFsrOptions}"
+                    SelectedItem="{Binding AccelFsrG}"
+                    IsEnabled="{Binding CanEditImuConfig}" />
           <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="Gyro FSR (dps)" VerticalAlignment="Center" />
-          <NumericUpDown Grid.Row="3" Grid.Column="1" Minimum="125" Maximum="2000" Value="{Binding GyroFsrDps}" />
+          <ComboBox Grid.Row="3" Grid.Column="1" HorizontalAlignment="Stretch"
+                    ItemsSource="{x:Static vm:MainViewModel.GyroFsrOptions}"
+                    SelectedItem="{Binding GyroFsrDps}"
+                    IsEnabled="{Binding CanEditImuConfig}" />
         </Grid>
 
         <Grid ColumnDefinitions="*,*">
@@ -66,9 +76,11 @@
         </Grid>
 
         <TextBlock Classes="header" Text="Madgwick" />
-        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto">
-          <TextBlock Grid.Column="0" Classes="label" Text="β (gain)" VerticalAlignment="Center" />
-          <NumericUpDown Grid.Column="1" Minimum="0" Maximum="1" Increment="0.01" Value="{Binding MadgwickBeta}" />
+        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto">
+          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="β (gain)" VerticalAlignment="Center" />
+          <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="1" Increment="0.01" Value="{Binding MadgwickBeta}" />
+          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="ε gyro (dps)" VerticalAlignment="Center" />
+          <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="50" Increment="0.5" Value="{Binding GyroEpsilonDps}" />
         </Grid>
         <Grid ColumnDefinitions="*,*">
           <Button Grid.Column="0" Content="Reset orientation"

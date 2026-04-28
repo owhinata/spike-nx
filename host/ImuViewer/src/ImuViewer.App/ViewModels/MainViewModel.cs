@@ -68,6 +68,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanToggleImu))]
+    [NotifyPropertyChangedFor(nameof(CanEditImuConfig))]
     private bool _isImuOn;
 
     [ObservableProperty]
@@ -88,6 +89,17 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     [ObservableProperty]
     private double _measuredFps;
 
+    /// <summary>LSM6DSL-supported output data rates, in Hz. Hub rejects any
+    /// other value with -EINVAL so the GUI must restrict the user to these.</summary>
+    public static int[] OdrOptions { get; } =
+        new[] { 13, 26, 52, 104, 208, 416, 833, 1660, 3330, 6660 };
+
+    /// <summary>LSM6DSL-supported accelerometer full-scale ranges, in g.</summary>
+    public static int[] AccelFsrOptions { get; } = new[] { 2, 4, 8, 16 };
+
+    /// <summary>LSM6DSL-supported gyroscope full-scale ranges, in dps.</summary>
+    public static int[] GyroFsrOptions { get; } = new[] { 125, 250, 500, 1000, 2000 };
+
     [ObservableProperty]
     private int _odrHz = 833;
 
@@ -99,6 +111,14 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     [ObservableProperty]
     private int _gyroFsrDps = 2000;
+
+    /// <summary>
+    /// Stationary-detection per-axis gyro threshold, in dps. Mirrors
+    /// <see cref="StationaryDetector.GyroEpsilonDps"/> via the partial change
+    /// handler so live edits take effect on the next sample.
+    /// </summary>
+    [ObservableProperty]
+    private float _gyroEpsilonDps = 5.0f;
 
     /// <summary>
     /// Default β for per-sample integration at chip ODR. The original 0.1
@@ -123,6 +143,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public bool CanConnect => !IsConnected && SelectedPort is not null;
     public bool CanDisconnect => IsConnected;
     public bool CanToggleImu => IsConnected;
+
+    /// <summary>True when the IMU configuration inputs (ODR, BATCH, FSRs) are
+    /// editable. The Hub firmware only accepts SET ODR/BATCH/ACCEL_FSR/GYRO_FSR
+    /// while IMU is OFF, so the inputs are locked exactly while IMU is streaming.
+    /// Edits made while connected and IMU OFF are pushed to the Hub by
+    /// <see cref="ImuOnAsync"/> just before starting the stream.</summary>
+    public bool CanEditImuConfig => !IsImuOn;
 
     /// <summary>
     /// Workaround for Avalonia binding paths not resolving fields on
@@ -158,6 +185,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     partial void OnMadgwickBetaChanged(float value)
     {
         _filter.Beta = value;
+    }
+
+    partial void OnGyroEpsilonDpsChanged(float value)
+    {
+        _biasTracker.Detector.GyroEpsilonDps = value;
     }
 
     /// <summary>
@@ -322,6 +354,14 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         try
         {
+            // Resync the four config knobs before starting the stream — the
+            // user may have edited them while connected & IMU OFF, and the
+            // firmware only accepts SET while IMU is OFF.
+            await EnsureReplyAsync(_orchestrator.SetOdrAsync(OdrHz, ct), $"SET ODR {OdrHz}");
+            await EnsureReplyAsync(_orchestrator.SetBatchAsync(Batch, ct), $"SET BATCH {Batch}");
+            await EnsureReplyAsync(_orchestrator.SetAccelFsrAsync(AccelFsrG, ct), $"SET ACCEL_FSR {AccelFsrG}");
+            await EnsureReplyAsync(_orchestrator.SetGyroFsrAsync(GyroFsrDps, ct), $"SET GYRO_FSR {GyroFsrDps}");
+
             BtsensorReply r = await _orchestrator.ImuOnAsync(ct);
             if (r.IsOk)
             {
