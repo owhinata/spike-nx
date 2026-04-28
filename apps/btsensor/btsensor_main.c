@@ -746,6 +746,7 @@ enum btsensor_action_kind
   ACTION_SET_BATCH,
   ACTION_SET_ACCEL_FSR,
   ACTION_SET_GYRO_FSR,
+  ACTION_UNPAIR_ALL,
 };
 
 /* Heap-allocated action struct with explicit ownership transfer
@@ -804,6 +805,18 @@ static void action_runner(void *ctx)
         break;
       case ACTION_SET_GYRO_FSR:
         a->rc = imu_sampler_set_gyro_fsr(a->arg);
+        break;
+      case ACTION_UNPAIR_ALL:
+        /* gap_delete_all_link_keys() walks the link-key DB and drops
+         * every entry via gap_drop_link_key_for_bd_addr().  No HCI
+         * round-trip is required for the in-RAM DB, but it must run on
+         * the BTstack main thread for consistency with other DB
+         * mutations and to keep iterator state coherent if the daemon
+         * later switches to a flash-backed DB (Issue #72).
+         */
+
+        gap_delete_all_link_keys();
+        a->rc = 0;
         break;
       default:
         a->rc = -ENOSYS;
@@ -1133,6 +1146,15 @@ static int cmd_dump(int argc, char **argv)
   return 0;
 }
 
+static int cmd_unpair(int argc, char **argv)
+{
+  (void)argc;
+  (void)argv;
+
+  print_action_result(dispatch_action(ACTION_UNPAIR_ALL, 0));
+  return 0;
+}
+
 static int cmd_set(int argc, char **argv)
 {
   if (argc < 4)
@@ -1184,6 +1206,7 @@ static void print_usage(void)
   printf("  status                      print full state + current config\n");
   printf("  bt    <on|off>              start/stop BT advertising (default off)\n");
   printf("  imu   <on|off>              start/stop IMU sampling (default off)\n");
+  printf("  unpair                      forget all stored Bluetooth pairings\n");
   printf("  dump  [ms]                  dump raw IMU samples for ms (default 1000)\n");
   printf("  set   odr        <hz>       ODR  13|26|52|104|208|416|833|1660|3330|6660 (default 833)\n");
   printf("  set   batch      <n>        samples/frame 1..%d (default %d)\n",
@@ -1235,6 +1258,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "set") == 0)
     {
       return cmd_set(argc, argv);
+    }
+
+  if (strcmp(argv[1], "unpair") == 0)
+    {
+      return cmd_unpair(argc, argv);
     }
 
   if (strcmp(argv[1], "dump") == 0)

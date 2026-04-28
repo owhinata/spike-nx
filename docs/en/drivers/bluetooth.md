@@ -164,6 +164,7 @@ nsh> btsensor status                      # running / pid / bt / imu / config / 
 nsh> btsensor stop                        # asynchronous teardown (HCI off completes within ~3 s)
 nsh> btsensor bt    <on|off>              # BT visibility (mirrors short/long button press)
 nsh> btsensor imu   <on|off>              # IMU sampling on/off (independent of BT state)
+nsh> btsensor unpair                      # delete all stored Bluetooth pairings (Issue #72)
 nsh> btsensor dump  [ms]                  # read /dev/uorb/sensor_imu0 directly, print raw int16 + timestamps
 nsh> btsensor set   odr        <hz>       # ODR (IMU off only)
 nsh> btsensor set   batch      <n>        # samples per RFCOMM frame (IMU off only)
@@ -238,6 +239,11 @@ the no-RFCOMM "I just want raw samples" use case.
   → OFF, PAIRED → RFCOMM disconnect + OFF.
 - `btsensor bt off` is unconditional (turns OFF from any reachable
   state).
+- `btsensor unpair` (Issue #72) clears btstack's link-key DB without
+  changing the current BT state; the next `bt off` → `bt on` cycle
+  then routes through the link-key-aware path with an empty DB and
+  lands in BT_ADVERTISING for a fresh pair. Use this to retire an
+  old PC without rebooting.
 - LED: OFF=off, ADVERTISING / CONNECTABLE=blue 1 Hz blink (the two
   states are visually identical; distinguish via `btsensor status`),
   PAIRED=solid blue,
