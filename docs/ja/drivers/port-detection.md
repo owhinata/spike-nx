@@ -205,9 +205,54 @@ RESET → SYNC_TYPE → SYNC_MODES → SYNC_DATA → ACK → DATA
 3. **ボーレート切替**: LUMP プロトコルで 115200 → 460800 等の動的切替が必要
 4. **ホットプラグ**: 検出 → UART 通信 → 切断検出 → 再検出のループを永続スレッドで実行
 
-## 7. 参考リソース
+## 7. NuttX 実装ステータス (Issue #42)
+
+DCM (パッシブ検出 + UART ハンドオフフック) は実装済 (`feat/42-legoport-dcm` ブランチ)。LUMP プロトコル本体は Issue #43 で別途実装。
+
+### 実装ファイル
+
+- `boards/spike-prime-hub/include/board_legoport.h` — 公開 ABI (ioctl 番号、type enum、構造体)
+- `boards/spike-prime-hub/src/stm32_legoport.c` — DCM ステートマシン + ハンドオフレジストリ
+- `boards/spike-prime-hub/src/stm32_legoport_chardev.c` — `/dev/legoport[0-5]` chardev shim
+- `apps/legoport/legoport_main.c` — `legoport list / info / wait / stats` CLI
+
+### 実行モデル
+
+- HPWORK 2 ms 周期で 1 つの yield 境界 = 1 ステート前進 (pybricks の `PT_YIELD(pt)` を忠実に再現)
+- 非 yield 状態遷移は同一 invocation 内で fall-through (tick を消費しない)
+- 経路長: TPOINT=3 yields, TOUCH=4, OPEN/PULL ×VCC/PULL_DOWN=10 (worst). debounce 20 連続一致 ≈ 400 ms (worst)。
+
+### Type ID
+
+公開 ABI は pybricks `PBDRV_LEGODEV_TYPE_ID_LPF2_*` の値を保存:
+
+- 1=MMOTOR, 2=TRAIN, 3=TURN, 4=POWER, 5=TOUCH, 6=LMOTOR, 7=XMOTOR
+- 8=LIGHT, 9=LIGHT1, 10=LIGHT2, 11=TPOINT, 12=EXPLOD, 13=3_PART
+- **14=UNKNOWN_UART** (UART デバイス確定。LUMP が解決するまで latch)
+
+### ハンドオフ API (#43 連携)
+
+```c
+int stm32_legoport_register_uart_handoff(int port, legoport_uart_handoff_cb_t cb, void *priv);
+int stm32_legoport_release_uart(int port);
+```
+
+- `register_uart_handoff` 後、DCM が `UNKNOWN_UART` 確定時に CB 呼出。CB は `uart_tx`/`uart_rx` を AF に切替・`uart_buf` low・LUMP エンジン起動を担当。
+- 保護: `handoff_generation` で stale 戻り値防止、`handoff_inflight` + drain 待ちで `priv` lifetime 保護。
+- **オーナー契約**: CB が OK を返した後、#43 は **全 exit path で必ず `release_uart(port)` を呼ぶ**。DCM 側に watchdog 無し。リーク owner = ポート永久 latch (リブートまで復帰不可)。
+- **CB 非再入**: CB 内から同一ポートの `register/release` を呼ぶと inflight drain で deadlock。
+
+### `WAIT_CONNECT/DISCONNECT` セマンティクス
+
+`event_counter` (uint32_t monotonic) と per-fd snapshot で edge を取りこぼし無く検出。同じ ioctl が単一 fd で連続発行されても missed-edge race にならない。
+
+### UNOWNED 再スキャン
+
+CB 未登録 or 失敗時は `LATCHED_UART_UNOWNED_IDLE` で 100 ms ごとにフルスキャン。連続 K=3 回 NONE で latch 解除 (disconnect 検出 latency ≈ 350 ms)。
+
+## 8. 参考リソース
 
 - [pybricks/technical-info UART Protocol](https://github.com/pybricks/technical-info/blob/master/uart-protocol.md)
 - [ev3dev UART Sensor Protocol](http://docs.ev3dev.org/projects/lego-linux-drivers/en/ev3dev-stretch/sensors.html)
-- `pybricks/lib/pbio/drv/legodev/legodev_pup.c` -- ポートレベルドライバ
-- `pybricks/lib/pbio/drv/legodev/legodev_pup_uart.c` -- LUMP UART プロトコル (1265 行)
+- `pybricks/lib/pbio/drv/legodev/legodev_pup.c` -- ポートレベルドライバ (DCM 移植元)
+- `pybricks/lib/pbio/drv/legodev/legodev_pup_uart.c` -- LUMP UART プロトコル (1265 行、#43 で移植予定)

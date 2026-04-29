@@ -254,5 +254,15 @@ FAR struct btuart_lowerhalf_s *stm32_btuart_lower(void);
 int stm32_btuart_chardev_register(FAR struct btuart_lowerhalf_s *lower);
 #endif
 
+#ifdef CONFIG_LEGO_PORT
+/* Initialize the I/O port DCM (Issue #42).  Configures GPIOs for the 6
+ * external ports A-F, registers /dev/legoport0..5, and starts the HPWORK
+ * polling loop at 2 ms cadence.
+ */
+
+int stm32_legoport_initialize(void);
+int stm32_legoport_chardev_register(void);
+#endif
+
 #endif /* __ASSEMBLY__ */
 #endif /* __BOARDS_SPIKE_PRIME_HUB_SRC_SPIKE_PRIME_HUB_H */

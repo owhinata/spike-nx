@@ -205,9 +205,54 @@ RESET -> SYNC_TYPE -> SYNC_MODES -> SYNC_DATA -> ACK -> DATA
 3. **Baud Rate Switching**: LUMP protocol requires dynamic switching such as 115200 -> 460800
 4. **Hot-Plug**: Detection -> UART communication -> disconnection detection -> re-detection loop runs in a persistent thread
 
-## 7. Reference Resources
+## 7. NuttX Implementation Status (Issue #42)
+
+DCM (passive detection + UART handoff hook) is implemented (`feat/42-legoport-dcm` branch). The LUMP protocol itself is Issue #43.
+
+### Implementation Files
+
+- `boards/spike-prime-hub/include/board_legoport.h` — public ABI (ioctl numbers, type enum, structs)
+- `boards/spike-prime-hub/src/stm32_legoport.c` — DCM state machine + handoff registry
+- `boards/spike-prime-hub/src/stm32_legoport_chardev.c` — `/dev/legoport[0-5]` chardev shim
+- `apps/legoport/legoport_main.c` — `legoport list / info / wait / stats` CLI
+
+### Execution Model
+
+- HPWORK runs at 2 ms cadence; one yield boundary = one state advance (faithful port of pybricks `PT_YIELD(pt)`)
+- Non-yield state transitions fall through within a single invocation (no tick consumed)
+- Path lengths: TPOINT=3 yields, TOUCH=4, OPEN/PULL × VCC/PULL_DOWN=10 (worst); debounce 20 consecutive ≈ 400 ms worst case.
+
+### Type IDs
+
+Public ABI preserves pybricks `PBDRV_LEGODEV_TYPE_ID_LPF2_*` values:
+
+- 1=MMOTOR, 2=TRAIN, 3=TURN, 4=POWER, 5=TOUCH, 6=LMOTOR, 7=XMOTOR
+- 8=LIGHT, 9=LIGHT1, 10=LIGHT2, 11=TPOINT, 12=EXPLOD, 13=3_PART
+- **14=UNKNOWN_UART** (UART device confirmed; latched until LUMP identifies it)
+
+### Handoff API (#43 integration)
+
+```c
+int stm32_legoport_register_uart_handoff(int port, legoport_uart_handoff_cb_t cb, void *priv);
+int stm32_legoport_release_uart(int port);
+```
+
+- After `register_uart_handoff`, when DCM confirms `UNKNOWN_UART` it invokes the CB.  The CB owns: switching `uart_tx`/`uart_rx` to UART AF, asserting `uart_buf` low, starting the LUMP engine.
+- Protection: `handoff_generation` guards against stale results; `handoff_inflight` + drain wait pins `priv` lifetime.
+- **Owner contract**: once the CB returns OK, #43 **MUST** call `release_uart(port)` on every exit path.  There is no DCM-side watchdog; a leaked owner latches the port until reboot.
+- **CB non-reentrancy**: the CB MUST NOT call `register/release` for the same port — that deadlocks on the inflight drain.
+
+### `WAIT_CONNECT/DISCONNECT` Semantics
+
+`event_counter` (uint32_t monotonic) plus a per-fd snapshot lets WAIT detect edges without missing notifications even with single-open semantics.
+
+### UNOWNED Rescan
+
+When no CB is registered or a CB fails, DCM enters `LATCHED_UART_UNOWNED_IDLE` and runs a full rescan every 100 ms.  K=3 consecutive NONE confirmations release the latch (disconnect-detection latency ≈ 350 ms).
+
+## 8. Reference Resources
 
 - [pybricks/technical-info UART Protocol](https://github.com/pybricks/technical-info/blob/master/uart-protocol.md)
 - [ev3dev UART Sensor Protocol](http://docs.ev3dev.org/projects/lego-linux-drivers/en/ev3dev-stretch/sensors.html)
-- `pybricks/lib/pbio/drv/legodev/legodev_pup.c` -- Port-level driver
-- `pybricks/lib/pbio/drv/legodev/legodev_pup_uart.c` -- LUMP UART protocol (1265 lines)
+- `pybricks/lib/pbio/drv/legodev/legodev_pup.c` -- Port-level driver (DCM source)
+- `pybricks/lib/pbio/drv/legodev/legodev_pup_uart.c` -- LUMP UART protocol (1265 lines, ported in #43)

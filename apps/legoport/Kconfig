@@ -1,0 +1,6 @@
+config APP_LEGOPORT
+	tristate "LEGO Powered Up I/O port utility"
+	default n
+	---help---
+		CLI for inspecting and waiting on /dev/legoport0..5
+		(Issue #42).  Subcommands: list, info, wait, stats.

@@ -16,10 +16,15 @@ Each port has three signal groups: UART (device communication), GPIO (device det
 | B | UART4 | PD1 | PD0 | AF11 | PA8 | |
 | C | UART8 | PE1 | PE0 | AF8 | PE5 | |
 | D | UART5 | PC12 | PD2 | AF8 | PB2 | |
-| E | UART10 | PE3 | PE2 | AF11 | PB5 | F413-specific, not supported in NuttX |
-| F | UART9 | PD15 | PD14 | AF11 | PC5 | F413-specific, not supported in NuttX |
+| E | UART10 | PE3 | PE2 | AF11 | PB5 | F413-specific, not supported in NuttX (planned for #43) |
+| F | UART9 | PD15 | PD14 | AF11 | PC5 | F413-specific, not supported in NuttX (planned for #43) |
 
 `uart_buf` is the buffer enable pin (Active Low). TX/RX pins and GPIO1/GPIO2 share the same physical pins (Pin 5/Pin 6) connected through a buffer.
+
+!!! warning "Pin caveats handled by Issue #42"
+    - **PB2 (Port D `uart_buf`)** is also the STM32F4 **BOOT1 strap pin**.  The HW board must hold the correct level during reset (software cannot fix that).  After reset the pin can be reconfigured as GPIO output.
+    - **PC13/PC14/PC15 (Port D gpio1/gpio2 + Port E gpio1)** are STM32 backup-domain I/O.  Per RM0430 §6.2.4 they must use `GPIO_SPEED_2MHz` only, must only be used for ID-resistor sensing (no real load drive), and `LSEON` must remain 0.
+    - **PA10 (Port A `uart_buf`)** doubles as USB OTG_FS_ID.  The defconfig sets `CONFIG_OTG_ID_GPIO_DISABLE=y` so NuttX's upstream OTG init does not overwrite the legoport configuration on PA10 (required for #42).
 
 ### GPIO (Device Detection)
 

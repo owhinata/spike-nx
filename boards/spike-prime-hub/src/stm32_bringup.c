@@ -286,5 +286,20 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_LEGO_PORT
+  ret = stm32_legoport_chardev_register();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_legoport_chardev_register() failed: %d\n",
+             ret);
+    }
+
+  ret = stm32_legoport_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_legoport_initialize() failed: %d\n", ret);
+    }
+#endif
+
   return ret;
 }

@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_APP_LEGOPORT),)
+CONFIGURED_APPS += $(APPDIR)/external/legoport
+endif

@@ -11,3 +11,18 @@ config SPIKE_SOUND_PCM_BUFSAMPLES
 		Default 1024 samples = 2 KB.  Playback is cyclic (one period
 		loops until stop), so this buffer holds one waveform period
 		rather than an entire track.
+
+config LEGO_PORT
+	bool "LEGO Powered Up I/O port DCM (/dev/legoport[0-5])"
+	default n
+	depends on SCHED_HPWORK
+	---help---
+		Enable the device-connection-manager (DCM) for the 6 external
+		I/O ports (A-F) on the SPIKE Prime Hub.  Registers six char
+		devices /dev/legoport0../dev/legoport5 backed by a 2 ms HPWORK
+		state machine ported from pybricks (Issue #42).
+
+		For UART devices, the DCM latches the port at type
+		UNKNOWN_UART (14) and waits for the LUMP engine (Issue #43)
+		to register a handoff callback.  Without #43, UART devices
+		are detected but no LUMP traffic flows.
