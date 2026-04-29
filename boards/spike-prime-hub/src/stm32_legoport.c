@@ -37,6 +37,7 @@
 #include <errno.h>
 #include <debug.h>
 #include <assert.h>
+#include <syslog.h>
 
 #include <nuttx/clock.h>
 #include <nuttx/wqueue.h>
@@ -366,6 +367,10 @@ static bool                     g_legoport_initialized;
 
 static volatile uint32_t g_max_step_us;
 static volatile uint32_t g_max_interval_us;
+static volatile uint32_t g_total_invocations;
+static volatile uint32_t g_late_4ms;
+static volatile uint32_t g_late_10ms;
+static volatile uint32_t g_late_100ms;
 static clock_t           g_last_invoke_ticks;
 
 /****************************************************************************
@@ -535,6 +540,13 @@ static void legoport_invoke_handoff(int port)
 
 static void legoport_dcm_step(int port)
 {
+#ifdef CONFIG_LEGO_PORT_DCM_NOOP
+  /* Diagnostic build: HPWORK monitoring code runs but DCM does no GPIO
+   * work.  Used to rule the DCM out of HPWORK contention measurements.
+   */
+  UNUSED(port);
+  return;
+#else
   struct legoport_state_s   *s = &g_legoport_state[port];
   const struct legoport_pin_s *p = &g_legoport_pins[port];
 
@@ -750,7 +762,15 @@ static void legoport_dcm_step(int port)
               }
 
           case DCM_S7_READ_RX_HI:
-            /* pybricks 257-265: sample uart_rx after cap-debounce. */
+            /* pybricks 257-265: sample uart_rx after cap-debounce.
+             * The cap-debounce step left uart_rx in GPIO OUTPUT LOW; we
+             * must switch it back to INPUT before reading or
+             * stm32_gpioread() returns the (still-low) output drive
+             * value forever and the next scan misclassifies the port
+             * as UNKNOWN_UART.  Pybricks' pbdrv_gpio_input() helper
+             * does this implicitly; NuttX's stm32_gpioread() does not.
+             */
+            stm32_configgpio(p->uart_rx_in);
             if (!stm32_gpioread(p->uart_rx_in))
               {
                 /* Stayed low → ID2 group = PULL_DOWN. */
@@ -786,10 +806,15 @@ static void legoport_dcm_step(int port)
 
           case DCM_S8_FINALIZE:
             {
-              /* pybricks 280-298: reset pins to safe state, debounce. */
+              /* pybricks 280-298: reset pins to safe state, debounce.
+               * Also restore uart_rx to INPUT in case any scan path
+               * ended with it in OUTPUT LOW (cap-debounce trick) so the
+               * next scan reads the actual line level.
+               */
               stm32_configgpio(p->gpio2_in);
               stm32_configgpio(p->uart_tx_hi);
               stm32_configgpio(p->uart_buf_lo);
+              stm32_configgpio(p->uart_rx_in);
 
               if (s->type_id == s->prev_type_id)
                 {
@@ -906,6 +931,7 @@ static void legoport_dcm_step(int port)
             return;
         }
     }
+#endif /* CONFIG_LEGO_PORT_DCM_NOOP */
 }
 
 /****************************************************************************
@@ -919,6 +945,8 @@ static void legoport_dcm_worker(FAR void *arg)
   clock_t  now_ticks = clock_systime_ticks();
   uint32_t t0_us     = (uint32_t)TICK2USEC(now_ticks);
 
+  g_total_invocations++;
+
   if (g_last_invoke_ticks != 0)
     {
       uint32_t interval =
@@ -926,6 +954,16 @@ static void legoport_dcm_worker(FAR void *arg)
       if (interval > g_max_interval_us)
         {
           g_max_interval_us = interval;
+        }
+      if (interval > 4000)   g_late_4ms++;
+      if (interval > 10000)  g_late_10ms++;
+      if (interval > 100000)
+        {
+          g_late_100ms++;
+          syslog(LOG_INFO,
+                 "legoport: HPWORK gap %lu us at t=%lu ms\n",
+                 (unsigned long)interval,
+                 (unsigned long)TICK2MSEC(now_ticks));
         }
     }
 
@@ -1091,6 +1129,27 @@ uint32_t stm32_legoport_get_max_step_us(void)
 uint32_t stm32_legoport_get_max_interval_us(void)
 {
   return g_max_interval_us;
+}
+
+void stm32_legoport_reset_stats(void)
+{
+  g_max_step_us       = 0;
+  g_max_interval_us   = 0;
+  g_total_invocations = 0;
+  g_late_4ms          = 0;
+  g_late_10ms         = 0;
+  g_late_100ms        = 0;
+  g_last_invoke_ticks = 0;
+}
+
+void stm32_legoport_get_stats(FAR struct legoport_stats_s *out)
+{
+  out->max_step_us       = g_max_step_us;
+  out->max_interval_us   = g_max_interval_us;
+  out->total_invocations = g_total_invocations;
+  out->late_4ms          = g_late_4ms;
+  out->late_10ms         = g_late_10ms;
+  out->late_100ms        = g_late_100ms;
 }
 
 /* Accessors used by the chardev shim — exposed via spike_prime_hub.h. */

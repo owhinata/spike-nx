@@ -59,6 +59,8 @@ int      stm32_legoport_wait_change(int port, uint32_t snapshot,
                                     FAR uint32_t *new_counter_out);
 uint32_t stm32_legoport_get_max_step_us(void);
 uint32_t stm32_legoport_get_max_interval_us(void);
+void     stm32_legoport_reset_stats(void);
+void     stm32_legoport_get_stats(FAR struct legoport_stats_s *out);
 
 /****************************************************************************
  * File Operations
@@ -272,12 +274,14 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
               return -EINVAL;
             }
 
-          stats.max_step_us     = stm32_legoport_get_max_step_us();
-          stats.max_interval_us = stm32_legoport_get_max_interval_us();
-
+          stm32_legoport_get_stats(&stats);
           memcpy(user, &stats, sizeof(stats));
           return OK;
         }
+
+      case LEGOPORT_RESET_STATS:
+        stm32_legoport_reset_stats();
+        return OK;
 
       default:
         return -ENOTTY;

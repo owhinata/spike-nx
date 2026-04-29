@@ -14,6 +14,7 @@
 
 #include <nuttx/config.h>
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -206,7 +207,7 @@ static int do_wait(int port, uint32_t timeout_ms)
   return 0;
 }
 
-static int do_stats(void)
+static int do_stats(bool reset)
 {
   /* Stats live on every port, but the values are global; query port 0. */
 
@@ -220,6 +221,19 @@ static int do_stats(void)
       return 1;
     }
 
+  if (reset)
+    {
+      if (ioctl(fd, LEGOPORT_RESET_STATS, 0) < 0)
+        {
+          printf("ioctl RESET_STATS failed: %d\n", errno);
+          close(fd);
+          return 1;
+        }
+      printf("stats cleared\n");
+      close(fd);
+      return 0;
+    }
+
   struct legoport_stats_s stats;
   if (ioctl(fd, LEGOPORT_GET_STATS, (unsigned long)&stats) < 0)
     {
@@ -229,9 +243,15 @@ static int do_stats(void)
     }
 
   printf("HPWORK DCM stats:\n");
-  printf("  max step:     %lu us\n", (unsigned long)stats.max_step_us);
-  printf("  max interval: %lu us  (target: 2000 us)\n",
+  printf("  total invocations: %lu\n",
+         (unsigned long)stats.total_invocations);
+  printf("  max step:          %lu us\n",
+         (unsigned long)stats.max_step_us);
+  printf("  max interval:      %lu us  (target: 2000 us)\n",
          (unsigned long)stats.max_interval_us);
+  printf("  intervals > 4ms:   %lu\n",   (unsigned long)stats.late_4ms);
+  printf("  intervals > 10ms:  %lu\n",   (unsigned long)stats.late_10ms);
+  printf("  intervals > 100ms: %lu\n",   (unsigned long)stats.late_100ms);
   close(fd);
   return 0;
 }
@@ -245,6 +265,7 @@ static void usage(void)
   printf("  legoport wait <N> [timeout_ms]\n"
          "                       - block on connect edge\n");
   printf("  legoport stats       - HPWORK cadence stats\n");
+  printf("  legoport stats reset - clear max_step_us / max_interval_us\n");
 }
 
 /****************************************************************************
@@ -281,7 +302,8 @@ int main(int argc, FAR char *argv[])
 
   if (strcmp(argv[1], "stats") == 0)
     {
-      return do_stats();
+      bool reset = (argc >= 3 && strcmp(argv[2], "reset") == 0);
+      return do_stats(reset);
     }
 
   usage();

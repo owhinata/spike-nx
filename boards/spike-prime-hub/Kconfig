@@ -26,3 +26,13 @@ config LEGO_PORT
 		UNKNOWN_UART (14) and waits for the LUMP engine (Issue #43)
 		to register a handoff callback.  Without #43, UART devices
 		are detected but no LUMP traffic flows.
+
+config LEGO_PORT_DCM_NOOP
+	bool "Diagnostic: skip DCM GPIO work (keep HPWORK monitor)"
+	default n
+	depends on LEGO_PORT
+	---help---
+		Diagnostic build flag.  When set, legoport_dcm_step() returns
+		immediately without performing any GPIO work, but the HPWORK
+		invocation timing is still measured by stm32_legoport_get_stats().
+		Used to rule the DCM in or out of HPWORK contention bugs.

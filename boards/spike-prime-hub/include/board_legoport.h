@@ -81,6 +81,10 @@ struct legoport_stats_s
 {
   uint32_t max_step_us;       /* worst worker execution time, microseconds */
   uint32_t max_interval_us;   /* worst gap between worker invocations */
+  uint32_t total_invocations; /* total worker calls since last reset */
+  uint32_t late_4ms;          /* count of intervals > 4 ms */
+  uint32_t late_10ms;         /* count of intervals > 10 ms */
+  uint32_t late_100ms;        /* count of intervals > 100 ms */
 };
 
 /* IOC base — picks 0x4800 which is unused in <nuttx/fs/ioctl.h> (next free
@@ -97,6 +101,7 @@ struct legoport_stats_s
 #define LEGOPORT_WAIT_CONNECT     _LEGOPORTIOC(0x0003) /* arg: timeout_ms (0=infinite) */
 #define LEGOPORT_WAIT_DISCONNECT  _LEGOPORTIOC(0x0004) /* arg: timeout_ms (0=infinite) */
 #define LEGOPORT_GET_STATS        _LEGOPORTIOC(0x0005) /* arg: struct legoport_stats_s* */
+#define LEGOPORT_RESET_STATS      _LEGOPORTIOC(0x0006) /* arg: 0 (clear max_step_us / max_interval_us) */
 
 /* Pre-computed GPIO descriptors for one I/O port.  All entries except
  * `*_af` are NuttX `stm32_configgpio()` arguments — packed uint32_t with
