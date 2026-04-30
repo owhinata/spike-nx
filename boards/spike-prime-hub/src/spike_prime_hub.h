@@ -301,5 +301,15 @@ int lump_pop_data_frame(int port, struct lump_data_frame_s *out);
 int stm32_legoport_lump_register(void);
 #endif
 
+#ifdef CONFIG_LEGO_SENSOR
+/* Register the six /dev/uorb/sensor_lego[0..5] uORB topics (Issue #45)
+ * and attach per-port LUMP publish callbacks.  Must be called after
+ * `stm32_legoport_lump_register()`; partial failure is rolled back
+ * before returning so the rest of bringup is unaffected.
+ */
+
+int legosensor_uorb_register(void);
+#endif
+
 #endif /* __ASSEMBLY__ */
 #endif /* __BOARDS_SPIKE_PRIME_HUB_SRC_SPIKE_PRIME_HUB_H */

@@ -68,3 +68,7 @@ ifeq ($(CONFIG_LEGO_LUMP),y)
 CSRCS += stm32_legoport_lump.c stm32_legoport_lump_table.c \
          stm32_legoport_uart_hw.c
 endif
+
+ifeq ($(CONFIG_LEGO_SENSOR),y)
+CSRCS += legosensor_uorb.c
+endif

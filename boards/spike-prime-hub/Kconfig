@@ -62,3 +62,20 @@ config LEGO_LUMP_DIAG
 		RCC APB1ENR / APB2ENR, USART BRR / CR1, and NVIC priority and
 		enable bits for all six LUMP UARTs.  Useful for bring-up and
 		regression diagnosis; leave off for production builds.
+
+config LEGO_SENSOR
+	bool "LEGO sensor uORB driver (/dev/uorb/sensor_lego[0..5])"
+	default n
+	depends on LEGO_LUMP
+	depends on SENSORS
+	---help---
+		Per-port uORB sensor driver (Issue #45) that publishes
+		telemetry from any LUMP-capable Powered Up device — Color /
+		Ultrasonic / Force sensors and BOOST / Technic / SPIKE motor
+		encoders — to /dev/uorb/sensor_lego[0..5] as a fixed 56 byte
+		`struct lump_sample_s` envelope.
+
+		Mode switching and writable-mode TX (e.g. Color sensor LED
+		control, Ultrasonic LED control) are exposed through custom
+		ioctls (`LEGOSENSOR_SELECT` / `LEGOSENSOR_SEND`) gated by
+		per-port `LEGOSENSOR_CLAIM` arbitration.

@@ -332,5 +332,18 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_LEGO_SENSOR
+  ret = legosensor_uorb_register();
+  if (ret < 0)
+    {
+      /* Partial registrations are rolled back inside the function so
+       * the rest of bringup stays unaffected.  Log and continue.
+       */
+
+      syslog(LOG_ERR, "ERROR: legosensor_uorb_register() failed: %d\n",
+             ret);
+    }
+#endif
+
   return ret;
 }
