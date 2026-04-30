@@ -358,6 +358,174 @@ static int do_lump_info(int port)
 }
 #endif
 
+static int do_lump_set_mode(int port, int mode)
+{
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
+    {
+      printf("invalid port: %d\n", port);
+      return 1;
+    }
+
+  char path[24];
+  build_devpath(port, path, sizeof(path));
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    {
+      printf("cannot open %s: %d\n", path, errno);
+      return 1;
+    }
+
+  int rc = ioctl(fd, LEGOPORT_LUMP_SELECT, (unsigned long)mode);
+  close(fd);
+  if (rc < 0)
+    {
+      printf("ioctl LUMP_SELECT failed: %d\n", errno);
+      return 1;
+    }
+  printf("Port %c: mode select %d queued\n", 'A' + port, mode);
+  return 0;
+}
+
+static int parse_hex_byte(const char *s, uint8_t *out)
+{
+  if (s[0] == '\0' || s[1] == '\0' || s[2] != '\0')
+    {
+      return -1;
+    }
+  char buf[3] = { s[0], s[1], 0 };
+  char *end = NULL;
+  long v = strtol(buf, &end, 16);
+  if (end == NULL || *end != 0 || v < 0 || v > 0xff)
+    {
+      return -1;
+    }
+  *out = (uint8_t)v;
+  return 0;
+}
+
+static int do_lump_send(int port, int mode, int argc, FAR char *argv[])
+{
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
+    {
+      printf("invalid port: %d\n", port);
+      return 1;
+    }
+  if (mode < 0 || mode > 7)
+    {
+      printf("invalid mode: %d (0..7)\n", mode);
+      return 1;
+    }
+  if (argc < 1 || argc > 32)
+    {
+      printf("data byte count must be 1..32, got %d\n", argc);
+      return 1;
+    }
+
+  struct legoport_lump_send_arg_s req;
+  memset(&req, 0, sizeof(req));
+  req.mode = (uint8_t)mode;
+  req.len  = (uint8_t)argc;
+  for (int i = 0; i < argc; i++)
+    {
+      if (parse_hex_byte(argv[i], &req.data[i]) < 0)
+        {
+          printf("bad hex byte: %s (need 2 hex chars)\n", argv[i]);
+          return 1;
+        }
+    }
+
+  char path[24];
+  build_devpath(port, path, sizeof(path));
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    {
+      printf("cannot open %s: %d\n", path, errno);
+      return 1;
+    }
+
+  int rc = ioctl(fd, LEGOPORT_LUMP_SEND, (unsigned long)&req);
+  close(fd);
+  if (rc < 0)
+    {
+      printf("ioctl LUMP_SEND failed: %d\n", errno);
+      return 1;
+    }
+  printf("Port %c: send mode=%u %u bytes queued\n",
+         'A' + port, req.mode, req.len);
+  return 0;
+}
+
+static int do_lump_watch(int port, int duration_ms)
+{
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
+    {
+      printf("invalid port: %d\n", port);
+      return 1;
+    }
+  if (duration_ms <= 0 || duration_ms > 60000)
+    {
+      printf("duration must be 1..60000 ms\n");
+      return 1;
+    }
+
+  char path[24];
+  build_devpath(port, path, sizeof(path));
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    {
+      printf("cannot open %s: %d\n", path, errno);
+      return 1;
+    }
+
+  printf("Port %c watching %d ms... (Ctrl-C to stop)\n",
+         'A' + port, duration_ms);
+
+  /* Poll the engine's DATA ring at ~10 ms cadence. */
+
+  struct timespec start;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+
+  uint32_t frames = 0;
+  for (;;)
+    {
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000L +
+                       (now.tv_nsec - start.tv_nsec) / 1000000L;
+      if (elapsed_ms >= duration_ms)
+        {
+          break;
+        }
+
+      struct lump_data_frame_s frame;
+      int rc = ioctl(fd, LEGOPORT_LUMP_POLL_DATA, (unsigned long)&frame);
+      if (rc == 0)
+        {
+          frames++;
+          printf("[%c] mode=%u len=%u",
+                 'A' + port, frame.mode, frame.len);
+          for (uint8_t i = 0; i < frame.len; i++)
+            {
+              printf(" %02x", frame.data[i]);
+            }
+          printf("\n");
+        }
+      else if (errno != EAGAIN)
+        {
+          printf("ioctl LUMP_POLL_DATA failed: %d\n", errno);
+          close(fd);
+          return 1;
+        }
+
+      usleep(10 * 1000);
+    }
+
+  close(fd);
+  printf("Port %c: %lu frames in %d ms\n",
+         'A' + port, (unsigned long)frames, duration_ms);
+  return 0;
+}
+
 #ifdef CONFIG_LEGO_LUMP_DIAG
 static int do_lump_hw_dump(void)
 {
@@ -398,6 +566,12 @@ static void usage(void)
 #ifdef CONFIG_LEGO_LUMP
   printf("  legoport lump info <N>\n"
          "                       - dump LUMP device info (post-SYNC)\n");
+  printf("  legoport lump set-mode <N> <m>\n"
+         "                       - request mode switch (CMD SELECT)\n");
+  printf("  legoport lump send <N> <m> <hex>...\n"
+         "                       - send DATA frame (writable mode)\n");
+  printf("  legoport lump watch <N> <ms>\n"
+         "                       - dump DATA frames for `ms` ms\n");
 #endif
 #ifdef CONFIG_LEGO_LUMP_DIAG
   printf("  legoport lump-hw dump\n"
@@ -454,6 +628,34 @@ int main(int argc, FAR char *argv[])
               return 1;
             }
           return do_lump_info(atoi(argv[3]));
+        }
+      if (argc >= 3 && strcmp(argv[2], "set-mode") == 0)
+        {
+          if (argc < 5)
+            {
+              usage();
+              return 1;
+            }
+          return do_lump_set_mode(atoi(argv[3]), atoi(argv[4]));
+        }
+      if (argc >= 3 && strcmp(argv[2], "send") == 0)
+        {
+          if (argc < 6)
+            {
+              usage();
+              return 1;
+            }
+          return do_lump_send(atoi(argv[3]), atoi(argv[4]),
+                              argc - 5, &argv[5]);
+        }
+      if (argc >= 3 && strcmp(argv[2], "watch") == 0)
+        {
+          if (argc < 5)
+            {
+              usage();
+              return 1;
+            }
+          return do_lump_watch(atoi(argv[3]), atoi(argv[4]));
         }
       usage();
       return 1;

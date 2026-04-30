@@ -118,6 +118,34 @@ struct legoport_stats_s
 
 #define LEGOPORT_LUMP_GET_INFO    _LEGOPORTIOC(0x0008)
 
+/* LUMP UART engine TX requests (Issue #43 Phase 3).  Posted to the
+ * per-port kthread and serviced between RX byte reads in the DATA
+ * loop.  All return 0 on accept (kthread will issue the wire TX
+ * within ~20 ms); -EAGAIN if not synced; -EINVAL if mode out of range
+ * or other validation failure; -ENOTSUP for SEND on non-writable mode.
+ */
+
+#define LEGOPORT_LUMP_SELECT      _LEGOPORTIOC(0x0009)  /* arg: uint8_t mode */
+
+/* `arg`: `struct legoport_lump_send_arg_s *` (mode + len + bytes). */
+
+struct legoport_lump_send_arg_s
+{
+  uint8_t  mode;
+  uint8_t  len;
+  uint8_t  reserved[2];
+  uint8_t  data[32];   /* LUMP_MAX_PAYLOAD */
+};
+#define LEGOPORT_LUMP_SEND        _LEGOPORTIOC(0x000A)
+
+/* Poll one DATA frame from the per-port engine ring.  arg:
+ * `struct lump_data_frame_s *`.  Returns 0 with frame, -EAGAIN if
+ * empty, -EAGAIN also if not yet synced.  Used by `legoport lump
+ * watch`; ~10 ms polling cadence is comfortable.
+ */
+
+#define LEGOPORT_LUMP_POLL_DATA   _LEGOPORTIOC(0x000B)
+
 /* Pre-computed GPIO descriptors for one I/O port.  All entries except
  * `*_af` are NuttX `stm32_configgpio()` arguments — packed uint32_t with
  * mode/pull/speed/output/port/pin baked in.  `uart_tx_af` / `uart_rx_af`

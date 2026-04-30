@@ -317,6 +317,44 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
           memcpy(user, &info, sizeof(info));
           return OK;
         }
+
+      case LEGOPORT_LUMP_SELECT:
+        return lump_select_mode(priv->port, (uint8_t)arg);
+
+      case LEGOPORT_LUMP_SEND:
+        {
+          FAR struct legoport_lump_send_arg_s *user =
+              (FAR struct legoport_lump_send_arg_s *)arg;
+
+          if (user == NULL || user->len == 0 ||
+              user->len > sizeof(user->data))
+            {
+              return -EINVAL;
+            }
+
+          return lump_send_data(priv->port, user->mode,
+                                user->data, user->len);
+        }
+
+      case LEGOPORT_LUMP_POLL_DATA:
+        {
+          FAR struct lump_data_frame_s *user =
+              (FAR struct lump_data_frame_s *)arg;
+          struct lump_data_frame_s frame;
+
+          if (user == NULL)
+            {
+              return -EINVAL;
+            }
+
+          int rc = lump_pop_data_frame(priv->port, &frame);
+          if (rc < 0)
+            {
+              return rc;
+            }
+          memcpy(user, &frame, sizeof(frame));
+          return OK;
+        }
 #endif
 
       default:

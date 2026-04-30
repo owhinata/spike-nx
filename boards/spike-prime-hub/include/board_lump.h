@@ -81,6 +81,22 @@ struct lump_device_info_s
   struct lump_mode_info_s modes[LUMP_MAX_MODES];
 };
 
+/* DATA frame snapshot returned by `LEGOPORT_LUMP_POLL_DATA` ioctl
+ * (Issue #43 Phase 3).  `len` is the actual payload size in bytes
+ * (1..LUMP_MAX_PAYLOAD); `data[len..]` is unused.  `mode` is the
+ * device's reporting mode at the time the frame was received.
+ */
+
+struct lump_data_frame_s
+{
+  uint8_t  mode;
+  uint8_t  len;
+  uint8_t  reserved[2];
+  uint8_t  data[LUMP_MAX_PAYLOAD];
+};
+
+#define LUMP_DATA_QUEUE   16    /* engine-side DATA frame ring depth */
+
 /* Callback invoked once on SYNCING -> DATA transition.  `info` is owned
  * by the engine and remains valid until the next SYNC cycle on the same
  * port.  Caller may snapshot fields they need.

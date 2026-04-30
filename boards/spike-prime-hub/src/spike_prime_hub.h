@@ -278,6 +278,17 @@ int stm32_legoport_release_uart(int port);
 #endif
 
 #ifdef CONFIG_LEGO_LUMP
+struct lump_data_frame_s;
+
+/* Pop one DATA frame off the per-port LUMP ring (Phase 3).  Used by
+ * `LEGOPORT_LUMP_POLL_DATA` ioctl in the legoport chardev to feed
+ * `legoport lump watch`.  Returns 0 on success, -EAGAIN if empty.
+ */
+
+int lump_pop_data_frame(int port, struct lump_data_frame_s *out);
+#endif
+
+#ifdef CONFIG_LEGO_LUMP
 /* Initialise the LUMP UART protocol engine (Issue #43).  Pre-creates
  * 6 per-port kernel threads (sleeping), registers the DCM handoff
  * callback for each port, and installs per-port watchdog timers.

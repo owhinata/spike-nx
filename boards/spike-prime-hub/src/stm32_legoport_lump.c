@@ -206,6 +206,43 @@ struct lump_engine_s
   mutex_t  info_lock;
   struct lump_device_info_s info;
 
+  /* Phase 3: DATA-state plumbing */
+
+  /* Pending TX requests posted by user-space ioctls / kernel API.  All
+   * three guarded by `tx_lock`; the kthread drains them between byte
+   * reads in the DATA loop.
+   */
+
+  mutex_t  tx_lock;
+  bool     pending_select;
+  uint8_t  pending_select_mode;
+  bool     pending_send;
+  uint8_t  pending_send_mode;
+  uint8_t  pending_send_buf[LUMP_MAX_PAYLOAD];
+  uint8_t  pending_send_len;
+
+  /* Per-port DATA-frame ring served by `LEGOPORT_LUMP_POLL_DATA` ioctl
+   * (used by `legoport lump watch <N>`).  The kthread is the producer;
+   * `lump_pop_data_frame()` is the consumer.  Drops oldest on overflow.
+   */
+
+  mutex_t  dq_lock;
+  struct lump_data_frame_s dq[LUMP_DATA_QUEUE];
+  uint8_t  dq_head;
+  uint8_t  dq_tail;
+  uint8_t  dq_count;
+  uint32_t dq_dropped;
+
+  /* `lump_attach()` callback set, served by the kthread (lock-released
+   * before fire to avoid deadlock — same-port re-entry is rejected by
+   * `in_callback`).
+   */
+
+  mutex_t  cb_lock;
+  bool     cb_attached;
+  bool     in_callback;
+  struct lump_callbacks_s cb;
+
   /* Stats */
 
   uint32_t rx_bytes;
@@ -234,7 +271,7 @@ static int  lump_send_msg(struct lump_engine_s *e, uint8_t header,
                           const uint8_t *payload, size_t payload_len,
                           bool with_checksum);
 static int  lump_send_sys(struct lump_engine_s *e, uint8_t sys_byte);
-static int  lump_keepalive_loop(struct lump_engine_s *e);
+static int  lump_data_loop(struct lump_engine_s *e);
 static void lump_reset_session_state(struct lump_engine_s *e);
 static uint8_t lump_msg_payload_size(uint8_t header);
 
@@ -298,6 +335,28 @@ static void lump_reset_session_state(struct lump_engine_s *e)
   nxmutex_lock(&e->info_lock);
   memset(&e->info, 0, sizeof(e->info));
   nxmutex_unlock(&e->info_lock);
+
+  /* Drop any stale TX requests + DATA queue from the previous session.
+   * Callbacks survive — `lump_attach` registration outlives sessions
+   * (a re-sync re-fires `on_sync` on next entry to DATA loop... well,
+   * Phase 3 doesn't re-fire `on_sync` after re-sync; consumers track
+   * the SYNCED flag transition themselves via lump_get_info polling
+   * if they care.  #44/#45 motor/sensor drivers will likely just
+   * re-attach after detach-on-disconnect.).
+   */
+
+  nxmutex_lock(&e->tx_lock);
+  e->pending_select   = false;
+  e->pending_send     = false;
+  e->pending_send_len = 0;
+  nxmutex_unlock(&e->tx_lock);
+
+  nxmutex_lock(&e->dq_lock);
+  e->dq_head    = 0;
+  e->dq_tail    = 0;
+  e->dq_count   = 0;
+  e->dq_dropped = 0;
+  nxmutex_unlock(&e->dq_lock);
 }
 
 /****************************************************************************
@@ -782,8 +841,85 @@ static int lump_parse_msg(struct lump_engine_s *e)
         break;
 
       case LUMP_MSG_TYPE_DATA:
-        /* Phase 2: discard.  Phase 3 will route to on_data callback. */
-        break;
+        {
+          /* Mode is the lower 3 bits of the header plus `ext_mode`
+           * (CMD EXT_MODE adder).  Powered Up devices issue
+           * `CMD EXT_MODE 0` / `CMD EXT_MODE 8` before each DATA group
+           * to multiplex modes >= 8.
+           */
+
+          uint8_t data_mode = (uint8_t)((header & LUMP_MSG_CMD_MASK) +
+                                        e->ext_mode);
+          if (data_mode >= LUMP_MAX_MODES)
+            {
+              break;  /* unknown mode — drop silently */
+            }
+
+          uint8_t payload = lump_msg_payload_size(header);
+          if (payload > LUMP_MAX_PAYLOAD)
+            {
+              break;
+            }
+
+          /* Update `current_mode` only on edge.  Cheap mutex round-trip
+           * but only fires when the mode changes — DATA frames keep
+           * coming at high rate.
+           */
+
+          nxmutex_lock(&e->info_lock);
+          if (e->info.current_mode != data_mode)
+            {
+              e->info.current_mode = data_mode;
+            }
+          e->info.flags |= LUMP_FLAG_DATA_OK;
+          nxmutex_unlock(&e->info_lock);
+
+          /* Push into the user-facing data queue (drop oldest if full). */
+
+          nxmutex_lock(&e->dq_lock);
+          if (e->dq_count == LUMP_DATA_QUEUE)
+            {
+              e->dq_tail = (uint8_t)((e->dq_tail + 1) % LUMP_DATA_QUEUE);
+              e->dq_count--;
+              e->dq_dropped++;
+            }
+          struct lump_data_frame_s *slot = &e->dq[e->dq_head];
+          slot->mode = data_mode;
+          slot->len  = payload;
+          memset(slot->reserved, 0, sizeof(slot->reserved));
+          memcpy(slot->data, &e->rx_msg[1], payload);
+          if (payload < LUMP_MAX_PAYLOAD)
+            {
+              memset(slot->data + payload, 0,
+                     LUMP_MAX_PAYLOAD - payload);
+            }
+          e->dq_head = (uint8_t)((e->dq_head + 1) % LUMP_DATA_QUEUE);
+          e->dq_count++;
+          nxmutex_unlock(&e->dq_lock);
+
+          /* Fire `on_data` callback.  Snapshot the cb under tx_lock so
+           * we can safely call it after dropping the lock — `lump_attach`
+           * uses the same lock to install / clear callbacks.
+           */
+
+          nxmutex_lock(&e->cb_lock);
+          lump_on_data_t cb_local = e->cb_attached ? e->cb.on_data : NULL;
+          void          *priv     = e->cb_attached ? e->cb.priv    : NULL;
+          if (cb_local != NULL)
+            {
+              e->in_callback = true;
+            }
+          nxmutex_unlock(&e->cb_lock);
+
+          if (cb_local != NULL)
+            {
+              cb_local(e->port, data_mode, &e->rx_msg[1], payload, priv);
+              nxmutex_lock(&e->cb_lock);
+              e->in_callback = false;
+              nxmutex_unlock(&e->cb_lock);
+            }
+          break;
+        }
     }
 
   return OK;
@@ -1038,40 +1174,216 @@ static int lump_sync(struct lump_engine_s *e)
 }
 
 /****************************************************************************
- * Keepalive loop — Phase 2 minimal: SYS_NACK every 100 ms, discard RX
+ * DATA loop — Phase 3: receive DATA frames, send keepalive, drain TX queue
  ****************************************************************************/
 
-static int lump_keepalive_loop(struct lump_engine_s *e)
+/* Send `CMD EXT_MODE` to multiplex mode-byte values past 7.  Required
+ * before each `CMD SELECT` / DATA TX on Powered Up devices, even when
+ * the target mode is < 8.
+ */
+
+static int lump_send_ext_mode(struct lump_engine_s *e, uint8_t mode)
 {
-  /* Drain the ring buffer to clear any stale bytes from sync. */
+  uint8_t adder = (mode > 7) ? 8 : 0;
+  uint8_t hdr   = (uint8_t)(LUMP_MSG_TYPE_CMD | LUMP_CMD_EXT_MODE);
+  /* size_code 0 → 1-byte payload */
+  return lump_send_msg(e, hdr, &adder, 1, true);
+}
+
+/* Send `CMD SELECT <mode_lo>`.  Caller is responsible for first sending
+ * `CMD EXT_MODE` if the mode is >= 8.
+ */
+
+static int lump_send_select(struct lump_engine_s *e, uint8_t mode)
+{
+  uint8_t hdr     = (uint8_t)(LUMP_MSG_TYPE_CMD | LUMP_CMD_SELECT);
+  uint8_t mode_lo = (uint8_t)(mode & LUMP_MSG_CMD_MASK);
+  return lump_send_msg(e, hdr, &mode_lo, 1, true);
+}
+
+/* Send a DATA frame for a writable mode.  Pads payload to the smallest
+ * power-of-2 size that fits (1/2/4/8/16/32 bytes) and OR's the mode
+ * (mod 8) into the header CMD field.  Caller has already issued
+ * `CMD EXT_MODE` for `mode >= 8`.
+ */
+
+static int lump_send_data_frame(struct lump_engine_s *e, uint8_t mode,
+                                const uint8_t *buf, size_t len)
+{
+  size_t  padded;
+  uint8_t hdr_cmd_byte = (uint8_t)(mode & LUMP_MSG_CMD_MASK);
+  uint8_t header;
+  uint8_t size_code;
+
+  if (len == 0 || len > LUMP_MAX_PAYLOAD)
+    {
+      return -EINVAL;
+    }
+
+  if (len <= 1)        { size_code = 0u; padded = 1; }
+  else if (len <= 2)   { size_code = 1u; padded = 2; }
+  else if (len <= 4)   { size_code = 2u; padded = 4; }
+  else if (len <= 8)   { size_code = 3u; padded = 8; }
+  else if (len <= 16)  { size_code = 4u; padded = 16; }
+  else                 { size_code = 5u; padded = 32; }
+
+  header = (uint8_t)(LUMP_MSG_TYPE_DATA |
+                     ((size_code << LUMP_MSG_SIZE_SHIFT) &
+                      LUMP_MSG_SIZE_MASK) |
+                     hdr_cmd_byte);
+
+  /* Build padded payload (zero-fill the tail). */
+
+  uint8_t pad[LUMP_MAX_PAYLOAD];
+  memcpy(pad, buf, len);
+  if (padded > len)
+    {
+      memset(pad + len, 0, padded - len);
+    }
+
+  return lump_send_msg(e, header, pad, padded, true);
+}
+
+/* Drain pending TX requests posted by `lump_select_mode` / `lump_send_data`.
+ * Called from the kthread context only, so we can take `tx_lock`, copy
+ * the request, drop the lock, then issue the TX without blocking the
+ * user-side ioctl.
+ */
+
+static int lump_drain_tx_requests(struct lump_engine_s *e)
+{
+  bool    do_select = false;
+  bool    do_send   = false;
+  uint8_t sel_mode  = 0;
+  uint8_t send_mode = 0;
+  uint8_t send_buf[LUMP_MAX_PAYLOAD];
+  uint8_t send_len  = 0;
+
+  nxmutex_lock(&e->tx_lock);
+  if (e->pending_select)
+    {
+      do_select          = true;
+      sel_mode           = e->pending_select_mode;
+      e->pending_select  = false;
+    }
+  if (e->pending_send)
+    {
+      do_send            = true;
+      send_mode          = e->pending_send_mode;
+      send_len           = e->pending_send_len;
+      memcpy(send_buf, e->pending_send_buf, send_len);
+      e->pending_send    = false;
+    }
+  nxmutex_unlock(&e->tx_lock);
+
+  if (do_select)
+    {
+      int ret = lump_send_ext_mode(e, sel_mode);
+      if (ret < 0)
+        {
+          return ret;
+        }
+      ret = lump_send_select(e, sel_mode);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
+  if (do_send)
+    {
+      int ret = lump_send_ext_mode(e, send_mode);
+      if (ret < 0)
+        {
+          return ret;
+        }
+      ret = lump_send_data_frame(e, send_mode, send_buf, send_len);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
+  return OK;
+}
+
+#define LUMP_DATA_RECV_SLICE_MS  20u
+#define LUMP_DATA_MISS_LIMIT     6u    /* 6 missed keepalives = ~600 ms */
+
+static int lump_data_loop(struct lump_engine_s *e)
+{
+  /* Drain any tail bytes from sync (SYS_ACK we sent might trigger a
+   * brief device echo / pause) before the steady-state loop.
+   */
 
   lump_uart_flush_rx(e->port);
 
+  clock_t  last_keepalive = clock_systime_ticks();
+  uint8_t  miss_count     = 0;
+  bool     data_rec       = false;
+
   for (;;)
     {
-      int ret = lump_send_sys(e, LUMP_SYS_NACK);
+      /* Try to read one frame within a short slice — we want the loop
+       * to come around to the keepalive / TX-drain checks at least
+       * every ~20 ms even if no DATA frames are arriving.
+       */
+
+      int ret = lump_recv_msg(e, LUMP_DATA_RECV_SLICE_MS);
+      if (ret == OK)
+        {
+          if ((e->rx_msg[0] & LUMP_MSG_TYPE_MASK) == LUMP_MSG_TYPE_DATA)
+            {
+              data_rec = true;
+            }
+          (void)lump_parse_msg(e);
+        }
+      /* -EBADMSG / -EILSEQ / -ETIMEDOUT all fall through to keepalive. */
+
+      /* Keepalive cadence. */
+
+      clock_t now = clock_systime_ticks();
+      if ((sclock_t)(now - last_keepalive) >=
+          (sclock_t)MSEC2TICK(LUMP_KEEPALIVE_MS))
+        {
+          if (data_rec)
+            {
+              miss_count = 0;
+            }
+          else if (++miss_count > LUMP_DATA_MISS_LIMIT)
+            {
+              syslog(LOG_INFO,
+                     "lump: port %c: no DATA for %lu ms, disconnecting\n",
+                     'A' + e->port,
+                     (unsigned long)(LUMP_DATA_MISS_LIMIT *
+                                     LUMP_KEEPALIVE_MS));
+              nxmutex_lock(&e->info_lock);
+              e->info.flags &= (uint8_t)~LUMP_FLAG_DATA_OK;
+              nxmutex_unlock(&e->info_lock);
+              return -ETIMEDOUT;
+            }
+
+          int wret = lump_send_sys(e, LUMP_SYS_NACK);
+          if (wret < 0)
+            {
+              return wret;
+            }
+          last_keepalive = now;
+          data_rec       = false;
+        }
+
+      /* Drain user-posted TX requests. */
+
+      ret = lump_drain_tx_requests(e);
       if (ret < 0)
         {
           return ret;
         }
 
-      nxsig_usleep(LUMP_KEEPALIVE_MS * 1000);
-
-      /* Discard accumulated RX bytes so the ring doesn't permanently
-       * fill (Phase 3 will parse them properly).
-       */
-
-      lump_uart_flush_rx(e->port);
-
-      /* Check for an external "stop" event — currently the only way
-       * out is `nxsem_trywait()` against the wakeup sem.  Phase 3 will
-       * branch on EVT_STALL / EVT_FAULT_RECOVER bitmap entries.
-       */
+      /* External shutdown signal? */
 
       if (nxsem_trywait(&e->wakeup) == OK)
         {
-          /* External wake — exit keepalive and let session restart. */
-
           return -EINTR;
         }
     }
@@ -1108,12 +1420,11 @@ static int lump_run_session(struct lump_engine_s *e)
       return ret;
     }
 
-  /* Phase 2: just keep the device alive long enough for `lump info N`
-   * to show the populated info struct.  Phase 3 replaces this with a
-   * full DATA state machine.
+  /* Phase 3: full DATA state machine — receive DATA frames, send
+   * 100 ms `SYS_NACK` keepalive, drain pending TX from user-space.
    */
 
-  return lump_keepalive_loop(e);
+  return lump_data_loop(e);
 }
 
 /****************************************************************************
@@ -1254,37 +1565,182 @@ int lump_get_status(int port, uint8_t *flags_out,
   return OK;
 }
 
-/* Phase 2: lump_attach/detach/select_mode/send_data still stubbed.
- * Phase 3 will replace these with real implementations.
- */
-
 int lump_attach(int port, const struct lump_callbacks_s *cb)
 {
-  UNUSED(port);
-  UNUSED(cb);
-  return -ENOSYS;
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT || cb == NULL)
+    {
+      return -EINVAL;
+    }
+
+  struct lump_engine_s *e = &g_lump[port];
+
+  /* Reject same-port re-entry from inside an existing callback —
+   * keeps the on_data dispatch path single-threaded.
+   */
+
+  nxmutex_lock(&e->cb_lock);
+  if (e->in_callback)
+    {
+      nxmutex_unlock(&e->cb_lock);
+      return -EDEADLK;
+    }
+  if (e->cb_attached)
+    {
+      nxmutex_unlock(&e->cb_lock);
+      return -EBUSY;
+    }
+  e->cb           = *cb;
+  e->cb_attached  = true;
+  nxmutex_unlock(&e->cb_lock);
+
+  /* If the engine is already SYNCED, fire `on_sync` synchronously after
+   * dropping the cb_lock — same-port API re-entry is forbidden but
+   * cross-port and `lump_get_*` are fine.
+   */
+
+  if (cb->on_sync != NULL)
+    {
+      struct lump_device_info_s snap;
+      nxmutex_lock(&e->info_lock);
+      bool synced = (e->info.flags & LUMP_FLAG_SYNCED) != 0;
+      if (synced)
+        {
+          memcpy(&snap, &e->info, sizeof(snap));
+        }
+      nxmutex_unlock(&e->info_lock);
+
+      if (synced)
+        {
+          nxmutex_lock(&e->cb_lock);
+          e->in_callback = true;
+          nxmutex_unlock(&e->cb_lock);
+
+          cb->on_sync(port, &snap, cb->priv);
+
+          nxmutex_lock(&e->cb_lock);
+          e->in_callback = false;
+          nxmutex_unlock(&e->cb_lock);
+        }
+    }
+
+  return OK;
 }
 
 int lump_detach(int port)
 {
-  UNUSED(port);
-  return -ENOSYS;
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
+    {
+      return -EINVAL;
+    }
+
+  struct lump_engine_s *e = &g_lump[port];
+
+  nxmutex_lock(&e->cb_lock);
+  if (e->in_callback)
+    {
+      nxmutex_unlock(&e->cb_lock);
+      return -EDEADLK;
+    }
+  e->cb_attached  = false;
+  memset(&e->cb, 0, sizeof(e->cb));
+  nxmutex_unlock(&e->cb_lock);
+
+  return OK;
 }
 
 int lump_select_mode(int port, uint8_t mode)
 {
-  UNUSED(port);
-  UNUSED(mode);
-  return -ENOSYS;
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
+    {
+      return -EINVAL;
+    }
+
+  struct lump_engine_s *e = &g_lump[port];
+
+  nxmutex_lock(&e->info_lock);
+  if ((e->info.flags & LUMP_FLAG_SYNCED) == 0)
+    {
+      nxmutex_unlock(&e->info_lock);
+      return -EAGAIN;
+    }
+  if (mode >= e->info.num_modes)
+    {
+      nxmutex_unlock(&e->info_lock);
+      return -EINVAL;
+    }
+  nxmutex_unlock(&e->info_lock);
+
+  nxmutex_lock(&e->tx_lock);
+  e->pending_select       = true;
+  e->pending_select_mode  = mode;
+  nxmutex_unlock(&e->tx_lock);
+
+  return OK;
 }
 
 int lump_send_data(int port, uint8_t mode, const uint8_t *buf, size_t len)
 {
-  UNUSED(port);
-  UNUSED(mode);
-  UNUSED(buf);
-  UNUSED(len);
-  return -ENOSYS;
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT ||
+      buf == NULL || len == 0 || len > LUMP_MAX_PAYLOAD)
+    {
+      return -EINVAL;
+    }
+
+  struct lump_engine_s *e = &g_lump[port];
+
+  nxmutex_lock(&e->info_lock);
+  if ((e->info.flags & LUMP_FLAG_SYNCED) == 0)
+    {
+      nxmutex_unlock(&e->info_lock);
+      return -EAGAIN;
+    }
+  if (mode >= e->info.num_modes)
+    {
+      nxmutex_unlock(&e->info_lock);
+      return -EINVAL;
+    }
+  if (!e->info.modes[mode].writable)
+    {
+      nxmutex_unlock(&e->info_lock);
+      return -ENOTSUP;
+    }
+  nxmutex_unlock(&e->info_lock);
+
+  nxmutex_lock(&e->tx_lock);
+  e->pending_send       = true;
+  e->pending_send_mode  = mode;
+  e->pending_send_len   = (uint8_t)len;
+  memcpy(e->pending_send_buf, buf, len);
+  nxmutex_unlock(&e->tx_lock);
+
+  return OK;
+}
+
+/* Pop one DATA frame from the per-port ring, used by the
+ * `LEGOPORT_LUMP_POLL_DATA` ioctl.  Returns -EAGAIN if empty.
+ */
+
+int lump_pop_data_frame(int port, struct lump_data_frame_s *out)
+{
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT || out == NULL)
+    {
+      return -EINVAL;
+    }
+
+  struct lump_engine_s *e = &g_lump[port];
+
+  nxmutex_lock(&e->dq_lock);
+  if (e->dq_count == 0)
+    {
+      nxmutex_unlock(&e->dq_lock);
+      return -EAGAIN;
+    }
+  *out       = e->dq[e->dq_tail];
+  e->dq_tail = (uint8_t)((e->dq_tail + 1) % LUMP_DATA_QUEUE);
+  e->dq_count--;
+  nxmutex_unlock(&e->dq_lock);
+
+  return OK;
 }
 
 /****************************************************************************
@@ -1306,6 +1762,9 @@ int stm32_legoport_lump_register(void)
       e->port = (uint8_t)p;
       nxsem_init(&e->wakeup, 0, 0);
       nxmutex_init(&e->info_lock);
+      nxmutex_init(&e->tx_lock);
+      nxmutex_init(&e->dq_lock);
+      nxmutex_init(&e->cb_lock);
 
       /* Pre-create the per-port kthread.  It blocks immediately on
        * `wakeup`; the DCM CB is what unblocks it (or `lump reset`
