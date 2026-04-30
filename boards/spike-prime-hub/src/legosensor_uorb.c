@@ -222,10 +222,64 @@ static void legosensor_on_data(int port, uint8_t mode,
   FAR struct legosensor_dev_s *dev = (FAR struct legosensor_dev_s *)priv;
   struct lump_sample_s sample;
   clock_t now;
+  bool need_hydrate;
 
   if (dev == NULL)
     {
       return;
+    }
+
+  /* Lazy info_cache hydration.  `lump_attach()` only fires `on_sync`
+   * synchronously when the engine is *already* SYNCED at attach time;
+   * for the common boot path (attach before any device is plugged in)
+   * `on_sync` never fires, leaving num_values / data_type at 0.
+   *
+   * Refresh from the engine once when the cache looks empty, and
+   * re-refresh whenever the engine's reported `type_id` changes
+   * (covers hot-unplug + reconnect-with-different-device because
+   * on_error is currently a no-op in the LUMP engine).
+   */
+
+  nxmutex_lock(&dev->lock);
+  need_hydrate = !dev->synced || dev->info_cache.num_modes == 0;
+  nxmutex_unlock(&dev->lock);
+
+  if (need_hydrate)
+    {
+      struct lump_device_info_s info;
+
+      if (lump_get_info(port, &info) == OK)
+        {
+          struct lump_sample_s sentinel;
+          bool fire_sync_sentinel = false;
+
+          nxmutex_lock(&dev->lock);
+          if (info.type_id != dev->info_cache.type_id ||
+              info.num_modes != dev->info_cache.num_modes)
+            {
+              memcpy(&dev->info_cache, &info, sizeof(dev->info_cache));
+              dev->type_id = info.type_id;
+              dev->mode_id = info.current_mode;
+              dev->generation++;
+              dev->seq++;
+              dev->synced = true;
+              fire_sync_sentinel = true;
+
+              legosensor_build_envelope(dev, dev->mode_id, NULL, 0,
+                                        &sentinel);
+            }
+          else if (!dev->synced)
+            {
+              dev->synced = true;
+            }
+          nxmutex_unlock(&dev->lock);
+
+          if (fire_sync_sentinel)
+            {
+              dev->lower.push_event(dev->lower.priv, &sentinel,
+                                    sizeof(sentinel));
+            }
+        }
     }
 
   nxmutex_lock(&dev->lock);
@@ -325,12 +379,21 @@ static int legosensor_open(FAR struct sensor_lowerhalf_s *lower,
 static int legosensor_close(FAR struct sensor_lowerhalf_s *lower,
                             FAR struct file *filep)
 {
-  /* Phase 1: nothing to do.  Phase 2 will release the per-port CLAIM
-   * here when `claim_owner == filep`.
+  FAR struct legosensor_dev_s *dev =
+      container_of(lower, struct legosensor_dev_s, lower);
+
+  /* Auto-release the CLAIM if the closing fd held it.  NuttX 12.13.0
+   * sensor_close() invokes ops->close() per-fd, so this fires before
+   * the filep pointer is reused for a new open.
    */
 
-  UNUSED(lower);
-  UNUSED(filep);
+  nxmutex_lock(&dev->lock);
+  if (dev->claim_owner == filep)
+    {
+      dev->claim_owner = NULL;
+    }
+  nxmutex_unlock(&dev->lock);
+
   return OK;
 }
 
@@ -370,8 +433,6 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
       container_of(lower, struct legosensor_dev_s, lower);
   int ret;
 
-  UNUSED(filep);
-
   switch (cmd)
     {
       case LEGOSENSOR_GET_INFO:
@@ -383,12 +444,9 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
               return -EINVAL;
             }
 
-          /* Defer to the LUMP engine for the authoritative snapshot;
-           * `info_cache` would also work but stays consistent.
-           */
+          /* Defer to the LUMP engine for the authoritative snapshot. */
 
-          ret = lump_get_info(dev->port, out);
-          return ret;
+          return lump_get_info(dev->port, out);
         }
 
       case LEGOSENSOR_GET_STATUS:
@@ -403,13 +461,108 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
           return lump_get_status_full(dev->port, out);
         }
 
-      /* Phase 2 will add CLAIM/RELEASE/SELECT/SEND. */
-
       case LEGOSENSOR_CLAIM:
+        {
+          nxmutex_lock(&dev->lock);
+          if (dev->claim_owner != NULL && dev->claim_owner != filep)
+            {
+              ret = -EBUSY;
+            }
+          else
+            {
+              dev->claim_owner = filep;        /* idempotent for owner */
+              ret = OK;
+            }
+          nxmutex_unlock(&dev->lock);
+          return ret;
+        }
+
       case LEGOSENSOR_RELEASE:
+        {
+          nxmutex_lock(&dev->lock);
+          if (dev->claim_owner != filep)
+            {
+              ret = -EACCES;
+            }
+          else
+            {
+              dev->claim_owner = NULL;
+              ret = OK;
+            }
+          nxmutex_unlock(&dev->lock);
+          return ret;
+        }
+
       case LEGOSENSOR_SELECT:
+        {
+          uint8_t mode = (uint8_t)arg;
+
+          nxmutex_lock(&dev->lock);
+          if (dev->claim_owner != filep)
+            {
+              nxmutex_unlock(&dev->lock);
+              return -EACCES;
+            }
+
+          /* Arm the pending-SELECT tracker.  generation is bumped by
+           * on_data() once the device starts reporting `mode`, or the
+           * tracker is cleared if the deadline lapses first.
+           */
+
+          dev->pending_select_mode = mode;
+          dev->pending_select_deadline = clock_systime_ticks() +
+              MSEC2TICK(LEGOSENSOR_PENDING_TIMEOUT_MS);
+          nxmutex_unlock(&dev->lock);
+
+          ret = lump_select_mode(dev->port, mode);
+          if (ret < 0)
+            {
+              /* LUMP rejected the request — clear the pending state so
+               * a future SELECT does not race with stale data.
+               */
+
+              nxmutex_lock(&dev->lock);
+              dev->pending_select_mode = LEGOSENSOR_NO_PENDING;
+              nxmutex_unlock(&dev->lock);
+            }
+
+          return ret;
+        }
+
       case LEGOSENSOR_SEND:
-        return -ENOSYS;
+        {
+          FAR const struct legosensor_send_arg_s *snd =
+              (FAR const struct legosensor_send_arg_s *)(uintptr_t)arg;
+          uint8_t  mode;
+          uint8_t  len;
+
+          if (snd == NULL)
+            {
+              return -EINVAL;
+            }
+
+          if (snd->len == 0 || snd->len > LUMP_MAX_PAYLOAD)
+            {
+              return -EINVAL;
+            }
+
+          mode = snd->mode;
+          len  = snd->len;
+
+          nxmutex_lock(&dev->lock);
+          if (dev->claim_owner != filep)
+            {
+              nxmutex_unlock(&dev->lock);
+              return -EACCES;
+            }
+          nxmutex_unlock(&dev->lock);
+
+          /* Snapshot the payload onto the kthread's stack via lump_send_data
+           * so the LUMP engine can hold its own copy.
+           */
+
+          return lump_send_data(dev->port, mode, snd->data, len);
+        }
 
       default:
         return -ENOTTY;
