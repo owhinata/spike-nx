@@ -344,36 +344,6 @@ similar) are dropped by the classifier.  They remain accessible
 through the LUMP-direct `/dev/legoport[N]` chardev with port-scoped
 `LEGOPORT_LUMP_*` ioctls.
 
-### 6.3 Force / Motor devices: SELECT-after-SYNC limitation (LUMP engine, separate follow-up)
-
-The Force Sensor (type 63) and the SPIKE Medium / Large Motors
-(types 48 / 49) **stop emitting DATA frames after SYNC unless the
-host issues a SELECT command**.  The current LUMP engine
-(`stm32_legoport_lump.c`) does not auto-issue a SELECT on SYNC
-completion, so plugging one of these devices yields a 600 ms
-no-DATA timeout, the session is torn down, and `legosensor <class> info`
-returns `-ENODEV`.
-
-dmesg pattern when this happens:
-
-```
-lump: port A: type_id=63
-lump: port A: SYNCED type=63 modes=7 baud=115200
-lump: port A: no DATA for 600 ms, disconnecting
-lump: port A session ended ret=-110 step=N sleep=...ms
-```
-
-Color (type 61) and Ultrasonic (type 62) auto-stream in their
-default mode, so they work without an explicit SELECT.  The
-pybricks reference (`pbio/drv/legodev/legodev_pup_uart.c:903`)
-unconditionally issues `pbdrv_legodev_request_mode(default_mode)`
-after SYNC.
-
-**This release (#79)** documents the limitation and excludes
-Force / Motor from the on-hardware verification.  Adding the
-auto-SELECT after SYNC is **tracked as a follow-up Issue against
-the #43 LUMP engine**, outside the scope of this refactor.
-
 ## 7. Follow-up issues
 
 | Issue | Scope |

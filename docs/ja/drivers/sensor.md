@@ -263,23 +263,6 @@ legosensor motor_m pwm 0                 # -ENOTSUP (#80 で実装)
 
 38 / 46 / 47 / 65 / 75 / 76 等の Powered Up デバイスは本リリースの classifier では **frame drop**。class topic への push なし。LUMP 直通 (`/dev/legoport[N]` chardev) で port 単位の操作は可能。
 
-### 6.3 Force / Motor デバイスの DATA 開始制約 (LUMP engine 側、別 Issue 化予定)
-
-Force Sensor (type 63) と SPIKE Medium / Large Motor (type 48 / 49) は **LUMP SYNC 後にホスト側から SELECT を発行しないと DATA frame を吐かない**。本実装の LUMP engine (`stm32_legoport_lump.c`) は SYNC 完了直後の auto-SELECT を行わないため、これらのデバイスは挿しても 600 ms (no-DATA timeout) で session が切れ、`legosensor force info` 等は `-ENODEV` を返す。
-
-dmesg で観測される pattern:
-
-```
-lump: port A: type_id=63
-lump: port A: SYNCED type=63 modes=7 baud=115200
-lump: port A: no DATA for 600 ms, disconnecting
-lump: port A session ended ret=-110 step=N sleep=...ms
-```
-
-Color (type 61) / Ultrasonic (type 62) は default mode で auto-stream するため SELECT 不要。pybricks 参考実装 (`pbio/drv/legodev/legodev_pup_uart.c:903`) では SYNC 完了後に必ず `pbdrv_legodev_request_mode(default_mode)` を発行している。
-
-**本リリース (#79) の対処**: Force / Motor は実機検証から除外し、上記制約を明文化するに留める。auto-SELECT-after-SYNC の実装は **#43 LUMP engine への follow-up Issue として別途切り出す** (本 plan のスコープ外)。
-
 ## 7. 後続 Issue
 
 | Issue | 範囲 |

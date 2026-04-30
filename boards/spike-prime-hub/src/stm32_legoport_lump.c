@@ -1183,6 +1183,8 @@ static int lump_sync(struct lump_engine_s *e)
   nxmutex_lock(&e->info_lock);
   e->info.flags |= LUMP_FLAG_SYNCED;
   e->info.baud   = e->new_baud_rate;
+  uint8_t default_mode = e->info.current_mode;
+  uint8_t num_modes    = e->info.num_modes;
   nxmutex_unlock(&e->info_lock);
 
   e->state = LUMP_ST_DATA;
@@ -1192,6 +1194,24 @@ static int lump_sync(struct lump_engine_s *e)
          'A' + e->port, e->info.type_id,
          (unsigned)e->info.num_modes,
          (unsigned long)e->info.baud);
+
+  /* Issue #81: auto-enqueue a CMD SELECT for the device's default
+   * (current) mode after SYNC.  Mirrors the pybricks reference
+   * (`pbio/drv/legodev/legodev_pup_uart.c:903`); without this, any
+   * device whose default mode does not auto-emit DATA gets torn
+   * down by the 600 ms no-DATA watchdog before any consumer can
+   * issue a SELECT.  All SPIKE-family devices observed to date
+   * auto-stream, so this is defensive parity.  The data loop drains
+   * `pending_select` on the next TX window.
+   */
+
+  if (default_mode < num_modes)
+    {
+      nxmutex_lock(&e->tx_lock);
+      e->pending_select       = true;
+      e->pending_select_mode  = default_mode;
+      nxmutex_unlock(&e->tx_lock);
+    }
 
   /* Fire `on_sync` so an attached consumer (motor / sensor driver) can
    * hydrate its info cache and emit a connect sentinel on every fresh
@@ -1596,6 +1616,7 @@ static int lump_kthread_entry(int argc, FAR char *argv[])
       stm32_legoport_release_uart(e->port);
 
       nxmutex_lock(&e->info_lock);
+      bool was_synced = (e->info.flags & LUMP_FLAG_SYNCED) != 0;
       e->info.flags = 0;  /* clear SYNCED / DATA_OK */
       uint8_t err_mode = e->info.current_mode;
       nxmutex_unlock(&e->info_lock);
@@ -1634,9 +1655,18 @@ static int lump_kthread_entry(int argc, FAR char *argv[])
       /* 4. Backoff before accepting the next handoff (capped exp). */
 
       uint32_t sleep_ms = g_backoff_ms[e->backoff_step];
-      if (ret == OK || ret == -EINTR)
+      if (ret == OK || ret == -EINTR || was_synced)
         {
-          /* Clean exit (e.g., explicit reset).  Reset backoff. */
+          /* Either an explicit clean exit, or a session that reached
+           * SYNCED before being torn down (typically a physical
+           * disconnect during normal operation — `ret = -110` from the
+           * 600 ms no-DATA watchdog).  Neither is a SYNC-phase failure,
+           * so reset backoff to 0 (Issue #81).  Without this, every
+           * successful plug/unplug cycle would escalate the backoff
+           * and a handful of cycles would bury the engine in a 30 s
+           * sleep, masking subsequent device insertions.
+           */
+
           e->backoff_step = 0;
           sleep_ms        = g_backoff_ms[0];
         }
