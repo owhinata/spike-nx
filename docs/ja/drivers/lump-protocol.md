@@ -127,6 +127,19 @@ int lump_get_status_full(int port, struct lump_status_full_s *out);
 
 `lump_attach` 時に既に SYNCED なら `on_sync` を同期発火 (lock 解放後)。CB context からの同一ポート再入は `-EDEADLK`。
 
+### 5.1 コールバック発火タイミング (Issue #76)
+
+| コールバック | 発火元 | 発火タイミング |
+|---|---|---|
+| `on_sync` | per-port kthread | `SYNCING -> DATA` への遷移直後 (毎セッション、re-sync 後も) — `info` は SYNCED 状態の snapshot を渡す |
+| `on_sync` | 呼び出し元 thread | `lump_attach()` 時に engine が既に SYNCED なら同期発火 |
+| `on_data` | per-port kthread | DATA frame を受信し parse 成功するごと、`current_mode` 更新後 |
+| `on_error` | per-port kthread | DATA loop が抜けた直後 (sync 失敗 / keepalive miss / watchdog stall いずれも)、`release_uart` 後の clean state で `data == NULL && len == 0` を引数に発火。コンシューマは disconnect sentinel をここで publish できる |
+
+すべて per-port kthread / API context で `cb_lock` を一旦解放してから fire するので、CB から `lump_get_info` / `lump_get_status` 等は安全に呼べる。同一ポート CB 内からの `lump_attach` / `lump_detach` / 別 CB 経路への再入は `-EDEADLK` で拒否される (`in_callback` flag)。
+
+`on_error` は **接続中だけでなく sync 失敗時にも発火** する点に注意 — 一度も `on_sync` を受けていない状態でも disconnect 通知が届きうる。コンシューマ側は idempotent (同じ disconnect を二度受け取っても安全) に書く。
+
 ## 6. ioctl (`/dev/legoport[N]`)
 
 | ioctl | arg | 動作 |

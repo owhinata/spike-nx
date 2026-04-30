@@ -1193,6 +1193,38 @@ static int lump_sync(struct lump_engine_s *e)
          (unsigned)e->info.num_modes,
          (unsigned long)e->info.baud);
 
+  /* Fire `on_sync` so an attached consumer (motor / sensor driver) can
+   * hydrate its info cache and emit a connect sentinel on every fresh
+   * SYNCING -> DATA transition (boot, re-sync after backoff, etc.).
+   * Lock-released-then-fire pattern matches `on_data` / `on_error` so
+   * same-port API re-entry from inside the callback is rejected via
+   * `in_callback`.
+   */
+  {
+    nxmutex_lock(&e->cb_lock);
+    lump_on_sync_t sync_cb   = e->cb_attached ? e->cb.on_sync : NULL;
+    void          *sync_priv = e->cb_attached ? e->cb.priv    : NULL;
+    if (sync_cb != NULL)
+      {
+        e->in_callback = true;
+      }
+    nxmutex_unlock(&e->cb_lock);
+
+    if (sync_cb != NULL)
+      {
+        struct lump_device_info_s snap;
+        nxmutex_lock(&e->info_lock);
+        memcpy(&snap, &e->info, sizeof(snap));
+        nxmutex_unlock(&e->info_lock);
+
+        sync_cb(e->port, &snap, sync_priv);
+
+        nxmutex_lock(&e->cb_lock);
+        e->in_callback = false;
+        nxmutex_unlock(&e->cb_lock);
+      }
+  }
+
   return OK;
 }
 
@@ -1565,7 +1597,36 @@ static int lump_kthread_entry(int argc, FAR char *argv[])
 
       nxmutex_lock(&e->info_lock);
       e->info.flags = 0;  /* clear SYNCED / DATA_OK */
+      uint8_t err_mode = e->info.current_mode;
       nxmutex_unlock(&e->info_lock);
+
+      /* Fire `on_error` so an attached consumer (motor / sensor driver)
+       * can flush its state and publish a disconnect sentinel.  Fires on
+       * every session-ending transition into ERR — sync failure, missed
+       * keepalives, watchdog stall — `data == NULL && len == 0` is the
+       * agreed disconnect convention.  Lock-released-then-fire matches
+       * `on_data` / `on_sync`; same-port API re-entry is gated by
+       * `in_callback`.
+       */
+      {
+        nxmutex_lock(&e->cb_lock);
+        lump_on_data_t err_cb   = e->cb_attached ? e->cb.on_error : NULL;
+        void          *err_priv = e->cb_attached ? e->cb.priv     : NULL;
+        if (err_cb != NULL)
+          {
+            e->in_callback = true;
+          }
+        nxmutex_unlock(&e->cb_lock);
+
+        if (err_cb != NULL)
+          {
+            err_cb(e->port, err_mode, NULL, 0, err_priv);
+
+            nxmutex_lock(&e->cb_lock);
+            e->in_callback = false;
+            nxmutex_unlock(&e->cb_lock);
+          }
+      }
 
       stm32_legoport_register_uart_handoff(e->port, lump_handoff_cb, e);
       e->dcm_cb_registered = true;

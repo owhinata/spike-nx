@@ -131,6 +131,19 @@ int lump_get_status_full(int port, struct lump_status_full_s *out);
 
 `lump_attach` fires `on_sync` synchronously if the engine is already SYNCED (lock released first).  Same-port re-entry from inside a callback returns `-EDEADLK`.
 
+### 5.1 Callback fire timing (Issue #76)
+
+| Callback | Source | When |
+|---|---|---|
+| `on_sync` | per-port kthread | Right after each `SYNCING -> DATA` transition (every session, including re-sync after backoff).  `info` is a snapshot of the engine state at that point. |
+| `on_sync` | calling thread | Synchronously inside `lump_attach()` if the engine is already SYNCED at attach time. |
+| `on_data` | per-port kthread | Once per successfully parsed DATA frame, after `current_mode` is updated. |
+| `on_error` | per-port kthread | Once when the DATA loop unwinds (sync failure / missed keepalives / watchdog stall, all unified) after `release_uart` has run.  Fires with `data == NULL && len == 0` so consumers can publish a disconnect sentinel. |
+
+In all cases the engine drops `cb_lock` before invoking the callback, so it is safe to call back into `lump_get_info` / `lump_get_status` from inside.  Same-port re-entry into `lump_attach` / `lump_detach` (or a second callback path) is rejected with `-EDEADLK` via the `in_callback` flag.
+
+Note that `on_error` fires on **every session-ending transition**, including pure sync failures where `on_sync` never ran — consumers should be idempotent (receiving "disconnect" twice in a row must be a no-op).
+
 ## 6. ioctl on `/dev/legoport[N]`
 
 | ioctl | arg | Behaviour |

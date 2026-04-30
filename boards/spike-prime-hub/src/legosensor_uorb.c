@@ -229,15 +229,13 @@ static void legosensor_on_data(int port, uint8_t mode,
       return;
     }
 
-  /* Lazy info_cache hydration.  `lump_attach()` only fires `on_sync`
-   * synchronously when the engine is *already* SYNCED at attach time;
-   * for the common boot path (attach before any device is plugged in)
-   * `on_sync` never fires, leaving num_values / data_type at 0.
-   *
-   * Refresh from the engine once when the cache looks empty, and
-   * re-refresh whenever the engine's reported `type_id` changes
-   * (covers hot-unplug + reconnect-with-different-device because
-   * on_error is currently a no-op in the LUMP engine).
+  /* Defensive lazy info_cache hydration.  Issue #76 made the LUMP engine
+   * fire `on_sync` on every SYNCING -> DATA edge (and `on_error` on every
+   * session-ending disconnect), so the cache is normally populated by
+   * the callback before the first DATA frame arrives.  Keep this path
+   * as a backstop in case `on_sync` was lost (e.g., dropped during a
+   * tight reconnect race) — it is a no-op when the cache already
+   * matches the engine's reported `type_id` / `num_modes`.
    */
 
   nxmutex_lock(&dev->lock);
