@@ -6,7 +6,7 @@
                     User Space
   +---------------------------------------------+
   |  /dev/legoport[0-5]         (DCM)            |
-  |  /dev/uorb/sensor_lego[N]   (uORB Sensor)    |
+  |  /dev/uorb/sensor_<class>   (uORB Sensor)    |
   |  /dev/legomotor[N]          (Motor Control)  |
   +--------------+---------------+---------------+
                  |               |
@@ -41,11 +41,23 @@
 
 ### LUMP Sensor uORB Topics (Registered at Boot)
 
-| Device | Path | Purpose |
-|---|---|---|
-| LUMP Sensor | `/dev/uorb/sensor_lego0` through `5` | Publishes a 56 byte `struct lump_sample_s` envelope for **every** LUMP-capable device (sensor + motor encoder telemetry).  Issue #45 |
+| Device | Path | LPF2 type_id | Purpose |
+|---|---|---|---|
+| Colour sensor | `/dev/uorb/sensor_color` | 61 | LPF2 colour telemetry as 56-byte `struct lump_sample_s` envelopes.  Issue #79 |
+| Ultrasonic sensor | `/dev/uorb/sensor_ultrasonic` | 62 | LPF2 ultrasonic telemetry |
+| Force sensor | `/dev/uorb/sensor_force` | 63 | LPF2 force telemetry |
+| Arm / manipulator motor | `/dev/uorb/sensor_motor_m` | 49 | SPIKE Large Motor (high torque) encoder + status |
+| Right-wheel motor | `/dev/uorb/sensor_motor_r` | 48 (port A/C/E) | SPIKE Medium Motor (driving wheel, split by port parity) |
+| Left-wheel motor | `/dev/uorb/sensor_motor_l` | 48 (port B/D/F) | as above |
 
-Topics stay registered even when the port is empty; disconnect is signalled with a `type_id=0,len=0` sentinel sample so subscriber fds remain stable.
+Each class topic is bound to **at most one port at any instant** (the
+1-topic = 1-port rule).  When two ports classify the same way, the
+lower-numbered port wins; the loser's frames are dropped.  See
+[sensor.md](sensor.md) §2.2 for the binding rules.
+
+Unbound classes remain registered.  The driver emits a
+`type_id=0, len=0` sentinel sample on disconnect or takeover so
+subscriber fds maintain consistent state.
 
 ### Dynamic Devices (Future)
 

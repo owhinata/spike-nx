@@ -3,10 +3,12 @@ config APP_LEGOSENSOR
 	default n
 	depends on LEGO_SENSOR
 	---help---
-		CLI for inspecting and controlling /dev/uorb/sensor_lego[0..5]
-		(Issue #45).  Subcommands: list, info, mode, send, watch,
-		claim, release.
+		CLI for inspecting and controlling the per-class LEGO sensor
+		uORB topics under /dev/uorb/sensor_{color,ultrasonic,force,
+		motor_m,motor_r,motor_l} (Issue #79).  Subcommands per class:
+		info, status, watch, select, send, pwm.
 
-		`legosensor watch <N>` is the canonical end-to-end verification
-		tool — `dd` and the standard `sensortest` are not compatible
-		with the SENSOR_TYPE_CUSTOM uORB topic naming used here.
+		`legosensor <class> watch` is the canonical end-to-end
+		verification tool — `dd` and the standard `sensortest` are
+		not compatible with the SENSOR_TYPE_CUSTOM uORB topic naming
+		used here.

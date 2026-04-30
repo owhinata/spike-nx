@@ -2,14 +2,27 @@
 
 ## 1. Overview
 
-A NuttX uORB sensor driver (Issue #45) layered on top of the LUMP UART
-protocol engine (Issue #43).  Six topics — `/dev/uorb/sensor_lego[0..5]`
-— are statically registered at boot and publish telemetry from any
-LUMP-capable Powered Up device (LPF2 sensors and motor encoder
-telemetry) as a fixed 56 byte `struct lump_sample_s` envelope.
+A NuttX uORB sensor driver (Issue #79) layered on top of the LUMP UART
+protocol engine (Issue #43).  Topics are organised **by device class**,
+so opening `/dev/uorb/sensor_color` always gives a colour sensor stream
+and `/dev/uorb/sensor_motor_r` always gives the right-wheel motor.
 
-Mode switching and writable-mode TX (e.g. Color sensor RGB LED control)
-go through custom ioctls on the same fd via `sensor_lowerhalf_s::ops->control()`.
+| Topic | LPF2 type_id | Port restriction |
+|---|---|---|
+| `/dev/uorb/sensor_color` | 61 | any port |
+| `/dev/uorb/sensor_ultrasonic` | 62 | any port |
+| `/dev/uorb/sensor_force` | 63 | any port |
+| `/dev/uorb/sensor_motor_m` | 49 (SPIKE Large Motor) | any port |
+| `/dev/uorb/sensor_motor_r` | 48 (SPIKE Medium Motor) | port 0 / 2 / 4 (A / C / E) |
+| `/dev/uorb/sensor_motor_l` | 48 (SPIKE Medium Motor) | port 1 / 3 / 5 (B / D / F) |
+
+Suffixes: `_m` is the high-torque arm / manipulator motor (type 49 =
+Large); `_r` / `_l` are right / left driving wheels (type 48 = Medium,
+split by port parity).  Unmapped type IDs (38 / 46 / 47 / 65 / 75 /
+76, …) are dropped.
+
+Mode switching, writable-mode TX, and LED / PWM control go through the
+custom ioctls below via `sensor_lowerhalf_s::ops->control()`.
 Multi-subscriber + single-control-owner arbitration is handled by the
 `LEGOSENSOR_CLAIM` / `LEGOSENSOR_RELEASE` pair.
 
@@ -17,16 +30,17 @@ Multi-subscriber + single-control-owner arbitration is handled by the
 
 ```
 [user]   apps/legosensor/legosensor_main.c (CLI)
-         apps/system/sensortest, user apps
-   |  open(/dev/uorb/sensor_legoN) + read() + ioctl()
+   |  open(/dev/uorb/sensor_<class>) + read() + ioctl()
    |
 [kernel uORB upper-half]  nuttx/drivers/sensors/sensor.c
    |  push_event() -> ring buffer (nbuffer=16) -> poll() wake
    |
 [kernel lower-half]  boards/spike-prime-hub/src/legosensor_uorb.c
-   |    per-port struct legosensor_dev_s
-   |    - sensor_lowerhalf_s, mutex, claim_owner, generation, ...
-   |  ^ on_sync / on_data / on_error callbacks
+   |    6 class topics (static) -+-> classifier(type_id, port)
+   |    6 port bindings        --+      |
+   |                                    v
+   |                                 g_legosensor_class_state[class].bound_port
+   |  ^ on_sync / on_data / on_error per port (LUMP kthread context)
    |
 [kernel] LUMP engine (#43)  stm32_legoport_lump.c
    |
@@ -35,20 +49,59 @@ Multi-subscriber + single-control-owner arbitration is handled by the
 
 ### 2.1 Registration policy
 
-- **Static register at boot**: all six `/dev/uorb/sensor_legoN` are
-  registered by `sensor_custom_register()` in one bringup pass
+- **Static register at boot**: six class topics under `/dev/uorb/sensor_*`
+  are registered in one bringup pass before any `lump_attach`
 - Empty ports publish nothing — subscribers wait via `poll()`
-- `lump_attach` lifetime contract: physical disconnect does **not**
-  detach the publisher; the LUMP engine handles ERR / backoff / re-SYNC
-  internally and re-fires `on_sync` after the next handoff
+- Registration order is (1) all six class topics, (2) `lump_attach()`
+  per port.  `lump_attach()` may fire `on_sync` synchronously when the
+  port is already SYNCED, so the push_event targets must already exist
 
-### 2.2 Callback context
+### 2.2 1-topic = 1-port rule
+
+Each class topic is bound to **at most one port at any instant**.  When
+two ports classify the same way, the lower-numbered port wins; the
+loser's frames are dropped.
+
+- `on_sync(port, info)` runs `classify(type_id, port)` to obtain the
+  candidate class slot
+- Under the class-global `g_bind_lock`:
+  - slot empty → bind this port
+  - slot owned by a port with a higher number → **takeover** (this
+    port wins, the displaced port is demoted to frame-drop and the
+    class topic emits a disconnect sentinel)
+  - slot owned by a port with a lower number → this port loses,
+    frames are dropped
+- `on_data(port, mode, …)`: only the bound port pushes to the class
+  lower-half; unbound ports are dropped silently
+- `on_error(port)`: if bound, emits a disconnect sentinel and frees
+  the class slot
+
+> **No automatic rebind.** When a class is freed, the driver does
+> not silently rebind another connected port of the same type.  The
+> port has to disconnect/reconnect (re-firing `on_sync`) to take the
+> slot.  This keeps the routing predictable.
+
+### 2.3 Callback context · lock order
 
 - `on_sync` / `on_data` / `on_error` run in the LUMP per-port kthread
-  context **after** the LUMP-side per-port lock has been released
-- The driver protects state with a per-port `nxmutex_t`; the mutex is
-  always released before calling `push_event()` (lock-order discipline,
-  deadlock avoidance)
+  context after the LUMP-side per-port lock has been released
+- `g_bind_lock` (class-global) and per-port locks are **never held
+  together**.  Each lock is acquired, the relevant state read, the
+  lock dropped, and only then is the other lock taken
+- `push_event()` is always called outside both locks (avoids cycles
+  with the upper-half `nxrmutex_t`)
+
+### 2.4 Handling multiple sensors of the same class
+
+This driver intentionally does not aggregate multiple ports of the
+same class onto one topic.  When you need to handle two of the same
+sensor:
+
+- **LUMP direct**: use the `/dev/legoport[N]` chardev (Issue #43)
+  with the `LEGOPORT_LUMP_*` ioctls — port-scoped, no class layer
+- **Pair the class topics in userspace**: e.g. the drivebase
+  daemon (Issue #77) reads `sensor_motor_l` and `sensor_motor_r`
+  separately and pairs them logically
 
 ## 3. Sample envelope
 
@@ -57,9 +110,9 @@ struct lump_sample_s
 {
   uint64_t timestamp;       /* µs (sensor framework convention) */
   uint32_t seq;             /* per-port monotonic counter */
-  uint32_t generation;      /* +1 on attach / SELECT confirmation /
-                             * disconnect */
-  uint8_t  port;            /* 0..5 (A..F) */
+  uint32_t generation;      /* +1 on SYNC / SELECT confirmation /
+                             * disconnect / takeover */
+  uint8_t  port;            /* 0..5 — bound port at the time of emit */
   uint8_t  type_id;         /* LPF2 type (0 = disconnect sentinel) */
   uint8_t  mode_id;         /* mode reported in this DATA frame */
   uint8_t  data_type;       /* enum lump_data_type_e */
@@ -87,7 +140,7 @@ _Static_assert(offsetof(struct lump_sample_s, data) == 24, "ABI");
 | Sentinel | Condition | Meaning |
 |---|---|---|
 | sync sentinel | `type_id != 0 && len == 0` | SYNC complete; pre-warms the upper-half lazy circbuf |
-| disconnect sentinel | `type_id == 0 && len == 0` | DCM disconnect (`on_error`); no further samples until a new SYNC |
+| disconnect sentinel | `type_id == 0 && len == 0` | port disconnected (`on_error`) **or** port displaced by a takeover |
 
 ### 3.2 `generation` semantics
 
@@ -96,46 +149,66 @@ _Static_assert(offsetof(struct lump_sample_s, data) == 24, "ABI");
 | First SYNC complete | +1 (carried in the sync sentinel) |
 | `LEGOSENSOR_SELECT` confirmed | +1 (bumped in `on_data` once the device starts reporting the requested mode) |
 | SELECT timeout (500 ms) | unchanged (subscribers don't drop valid samples) |
-| Disconnect | +1 (carried in the disconnect sentinel) |
+| Disconnect / takeover | +1 (carried in the disconnect sentinel) |
 
 A subscriber that snapshots `generation` immediately before SELECT can
 identify the new-mode samples by the combination of `generation` jump
-and `mode_id` change.
+and `mode_id` change.  A change in `port` field flags a takeover.
 
 ## 4. Custom ioctls
 
 | Cmd | Arg | Purpose | Claim |
 |---|---|---|---|
-| `LEGOSENSOR_GET_INFO` | `lump_device_info_s *` | per-mode schema dump | -- |
+| `LEGOSENSOR_GET_INFO` | `legosensor_info_arg_s *` | bound port + per-mode schema | -- |
 | `LEGOSENSOR_GET_STATUS` | `lump_status_full_s *` | engine status (state/baud/RX/TX/...) | -- |
 | `LEGOSENSOR_CLAIM` | (none) | take control ownership (filep) | -- |
 | `LEGOSENSOR_RELEASE` | (none) | release control ownership | owner only |
-| `LEGOSENSOR_SELECT` | `uint8_t mode` | mode switch (`lump_select_mode`) | required |
+| `LEGOSENSOR_SELECT` | `legosensor_select_arg_s *` | mode switch (`lump_select_mode`) | required |
 | `LEGOSENSOR_SEND` | `legosensor_send_arg_s *` | writable-mode TX (`lump_send_data`) | required |
+| `LEGOSENSOR_SET_PWM` | `legosensor_pwm_arg_s *` | LED / motor PWM (class-aware routing) | required |
 
-### 4.1 Standard sensor ioctls
+Reserved class-specific ioctl ranges (currently `-ENOTTY`, allocated
+for future class-specific commands):
 
-- `SNIOC_SET_INTERVAL`: dispatched by the upper-half directly to
-  `lower->ops->set_interval()`; this driver no-ops it because the LUMP
-  cadence is dictated by the device firmware
-- `SNIOC_ACTIVATE` does **not** exist in NuttX 12.13.0's sensor ioctl
-  set.  Activation is driven through `nsubscribers` count crossings
-  invoking `lower->ops->activate()` (no-op here — the LUMP engine is
-  always running)
+| Class | Range |
+|---|---|
+| COLOR | `_SNIOC(0x0100..0x010f)` |
+| ULTRASONIC | `_SNIOC(0x0110..0x011f)` |
+| FORCE | `_SNIOC(0x0120..0x012f)` |
+| MOTOR_M | `_SNIOC(0x0130..0x013f)` |
+| MOTOR_R | `_SNIOC(0x0140..0x014f)` |
+| MOTOR_L | `_SNIOC(0x0150..0x015f)` |
+
+### 4.1 errno surface
+
+| ioctl | errno | When |
+|---|---|---|
+| CLAIM | `-ENODEV` | no port bound to this class |
+|  | `-EBUSY` | another fd holds CLAIM (re-CLAIM by the existing owner is idempotent) |
+| RELEASE | `-EACCES` | not the current owner / claim is stale |
+| SELECT / SEND | `-EACCES` | caller does not hold CLAIM |
+|  | `-ENODEV` | port disconnected or replaced since CLAIM (re-CLAIM required) |
+| SET_PWM | `-EACCES` | caller does not hold CLAIM |
+|  | `-ENODEV` | same as SELECT/SEND |
+|  | `-ENOTSUP` | force / motor_* (this release) / firmware lacks LIGHT mode of the expected shape (3×INT8 for color, 4×INT8 for ultrasonic) |
+|  | `-EINVAL` | `num_channels` mismatched, channel out of range (LED 0..10000, motor -10000..10000, negative LED is `-EINVAL`) |
+| GET_INFO / GET_STATUS | `-ENODEV` | no port bound |
 
 ### 4.2 CLAIM / RELEASE arbitration
 
-- Read (sample stream) and `GET_INFO` / `GET_STATUS` are unrestricted —
+- Reads (sample stream) and `GET_INFO` / `GET_STATUS` are unrestricted —
   multi-subscriber friendly
-- SELECT and SEND require the calling fd to hold the per-port CLAIM
+- SELECT / SEND / SET_PWM require the calling fd to hold the CLAIM
 - A second CLAIM by another fd returns `-EBUSY`
 - A re-CLAIM by the current owner is idempotent (no-op, OK)
-- SELECT/SEND from a non-owner fd returns `-EACCES`
-- **Auto-release**: per-fd `close()` triggers `sensor_ops_s::close(lower, filep)`
-  in NuttX 12.13.0 (sensor.c:788, 814).  The driver clears
-  `claim_owner` when it matches the closing `filep`, so a forgotten
-  `LEGOSENSOR_RELEASE` is harmless
-- DCM disconnect (`on_error`) also clears `claim_owner` immediately
+- Write ioctls from a non-owner fd return `-EACCES`
+- **Stale claim**: when a port is taken over or disconnected after a
+  CLAIM, the driver bumps an internal `bind_generation`.  The owner
+  fd's next write ioctl returns `-ENODEV`, indicating the subscriber
+  must re-CLAIM
+- **Auto-release**: per-fd `close()` triggers `sensor_ops_s::close(lower, filep)`,
+  which clears `claim_owner` if it matches the closing `filep` — a
+  forgotten `LEGOSENSOR_RELEASE` is harmless
 
 ### 4.3 SELECT API contract
 
@@ -148,61 +221,107 @@ through `seq` / `generation` / `mode_id`** because:
 - The only reliable signal is the next `on_data` whose `mode` matches
 
 The driver tracks `pending_select_mode` plus a deadline (now + 500 ms)
-under the per-port mutex.  In `on_data`:
+under the per-port mutex; in `on_data`, when `frame->mode == pending`
+within the deadline, generation is bumped and pending cleared.
+Expired requests are silently dropped.
 
-```c
-nxmutex_lock(&priv->lock);
-now_ticks = clock_systime_ticks();
-if (priv->pending_select_mode != UINT8_MAX)
-{
-    if ((int32_t)(now_ticks - priv->pending_select_deadline) >= 0)
-        priv->pending_select_mode = UINT8_MAX;       /* expired */
-    else if (frame->mode == priv->pending_select_mode)
-    {
-        priv->generation++;
-        priv->pending_select_mode = UINT8_MAX;       /* confirmed */
-    }
-}
-priv->mode_id = frame->mode;
-priv->seq++;
-sample = build_envelope(priv, frame);                /* local copy */
-nxmutex_unlock(&priv->lock);
-priv->lower.push_event(priv->lower.priv, &sample, sizeof(sample));
-```
+### 4.4 SET_PWM (LED / motor PWM)
 
-Comparing `(int32_t)(now - deadline) >= 0` keeps the test wraparound-safe
-across the `uint32_t` tick counter.
+| Class | Implemented | Backend | Channel meaning |
+|---|---|---|---|
+| COLOR | ✅ | LUMP writable mode "LIGHT" (mode index resolved from info_cache by name) | channels[0..2] = LED 0..2 brightness 0..10000 (.01 % units) |
+| ULTRASONIC | ✅ | same | channels[0..3] = eye LED 0..3 brightness 0..10000 |
+| FORCE | `-ENOTSUP` (permanent) | — | no actuator on the device |
+| MOTOR_M / R / L | `-ENOTSUP` (this release) | (STM32 TIM PWM, lands with Issue #80) | channels[0] = signed duty -10000..10000 |
+
+LIGHT-mode resolution and payload conversion:
+
+- On `on_sync` the driver scans `info_cache.modes[]` for the writable
+  entry whose `name == "LIGHT"`, validates the shape (color = INT8 × 3,
+  ultrasonic = INT8 × 4), and caches the index in `light_mode_idx`.
+  Mismatched shape → `light_mode_idx = -1`, SET_PWM returns `-ENOTSUP`
+- **Payload conversion**: `channels[i]` (0..10000) is quantised to a
+  percent (0..100 in INT8) using
+  `(channels[i] * 100 + 5000) / 10000` (mid-point round-up)
+- The frame goes out via `lump_send_data(port, light_mode_idx,
+  payload, num_channels)`; SELECT is **not** issued — writable-mode
+  SEND is independent of the active SELECT, so LED control does not
+  disturb the streaming sensor mode
+
+> **Physical LED illumination depends on the H-bridge supply pin
+> (lands with Issue #80).**
+>
+> The SPIKE Color Sensor (`NEEDS_SUPPLY_PIN1`) and Ultrasonic Sensor
+> (`NEEDS_SUPPLY_PIN1`) require the H-bridge to be driven at
+> `-MAX_DUTY` after SYNC to power the device's LEDs (see the pybricks
+> reference at `pbio/drv/legodev/legodev_pup_uart.c:894-900` and the
+> capability map at `legodev_spec.c:201-208`).  This release (#79)
+> does not yet ship the H-bridge driver, so `LEGOSENSOR_SET_PWM`
+> emits the LUMP LIGHT frame onto the wire (visible as `tx_bytes`
+> growth) but **the physical LED stays dark for lack of supply
+> voltage**.  Once Issue #80 lands, the H-bridge will be driven
+> automatically on SYNC and the brightness commanded here will
+> also light the LEDs.
+
+### 4.5 kernel ↔ userspace responsibility split
+
+| Layer | Responsibility | Example |
+|---|---|---|
+| **kernel driver (this code)** | Mechanism only.  Forwards SELECT / SEND / SET_PWM verbatim.  No mode-aware LED policy | SELECT(0) issues a CMD SELECT and never touches LED state |
+| **userspace helper library (Issue #78)** | Policy.  e.g. `legolib_color_set_mode(fd, mode)` issues SELECT + SET_PWM atomically so COLOR/REFLT mode lights the LEDs and AMBI mode turns them off | mode → LED tables live in #78, firmware-spec changes are localised |
+
+Standard NuttX "mechanism in kernel, policy in userspace".
+Subscribers may still call SELECT / SET_PWM directly if they want
+finer control — the helper library is convenience, not enforcement.
 
 ## 5. CLI (`legosensor`)
 
 ```
-legosensor                     6-port summary (type/state/mode/RX/TX)
-legosensor list                same as above
-legosensor info <N>            per-mode schema (name, num_values,
-                               data_type, raw/pct/si min-max, units,
-                               writable)
-legosensor mode <N> <m>        CLAIM -> SELECT -> poll(2) 500 ms ->
-                               RELEASE
-legosensor send <N> <m> <hex>...  CLAIM -> SEND (writable-mode payload)
-                                  -> RELEASE
-legosensor watch <N> [ms]      open(O_NONBLOCK) -> poll(2) -> read ->
-                               decoded print loop
-legosensor claim <N>           explicit CLAIM (released on fd close)
-legosensor release <N>         explicit RELEASE
+legosensor                                 list all class topics (status one-liner each)
+legosensor list                            same as above
+legosensor <class>                         status one-liner
+legosensor <class> info                    bound port + per-mode schema
+legosensor <class> status                  engine + traffic counters
+legosensor <class> watch [ms]              poll -> read decoded samples (default 1000)
+legosensor <class> select <mode>           open -> CLAIM -> SELECT -> close (auto-RELEASE)
+legosensor <class> send <mode> <hex>...    open -> CLAIM -> SEND -> close
+legosensor <class> pwm <ch0> [ch1 ch2 ch3] open -> CLAIM -> SET_PWM -> close
 ```
 
-`N` accepts `0..5` or `A..F`.
+`<class>` is `color | ultrasonic | force | motor_m | motor_r | motor_l`.
 
-### 5.1 Why `dd` / `sensortest` don't work
+Each write-side command is **self-contained**: open → CLAIM → operate
+→ close (auto-RELEASE).  When you need to hold a claim across
+multiple operations, write a long-running daemon (see Issue #77's
+drivebase for an example).
+
+### 5.1 Examples
+
+```sh
+# Plug a Color sensor into port A
+legosensor color info                    # bound port=A, modes listed
+legosensor color watch                   # 1 s of decoded samples
+legosensor color select 1                # switch to REFLT (mode 1)
+legosensor color pwm 5000 0 0            # LED0 at 50 %
+legosensor color pwm 0 0 0               # all LEDs off
+
+# Plug an Ultrasonic sensor elsewhere
+legosensor ultrasonic pwm 5000 5000 0 0  # top two eye LEDs at 50 %
+
+# Force / motor SET_PWM is unsupported in this release
+legosensor force pwm 0                   # -ENOTSUP
+legosensor motor_m pwm 0                 # -ENOTSUP (lands in #80)
+```
+
+### 5.2 Why `dd` / `sensortest` don't work
 
 - **`dd`** issues a single `read()` without `poll(2)`.  The upper-half
-  non-fetch read path returns `-ENODATA` synchronously when the
-  caller's user generation is up to date, so a race against
-  `push_event()` produces `Unknown error 61` (ENODATA)
+  non-fetch read path returns `-ENODATA` synchronously if there is no
+  newer sample, so a race against `push_event()` produces
+  `Unknown error 61` (ENODATA)
 - **`sensortest`** validates the device name against
-  `g_sensor_info[]`'s standard types (accel0, gyro0, ...) and rejects
-  the custom `sensor_lego[N]` path with
-  `The sensor node name:sensor_legoN is invalid`
+  `g_sensor_info[]`'s standard types (accel0, gyro0, …) and rejects
+  the custom `sensor_<class>` paths
 
 `legosensor watch` is the canonical end-to-end verification tool.
 
@@ -210,98 +329,67 @@ legosensor release <N>         explicit RELEASE
 
 ### 6.1 Verified on hardware (SYNCED)
 
-| Type | Name | num_modes | Default mode |
-|---|---|---|---|
-| 48 | SPIKE Medium Motor | 6 | POWER (mode 0) |
-| 49 | SPIKE Large Motor | 6 | POWER (mode 0) |
-| 61 | SPIKE Color Sensor | 8 | COLOR (mode 0) |
-| 62 | SPIKE Ultrasonic Sensor | 8 | DISTL (mode 0) |
-| 63 | SPIKE Force Sensor | 7 | FORCE (mode 0) |
+| Type | Name | num_modes | Default mode | Class topic |
+|---|---|---|---|---|
+| 48 | SPIKE Medium Motor | 6 | POWER (mode 0) | `sensor_motor_r` (port A/C/E) / `sensor_motor_l` (port B/D/F) |
+| 49 | SPIKE Large Motor | 6 | POWER (mode 0) | `sensor_motor_m` |
+| 61 | SPIKE Color Sensor | 8 | COLOR (mode 0) | `sensor_color` |
+| 62 | SPIKE Ultrasonic Sensor | 8 | DISTL (mode 0) | `sensor_ultrasonic` |
+| 63 | SPIKE Force Sensor | 7 | FORCE (mode 0) | `sensor_force` |
 
-### 6.2 LUMP-protocol-compatible (theoretically supported)
+### 6.2 Unmapped type IDs
 
-The exhaustive type-ID list lives in [port-detection.md](port-detection.md)
-§5.  `/dev/uorb/sensor_lego[N]` works for any LUMP-capable device,
-including Mindstorms EV3 family.
+Powered Up devices with type ID 38 / 46 / 47 / 65 / 75 / 76 (and
+similar) are dropped by the classifier.  They remain accessible
+through the LUMP-direct `/dev/legoport[N]` chardev with port-scoped
+`LEGOPORT_LUMP_*` ioctls.
 
-### 6.3 Dependency on the #44 motor driver (LED / motor actuation)
+### 6.3 Force / Motor devices: SELECT-after-SYNC limitation (LUMP engine, separate follow-up)
 
-LED control on the SPIKE Color / Ultrasonic sensors (mode 3 / mode 5
-LIGHT) and motor PWM drive both depend on the **#44 H-bridge motor
-driver (TIM1/3/4)**.
+The Force Sensor (type 63) and the SPIKE Medium / Large Motors
+(types 48 / 49) **stop emitting DATA frames after SYNC unless the
+host issues a SELECT command**.  The current LUMP engine
+(`stm32_legoport_lump.c`) does not auto-issue a SELECT on SYNC
+completion, so plugging one of these devices yields a 600 ms
+no-DATA timeout, the session is torn down, and `legosensor <class> info`
+returns `-ENODEV`.
 
-- The pybricks reference (`pbio/drv/legodev/legodev_pup_uart.c:894-900`)
-  drives the H-bridge to `-MAX_DUTY` (Pin 1 supply) or `+MAX_DUTY`
-  (Pin 2 supply) right after SYNC to power the device's LEDs.
-  `pbdrv_legodev_spec_basic_flags()` maps
-  `SPIKE_COLOR_SENSOR / SPIKE_ULTRASONIC_SENSOR ->
-  NEEDS_SUPPLY_PIN1` and
-  `TECHNIC_COLOR_LIGHT_MATRIX -> NEEDS_SUPPLY_PIN2`
-- In this build (#45 only, #44 not yet implemented) the
-  `LEGOSENSOR_SEND` wire transmission succeeds (the TX byte counter
-  increments and the wire format matches pybricks) but the physical
-  LED does not light because the supply pin is not driven
-- Motor `SEND POWER` similarly requires the H-bridge to actually
-  spin the rotor
-- The LUMP frames are reliably leaving the hub — the current limit
-  is only the absent supply rail.  Once #44 lands, the same
-  `LEGOSENSOR_SEND` ioctl will drive LEDs and motors
+dmesg pattern when this happens:
 
-## 7. Design choices
+```
+lump: port A: type_id=63
+lump: port A: SYNCED type=63 modes=7 baud=115200
+lump: port A: no DATA for 600 ms, disconnecting
+lump: port A session ended ret=-110 step=N sleep=...ms
+```
 
-### 7.1 uORB primary, not chardev (`/dev/legosensor[N]`)
+Color (type 61) and Ultrasonic (type 62) auto-stream in their
+default mode, so they work without an explicit SELECT.  The
+pybricks reference (`pbio/drv/legodev/legodev_pup_uart.c:903`)
+unconditionally issues `pbdrv_legodev_request_mode(default_mode)`
+after SYNC.
 
-Two rounds of Codex review settled on uORB for `/dev/uorb/sensor_lego[N]`:
+**This release (#79)** documents the limitation and excludes
+Force / Motor from the on-hardware verification.  Adding the
+auto-SELECT after SYNC is **tracked as a follow-up Issue against
+the #43 LUMP engine**, outside the scope of this refactor.
 
-- Same sensor framework as the IMU (`/dev/uorb/sensor_imu0`); the same
-  `poll()` loop can fuse both sources
-- Multi-subscriber is natural (control app + monitor app coexist)
-- Ring buffer, batch, `poll(2)` come for free from the framework
-- The dynamic LUMP mode / shape fits a fixed envelope + C union under
-  `SENSOR_TYPE_CUSTOM`
+## 7. Follow-up issues
 
-### 7.2 nbuffer = 16 (per instance)
-
-- LUMP cadence is ~10..100 Hz; subscribers typically read every 100 ms
-- 16 frames covers a 100 Hz × 100 ms loop without overrun
-- The circbuf is per-instance, not per-subscriber, so RAM does not
-  grow with user count
-- Memory: heap allocation `16 × 56 B × 6 ports = 5.4 KB` plus
-  upper-half/user bookkeeping
-
-### 7.3 Reject `O_WROK`
-
-`sensor_ops_s::open` returns `-EACCES` if `(filep->f_oflags & O_WROK) != 0`.
-This stops userspace from injecting fake samples through
-`sensor_write()` and bypassing the LUMP transport.
-
-### 7.4 Boundary with the future #44 motor driver
-
-BOOST / Technic motors are used **simultaneously as encoder publishers
-and as PWM actuators** in pybricks workflows.  The agreed split is:
-
-- **#43 LUMP** holds one engine per port, but allows multiple
-  publisher attaches
-- **#45** is the telemetry publisher (attaches at boot, never detaches
-  on physical disconnect)
-- **#44** will be the writer / control owner (chardev driving PWM
-  plus LUMP SELECT / SEND)
-
-When #44 lands, #43 will gain
-`lump_acquire_control(port, owner_token)` / `lump_release_control(port, owner_token)`,
-SELECT/SEND will take a token argument, and the legacy token-less
-`lump_select_mode` / `lump_send_data` will only succeed when the port
-has no current owner (no NULL-bypass loophole).  **#45 does not take
-the LUMP control owner at boot** — the user fd takes it on the first
-`LEGOSENSOR_CLAIM`.
+| Issue | Scope |
+|---|---|
+| #80 | Motor PWM H-bridge driver (STM32 TIM).  MOTOR_M / R / L SET_PWM moves from `-ENOTSUP` to a real implementation |
+| #78 | Userspace helper library `apps/legolib/` (per-class policy: mode → LED automation, …) |
+| #77 | drivebase userspace daemon (`apps/drivebase/`, paired left/right wheel control; depends on #78 + #80) |
 
 ## 8. Tuning constants
 
 | Constant | Value | Description |
 |---|---|---|
-| `LEGOSENSOR_NUM_PORTS` | 6 | `/dev/uorb/sensor_lego0..5` |
+| `LEGOSENSOR_NUM_PORTS` | 6 | physical ports (A..F) |
+| `LEGOSENSOR_CLASS_NUM` | 6 | class topics |
 | `LEGOSENSOR_MAX_DATA_BYTES` | 32 | LUMP payload cap |
-| `LEGOSENSOR_NBUFFER` | 16 | upper-half circbuf depth |
+| `LEGOSENSOR_NBUFFER` | 16 | upper-half circbuf depth (per class topic) |
 | `LEGOSENSOR_PENDING_TIMEOUT_MS` | 500 | SELECT-confirmation deadline |
 
 ## 9. References
@@ -310,5 +398,6 @@ the LUMP control owner at boot** — the user fd takes it on the first
 - Public ABI: `boards/spike-prime-hub/include/board_legosensor.h`
 - Driver: `boards/spike-prime-hub/src/legosensor_uorb.c`
 - CLI: `apps/legosensor/legosensor_main.c`
+- LUMP API: `boards/spike-prime-hub/include/board_lump.h`
 - NuttX sensor framework: `nuttx/include/nuttx/sensors/sensor.h`,
   `nuttx/drivers/sensors/sensor.c`

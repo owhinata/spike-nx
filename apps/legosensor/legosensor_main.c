@@ -1,17 +1,24 @@
 /****************************************************************************
  * apps/legosensor/legosensor_main.c
  *
- * CLI for the SPIKE Prime Hub LEGO sensor uORB driver (Issue #45).
+ * CLI for the SPIKE Prime Hub LEGO sensor uORB driver (Issue #79).
  *
- * Usage:
- *   legosensor                     - same as `legosensor list`
- *   legosensor list                - one-line per port: type / mode / state
- *   legosensor info <N>            - full lump_device_info_s dump (modes 0..n)
- *   legosensor mode <N> <m>        - CLAIM, SELECT, poll for confirmation
- *   legosensor send <N> <m> <hex>  - CLAIM, SEND writable-mode payload
- *   legosensor watch <N> [<ms>]    - poll + read decoded samples
- *   legosensor claim <N>           - explicit CLAIM (held until close)
- *   legosensor release <N>         - explicit RELEASE
+ * Six device-class subcommands, each opening the matching
+ * `/dev/uorb/sensor_*` topic:
+ *
+ *   color | ultrasonic | force | motor_m | motor_r | motor_l
+ *
+ * Each subcommand takes a verb:
+ *
+ *   <class>                          status one-liner (default)
+ *   <class> info                     dump device info / mode schema
+ *   <class> status                   engine + traffic counters
+ *   <class> watch [ms]               poll + decode samples (default 1000)
+ *   <class> select <mode>            open → CLAIM → SELECT → close (auto-RELEASE)
+ *   <class> send <mode> <hex>...     open → CLAIM → SEND  → close
+ *   <class> pwm <ch0> [ch1 ch2 ch3]  open → CLAIM → SET_PWM → close
+ *
+ * `legosensor` / `legosensor list` enumerates all six class topics.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -37,48 +44,52 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define DEVPATH_FMT      "/dev/uorb/sensor_lego%d"
-#define SELECT_POLL_MS   500
-#define WATCH_DEFAULT_MS 1000
+#define WATCH_DEFAULT_MS    1000
+#define SELECT_POLL_MS       500
+
+/****************************************************************************
+ * Private Types
+ ****************************************************************************/
+
+struct class_entry_s
+{
+  enum legosensor_class_e id;
+  const char *name;             /* CLI keyword */
+  const char *path;             /* /dev/uorb/sensor_* */
+  uint8_t     pwm_channels;     /* expected num_channels for SET_PWM, 0 = none */
+};
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
+
+static const struct class_entry_s g_class_table[] =
+{
+  { LEGOSENSOR_CLASS_COLOR,      "color",      "/dev/uorb/sensor_color",      3 },
+  { LEGOSENSOR_CLASS_ULTRASONIC, "ultrasonic", "/dev/uorb/sensor_ultrasonic", 4 },
+  { LEGOSENSOR_CLASS_FORCE,      "force",      "/dev/uorb/sensor_force",      0 },
+  { LEGOSENSOR_CLASS_MOTOR_M,    "motor_m",    "/dev/uorb/sensor_motor_m",    1 },
+  { LEGOSENSOR_CLASS_MOTOR_R,    "motor_r",    "/dev/uorb/sensor_motor_r",    1 },
+  { LEGOSENSOR_CLASS_MOTOR_L,    "motor_l",    "/dev/uorb/sensor_motor_l",    1 },
+};
+
+#define CLASS_COUNT  (int)(sizeof(g_class_table) / sizeof(g_class_table[0]))
 
 /****************************************************************************
  * Private Functions — helpers
  ****************************************************************************/
 
-static int build_devpath(int port, char *out, size_t outlen)
+static const struct class_entry_s *lookup_class(const char *name)
 {
-  if (port < 0 || port >= LEGOSENSOR_NUM_PORTS)
+  for (int i = 0; i < CLASS_COUNT; i++)
     {
-      return -EINVAL;
+      if (strcmp(name, g_class_table[i].name) == 0)
+        {
+          return &g_class_table[i];
+        }
     }
 
-  snprintf(out, outlen, DEVPATH_FMT, port);
-  return 0;
-}
-
-static int parse_port(const char *s)
-{
-  if (s == NULL || s[0] == '\0' || s[1] != '\0')
-    {
-      return -EINVAL;
-    }
-
-  if (s[0] >= 'A' && s[0] <= 'F')
-    {
-      return s[0] - 'A';
-    }
-
-  if (s[0] >= 'a' && s[0] <= 'f')
-    {
-      return s[0] - 'a';
-    }
-
-  if (s[0] >= '0' && s[0] <= '5')
-    {
-      return s[0] - '0';
-    }
-
-  return -EINVAL;
+  return NULL;
 }
 
 static const char *state_name(uint8_t state)
@@ -132,13 +143,33 @@ static int parse_hex_byte(const char *s, uint8_t *out)
   return 0;
 }
 
+static int parse_signed_long(const char *s, long *out)
+{
+  char *end;
+  long v;
+
+  if (s == NULL || s[0] == '\0')
+    {
+      return -EINVAL;
+    }
+
+  v = strtol(s, &end, 0);
+  if (*end != '\0')
+    {
+      return -EINVAL;
+    }
+
+  *out = v;
+  return 0;
+}
+
 /****************************************************************************
  * Private Functions — sample decoding
  ****************************************************************************/
 
 static void print_sample(const struct lump_sample_s *s)
 {
-  printf("[%c] gen=%" PRIu32 " seq=%" PRIu32 " mode=%u (%s x%u) ",
+  printf("[port=%c] gen=%" PRIu32 " seq=%" PRIu32 " mode=%u (%s x%u) ",
          'A' + s->port, s->generation, s->seq, s->mode_id,
          dtype_name(s->data_type), s->num_values);
 
@@ -200,84 +231,119 @@ static void print_sample(const struct lump_sample_s *s)
  * Private Functions — subcommands
  ****************************************************************************/
 
-static int do_list(void)
+static int do_status_one(const struct class_entry_s *c, bool short_form)
 {
-  char path[32];
-
-  printf("Port  Type  State    Mode  Gen  RX(B)     TX(B)\n");
-  printf("----  ----  -------  ----  ---  --------  --------\n");
-
-  for (int p = 0; p < LEGOSENSOR_NUM_PORTS; p++)
+  int fd = open(c->path, O_RDONLY | O_NONBLOCK);
+  if (fd < 0)
     {
-      build_devpath(p, path, sizeof(path));
+      printf("%-11s  <open: %s>\n", c->name, strerror(errno));
+      return -errno;
+    }
 
-      int fd = open(path, O_RDONLY | O_NONBLOCK);
-      if (fd < 0)
+  struct lump_status_full_s st;
+  memset(&st, 0, sizeof(st));
+  int ret = ioctl(fd, LEGOSENSOR_GET_STATUS, (unsigned long)&st);
+
+  struct legosensor_info_arg_s info_arg;
+  memset(&info_arg, 0, sizeof(info_arg));
+  int ret_info = ioctl(fd, LEGOSENSOR_GET_INFO, (unsigned long)&info_arg);
+  close(fd);
+
+  if (ret < 0 && errno == ENODEV)
+    {
+      printf("%-11s  <unbound>\n", c->name);
+      return 0;
+    }
+
+  if (ret < 0)
+    {
+      printf("%-11s  <ioctl: %s>\n", c->name, strerror(errno));
+      return -errno;
+    }
+
+  if (short_form)
+    {
+      printf("%-11s  port=%c type=%-3u state=%-7s mode=%u rx=%" PRIu32
+             " tx=%" PRIu32 "\n",
+             c->name,
+             ret_info == 0 ? 'A' + info_arg.port : '?',
+             st.type_id, state_name(st.state),
+             st.current_mode, st.rx_bytes, st.tx_bytes);
+    }
+  else
+    {
+      printf("class       : %s\n", c->name);
+      if (ret_info == 0)
         {
-          printf("  %c   <open: %d>\n", 'A' + p, errno);
-          continue;
+          printf("bound port  : %c\n", 'A' + info_arg.port);
         }
-
-      struct lump_status_full_s st;
-      memset(&st, 0, sizeof(st));
-      int r = ioctl(fd, LEGOSENSOR_GET_STATUS, (unsigned long)&st);
-      close(fd);
-
-      if (r < 0)
-        {
-          printf("  %c   <ioctl: %d>\n", 'A' + p, errno);
-          continue;
-        }
-
-      printf("  %c    %3u  %-7s   %3u  %3u  %8" PRIu32 "  %8" PRIu32 "\n",
-             'A' + p, st.type_id, state_name(st.state),
-             st.current_mode, 0u, st.rx_bytes, st.tx_bytes);
+      printf("type_id     : %u\n", st.type_id);
+      printf("state       : %s\n", state_name(st.state));
+      printf("current_mode: %u\n", st.current_mode);
+      printf("baud        : %" PRIu32 "\n", st.baud);
+      printf("rx / tx     : %" PRIu32 " / %" PRIu32 " bytes\n",
+             st.rx_bytes, st.tx_bytes);
+      printf("flags       : 0x%02x%s%s%s\n", st.flags,
+             (st.flags & LUMP_FLAG_SYNCED)  ? " SYNCED"  : "",
+             (st.flags & LUMP_FLAG_DATA_OK) ? " DATA_OK" : "",
+             (st.flags & LUMP_FLAG_ERROR)   ? " ERROR"   : "");
+      printf("dq_dropped  : %" PRIu32 "\n", st.dq_dropped);
+      printf("stack used  : %" PRIu32 " / %" PRIu32 "\n",
+             st.stk_used, st.stk_size);
     }
 
   return 0;
 }
 
-static int do_info(int port)
+static int do_list(void)
 {
-  char path[32];
-  int ret;
+  for (int i = 0; i < CLASS_COUNT; i++)
+    {
+      do_status_one(&g_class_table[i], true);
+    }
 
-  build_devpath(port, path, sizeof(path));
+  return 0;
+}
 
-  int fd = open(path, O_RDONLY | O_NONBLOCK);
+static int do_info(const struct class_entry_s *c)
+{
+  int fd = open(c->path, O_RDONLY | O_NONBLOCK);
   if (fd < 0)
     {
-      fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
+      fprintf(stderr, "open(%s): %s\n", c->path, strerror(errno));
       return -errno;
     }
 
-  struct lump_device_info_s info;
-  memset(&info, 0, sizeof(info));
-  ret = ioctl(fd, LEGOSENSOR_GET_INFO, (unsigned long)&info);
+  struct legosensor_info_arg_s arg;
+  memset(&arg, 0, sizeof(arg));
+  int ret = ioctl(fd, LEGOSENSOR_GET_INFO, (unsigned long)&arg);
   close(fd);
 
   if (ret < 0)
     {
-      fprintf(stderr, "ioctl GET_INFO: %s\n", strerror(errno));
+      fprintf(stderr, "GET_INFO: %s\n", strerror(errno));
       return -errno;
     }
 
-  printf("Port %c\n", 'A' + port);
-  printf("  type_id     : %u\n", info.type_id);
-  printf("  num_modes   : %u\n", info.num_modes);
-  printf("  current_mode: %u\n", info.current_mode);
-  printf("  baud        : %" PRIu32 "\n", info.baud);
-  printf("  fw / hw     : 0x%08" PRIx32 " / 0x%08" PRIx32 "\n",
-         info.fw_version, info.hw_version);
-  printf("  flags       : 0x%02x%s%s%s\n", info.flags,
-         (info.flags & LUMP_FLAG_SYNCED)  ? " SYNCED"  : "",
-         (info.flags & LUMP_FLAG_DATA_OK) ? " DATA_OK" : "",
-         (info.flags & LUMP_FLAG_ERROR)   ? " ERROR"   : "");
+  const struct lump_device_info_s *info = &arg.info;
 
-  for (int m = 0; m < info.num_modes && m < LUMP_MAX_MODES; m++)
+  printf("class       : %s\n", c->name);
+  printf("bound port  : %c\n", 'A' + arg.port);
+  printf("type_id     : %u\n", info->type_id);
+  printf("num_modes   : %u\n", info->num_modes);
+  printf("current_mode: %u\n", info->current_mode);
+  printf("baud        : %" PRIu32 "\n", info->baud);
+  printf("fw / hw     : 0x%08" PRIx32 " / 0x%08" PRIx32 "\n",
+         info->fw_version, info->hw_version);
+  printf("flags       : 0x%02x%s%s%s\n", info->flags,
+         (info->flags & LUMP_FLAG_SYNCED)  ? " SYNCED"  : "",
+         (info->flags & LUMP_FLAG_DATA_OK) ? " DATA_OK" : "",
+         (info->flags & LUMP_FLAG_ERROR)   ? " ERROR"   : "");
+
+  for (int m = 0; m < info->num_modes && m < LUMP_MAX_MODES; m++)
     {
-      const struct lump_mode_info_s *mi = &info.modes[m];
-      printf("  mode[%d] %-12s  %ux%s  raw[%g..%g] pct[%g..%g] si[%g..%g] %s%s\n",
+      const struct lump_mode_info_s *mi = &info->modes[m];
+      printf("mode[%d] %-12s  %ux%s  raw[%g..%g] pct[%g..%g] si[%g..%g] %s%s\n",
              m, mi->name, mi->num_values, dtype_name(mi->data_type),
              (double)mi->raw_min, (double)mi->raw_max,
              (double)mi->pct_min, (double)mi->pct_max,
@@ -288,151 +354,12 @@ static int do_info(int port)
   return 0;
 }
 
-static int do_mode(int port, uint8_t mode)
+static int do_watch(const struct class_entry_s *c, int duration_ms)
 {
-  char path[32];
-  int  ret;
-
-  build_devpath(port, path, sizeof(path));
-
-  int fd = open(path, O_RDONLY | O_NONBLOCK);
+  int fd = open(c->path, O_RDONLY | O_NONBLOCK);
   if (fd < 0)
     {
-      fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
-      return -errno;
-    }
-
-  ret = ioctl(fd, LEGOSENSOR_CLAIM, 0);
-  if (ret < 0)
-    {
-      fprintf(stderr, "CLAIM: %s\n", strerror(errno));
-      close(fd);
-      return -errno;
-    }
-
-  ret = ioctl(fd, LEGOSENSOR_SELECT, (unsigned long)mode);
-  if (ret < 0)
-    {
-      fprintf(stderr, "SELECT: %s\n", strerror(errno));
-      ioctl(fd, LEGOSENSOR_RELEASE, 0);
-      close(fd);
-      return -errno;
-    }
-
-  /* Wait up to SELECT_POLL_MS for a sample whose mode matches. */
-
-  struct pollfd pfd = { .fd = fd, .events = POLLIN };
-  struct timespec t0;
-  clock_gettime(CLOCK_MONOTONIC, &t0);
-
-  bool confirmed = false;
-  int  remaining = SELECT_POLL_MS;
-  while (remaining > 0 && !confirmed)
-    {
-      int pr = poll(&pfd, 1, remaining);
-      if (pr <= 0)
-        {
-          break;
-        }
-
-      struct lump_sample_s s;
-      ssize_t n = read(fd, &s, sizeof(s));
-      if (n == sizeof(s) && s.mode_id == mode && s.len > 0)
-        {
-          confirmed = true;
-          break;
-        }
-
-      struct timespec t1;
-      clock_gettime(CLOCK_MONOTONIC, &t1);
-      long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
-                        (t1.tv_nsec - t0.tv_nsec) / 1000000;
-      remaining = SELECT_POLL_MS - (int)elapsed_ms;
-    }
-
-  ioctl(fd, LEGOSENSOR_RELEASE, 0);
-  close(fd);
-
-  if (!confirmed)
-    {
-      fprintf(stderr, "SELECT timeout (mode %u not confirmed in %d ms)\n",
-              mode, SELECT_POLL_MS);
-      return -ETIMEDOUT;
-    }
-
-  printf("Port %c switched to mode %u\n", 'A' + port, mode);
-  return 0;
-}
-
-static int do_send(int port, uint8_t mode, int argc, char **argv)
-{
-  char path[32];
-  int  ret;
-
-  if (argc <= 0)
-    {
-      fprintf(stderr, "usage: legosensor send <N> <m> <hex>...\n");
-      return -EINVAL;
-    }
-
-  if (argc > LUMP_MAX_PAYLOAD)
-    {
-      fprintf(stderr, "payload exceeds %d bytes\n", LUMP_MAX_PAYLOAD);
-      return -E2BIG;
-    }
-
-  struct legosensor_send_arg_s snd;
-  memset(&snd, 0, sizeof(snd));
-  snd.mode = mode;
-  snd.len  = (uint8_t)argc;
-
-  for (int i = 0; i < argc; i++)
-    {
-      ret = parse_hex_byte(argv[i], &snd.data[i]);
-      if (ret < 0)
-        {
-          fprintf(stderr, "bad hex byte: %s\n", argv[i]);
-          return -EINVAL;
-        }
-    }
-
-  build_devpath(port, path, sizeof(path));
-  int fd = open(path, O_RDONLY | O_NONBLOCK);
-  if (fd < 0)
-    {
-      fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
-      return -errno;
-    }
-
-  ret = ioctl(fd, LEGOSENSOR_CLAIM, 0);
-  if (ret < 0)
-    {
-      fprintf(stderr, "CLAIM: %s\n", strerror(errno));
-      close(fd);
-      return -errno;
-    }
-
-  ret = ioctl(fd, LEGOSENSOR_SEND, (unsigned long)&snd);
-  if (ret < 0)
-    {
-      fprintf(stderr, "SEND: %s\n", strerror(errno));
-    }
-
-  ioctl(fd, LEGOSENSOR_RELEASE, 0);
-  close(fd);
-
-  return ret < 0 ? -errno : 0;
-}
-
-static int do_watch(int port, int duration_ms)
-{
-  char path[32];
-
-  build_devpath(port, path, sizeof(path));
-  int fd = open(path, O_RDONLY | O_NONBLOCK);
-  if (fd < 0)
-    {
-      fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
+      fprintf(stderr, "open(%s): %s\n", c->path, strerror(errno));
       return -errno;
     }
 
@@ -480,52 +407,208 @@ static int do_watch(int port, int duration_ms)
   return 0;
 }
 
-/* CLAIM / RELEASE that hold the fd open as long as the CLI process
- * runs.  Useful for chaining multiple SELECT/SEND from a script.
- */
-
-static int do_claim(int port, bool acquire)
+static int do_select(const struct class_entry_s *c, uint8_t mode)
 {
-  char path[32];
-  int  ret;
-
-  build_devpath(port, path, sizeof(path));
-
-  int fd = open(path, O_RDONLY | O_NONBLOCK);
+  int fd = open(c->path, O_RDONLY | O_NONBLOCK);
   if (fd < 0)
     {
-      fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
+      fprintf(stderr, "open(%s): %s\n", c->path, strerror(errno));
       return -errno;
     }
 
-  ret = ioctl(fd, acquire ? LEGOSENSOR_CLAIM : LEGOSENSOR_RELEASE, 0);
+  int ret = ioctl(fd, LEGOSENSOR_CLAIM, 0);
   if (ret < 0)
     {
-      fprintf(stderr, "%s: %s\n",
-              acquire ? "CLAIM" : "RELEASE", strerror(errno));
+      fprintf(stderr, "CLAIM: %s\n", strerror(errno));
+      close(fd);
+      return -errno;
     }
 
-  close(fd);
+  struct legosensor_select_arg_s sel = { .mode = mode };
+  ret = ioctl(fd, LEGOSENSOR_SELECT, (unsigned long)&sel);
+  if (ret < 0)
+    {
+      fprintf(stderr, "SELECT: %s\n", strerror(errno));
+      close(fd);                     /* auto-RELEASE on close */
+      return -errno;
+    }
+
+  /* Wait up to SELECT_POLL_MS for a sample whose mode matches.  This
+   * lets the CLI report a clean "switched to mode N" line instead of
+   * exiting before the device acknowledges the request.
+   */
+
+  struct pollfd pfd = { .fd = fd, .events = POLLIN };
+  struct timespec t0;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+
+  bool confirmed = false;
+  int  remaining = SELECT_POLL_MS;
+  while (remaining > 0 && !confirmed)
+    {
+      int pr = poll(&pfd, 1, remaining);
+      if (pr <= 0)
+        {
+          break;
+        }
+
+      struct lump_sample_s s;
+      ssize_t n = read(fd, &s, sizeof(s));
+      if (n == sizeof(s) && s.mode_id == mode && s.len > 0)
+        {
+          confirmed = true;
+          break;
+        }
+
+      struct timespec t1;
+      clock_gettime(CLOCK_MONOTONIC, &t1);
+      long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+                        (t1.tv_nsec - t0.tv_nsec) / 1000000;
+      remaining = SELECT_POLL_MS - (int)elapsed_ms;
+    }
+
+  close(fd);                          /* auto-RELEASE */
+
+  if (!confirmed)
+    {
+      fprintf(stderr, "SELECT timeout (mode %u not confirmed in %d ms)\n",
+              mode, SELECT_POLL_MS);
+      return -ETIMEDOUT;
+    }
+
+  printf("%s switched to mode %u\n", c->name, mode);
+  return 0;
+}
+
+static int do_send(const struct class_entry_s *c, uint8_t mode,
+                   int argc, char **argv)
+{
+  if (argc <= 0)
+    {
+      fprintf(stderr, "usage: legosensor %s send <m> <hex>...\n", c->name);
+      return -EINVAL;
+    }
+
+  if (argc > LUMP_MAX_PAYLOAD)
+    {
+      fprintf(stderr, "payload exceeds %d bytes\n", LUMP_MAX_PAYLOAD);
+      return -E2BIG;
+    }
+
+  struct legosensor_send_arg_s snd;
+  memset(&snd, 0, sizeof(snd));
+  snd.mode = mode;
+  snd.len  = (uint8_t)argc;
+
+  for (int i = 0; i < argc; i++)
+    {
+      int r = parse_hex_byte(argv[i], &snd.data[i]);
+      if (r < 0)
+        {
+          fprintf(stderr, "bad hex byte: %s\n", argv[i]);
+          return -EINVAL;
+        }
+    }
+
+  int fd = open(c->path, O_RDONLY | O_NONBLOCK);
+  if (fd < 0)
+    {
+      fprintf(stderr, "open(%s): %s\n", c->path, strerror(errno));
+      return -errno;
+    }
+
+  int ret = ioctl(fd, LEGOSENSOR_CLAIM, 0);
+  if (ret < 0)
+    {
+      fprintf(stderr, "CLAIM: %s\n", strerror(errno));
+      close(fd);
+      return -errno;
+    }
+
+  ret = ioctl(fd, LEGOSENSOR_SEND, (unsigned long)&snd);
+  if (ret < 0)
+    {
+      fprintf(stderr, "SEND: %s\n", strerror(errno));
+    }
+
+  close(fd);                            /* auto-RELEASE */
+  return ret < 0 ? -errno : 0;
+}
+
+static int do_pwm(const struct class_entry_s *c, int argc, char **argv)
+{
+  if (c->pwm_channels == 0)
+    {
+      fprintf(stderr, "%s: SET_PWM not supported for this class\n", c->name);
+      return -ENOTSUP;
+    }
+
+  if (argc != c->pwm_channels)
+    {
+      fprintf(stderr,
+              "%s: pwm needs %u channels (got %d)\n",
+              c->name, c->pwm_channels, argc);
+      return -EINVAL;
+    }
+
+  struct legosensor_pwm_arg_s pwm;
+  memset(&pwm, 0, sizeof(pwm));
+  pwm.num_channels = c->pwm_channels;
+
+  for (int i = 0; i < argc; i++)
+    {
+      long v;
+      if (parse_signed_long(argv[i], &v) < 0 || v < INT16_MIN || v > INT16_MAX)
+        {
+          fprintf(stderr, "bad channel value: %s\n", argv[i]);
+          return -EINVAL;
+        }
+      pwm.channels[i] = (int16_t)v;
+    }
+
+  int fd = open(c->path, O_RDONLY | O_NONBLOCK);
+  if (fd < 0)
+    {
+      fprintf(stderr, "open(%s): %s\n", c->path, strerror(errno));
+      return -errno;
+    }
+
+  int ret = ioctl(fd, LEGOSENSOR_CLAIM, 0);
+  if (ret < 0)
+    {
+      fprintf(stderr, "CLAIM: %s\n", strerror(errno));
+      close(fd);
+      return -errno;
+    }
+
+  ret = ioctl(fd, LEGOSENSOR_SET_PWM, (unsigned long)&pwm);
+  if (ret < 0)
+    {
+      fprintf(stderr, "SET_PWM: %s\n", strerror(errno));
+    }
+
+  close(fd);                            /* auto-RELEASE */
   return ret < 0 ? -errno : 0;
 }
 
 /****************************************************************************
- * Public Function: legosensor_main
+ * Public Function: main
  ****************************************************************************/
 
 static void usage(void)
 {
   fprintf(stderr,
           "usage:\n"
-          "  legosensor                     list all ports (default)\n"
-          "  legosensor list                same as above\n"
-          "  legosensor info <N>            mode schema dump\n"
-          "  legosensor mode <N> <m>        CLAIM + SELECT mode + RELEASE\n"
-          "  legosensor send <N> <m> <hex>...  CLAIM + SEND + RELEASE\n"
-          "  legosensor watch <N> [ms]      poll + decode samples (default 1000 ms)\n"
-          "  legosensor claim <N>           CLAIM (released on fd close)\n"
-          "  legosensor release <N>         RELEASE\n"
-          "  N is 0..5 or A..F\n");
+          "  legosensor                                 list all class topics\n"
+          "  legosensor list                            same as above\n"
+          "  legosensor <class>                         status one-liner\n"
+          "  legosensor <class> info                    device info / mode schema\n"
+          "  legosensor <class> status                  engine + traffic counters\n"
+          "  legosensor <class> watch [ms]              decode samples (default 1000)\n"
+          "  legosensor <class> select <mode>           SELECT mode\n"
+          "  legosensor <class> send <mode> <hex>...    SEND writable-mode payload\n"
+          "  legosensor <class> pwm <ch0> [ch1 ch2 ch3] LED brightness / motor duty\n"
+          "  <class> ::= color | ultrasonic | force | motor_m | motor_r | motor_l\n");
 }
 
 int main(int argc, FAR char *argv[])
@@ -535,81 +618,34 @@ int main(int argc, FAR char *argv[])
       return do_list() < 0 ? 1 : 0;
     }
 
-  if (strcmp(argv[1], "info") == 0)
+  const struct class_entry_s *c = lookup_class(argv[1]);
+  if (c == NULL)
     {
-      if (argc < 3)
-        {
-          usage();
-          return 1;
-        }
-      int p = parse_port(argv[2]);
-      if (p < 0)
-        {
-          usage();
-          return 1;
-        }
-      return do_info(p) < 0 ? 1 : 0;
+      usage();
+      return 1;
     }
 
-  if (strcmp(argv[1], "mode") == 0)
+  /* `legosensor <class>` (no verb) → status one-liner. */
+
+  if (argc == 2)
     {
-      if (argc < 4)
-        {
-          usage();
-          return 1;
-        }
-      int p = parse_port(argv[2]);
-      if (p < 0)
-        {
-          usage();
-          return 1;
-        }
-      char *end;
-      unsigned long m = strtoul(argv[3], &end, 0);
-      if (*end != '\0' || m >= LUMP_MAX_MODES)
-        {
-          usage();
-          return 1;
-        }
-      return do_mode(p, (uint8_t)m) < 0 ? 1 : 0;
+      return do_status_one(c, false) < 0 ? 1 : 0;
     }
 
-  if (strcmp(argv[1], "send") == 0)
+  const char *verb = argv[2];
+
+  if (strcmp(verb, "info") == 0)
     {
-      if (argc < 5)
-        {
-          usage();
-          return 1;
-        }
-      int p = parse_port(argv[2]);
-      if (p < 0)
-        {
-          usage();
-          return 1;
-        }
-      char *end;
-      unsigned long m = strtoul(argv[3], &end, 0);
-      if (*end != '\0' || m >= LUMP_MAX_MODES)
-        {
-          usage();
-          return 1;
-        }
-      return do_send(p, (uint8_t)m, argc - 4, &argv[4]) < 0 ? 1 : 0;
+      return do_info(c) < 0 ? 1 : 0;
     }
 
-  if (strcmp(argv[1], "watch") == 0)
+  if (strcmp(verb, "status") == 0)
     {
-      if (argc < 3)
-        {
-          usage();
-          return 1;
-        }
-      int p = parse_port(argv[2]);
-      if (p < 0)
-        {
-          usage();
-          return 1;
-        }
+      return do_status_one(c, false) < 0 ? 1 : 0;
+    }
+
+  if (strcmp(verb, "watch") == 0)
+    {
       int ms = WATCH_DEFAULT_MS;
       if (argc >= 4)
         {
@@ -619,24 +655,46 @@ int main(int argc, FAR char *argv[])
               ms = WATCH_DEFAULT_MS;
             }
         }
-      return do_watch(p, ms) < 0 ? 1 : 0;
+      return do_watch(c, ms) < 0 ? 1 : 0;
     }
 
-  if (strcmp(argv[1], "claim") == 0 || strcmp(argv[1], "release") == 0)
+  if (strcmp(verb, "select") == 0)
     {
-      if (argc < 3)
+      if (argc < 4)
         {
           usage();
           return 1;
         }
-      int p = parse_port(argv[2]);
-      if (p < 0)
+      char *end;
+      unsigned long m = strtoul(argv[3], &end, 0);
+      if (*end != '\0' || m >= LUMP_MAX_MODES)
         {
           usage();
           return 1;
         }
-      bool acquire = (argv[1][0] == 'c');
-      return do_claim(p, acquire) < 0 ? 1 : 0;
+      return do_select(c, (uint8_t)m) < 0 ? 1 : 0;
+    }
+
+  if (strcmp(verb, "send") == 0)
+    {
+      if (argc < 4)
+        {
+          usage();
+          return 1;
+        }
+      char *end;
+      unsigned long m = strtoul(argv[3], &end, 0);
+      if (*end != '\0' || m >= LUMP_MAX_MODES)
+        {
+          usage();
+          return 1;
+        }
+      return do_send(c, (uint8_t)m, argc - 4, &argv[4]) < 0 ? 1 : 0;
+    }
+
+  if (strcmp(verb, "pwm") == 0)
+    {
+      return do_pwm(c, argc - 3, &argv[3]) < 0 ? 1 : 0;
     }
 
   usage();

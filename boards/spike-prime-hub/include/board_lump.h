@@ -183,9 +183,18 @@ int lump_detach(int port);
 
 int lump_select_mode(int port, uint8_t mode);
 
-/* Send a writable-mode payload (`DATA` with mode in header).  `mode`
- * MUST currently be selected and writable; otherwise `-EINVAL` /
- * `-ENOTSUP` is returned.
+/* Send a writable-mode payload (`DATA` with mode in header).
+ *
+ * `mode` only needs to be a writable mode of the currently SYNCED
+ * device — it does **not** have to be the active SELECT mode.  The
+ * engine sends the DATA frame independently of the reporting mode, so
+ * for example LED control on the Color / Ultrasonic sensor can be
+ * issued while the device is still streaming COLOR / DISTANCE samples.
+ *
+ * Returns:
+ *   `-EINVAL`  - bad arguments or `mode` index out of range
+ *   `-ENOTSUP` - `mode` exists but is not writable
+ *   `-EAGAIN`  - device not yet SYNCED on this port
  */
 
 int lump_send_data(int port, uint8_t mode, const uint8_t *buf, size_t len);

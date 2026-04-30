@@ -6,7 +6,7 @@
                     ユーザー空間
   ┌─────────────────────────────────────────────┐
   │  /dev/legoport[0-5]        (DCM)             │
-  │  /dev/uorb/sensor_lego[N]  (uORB センサー)   │
+  │  /dev/uorb/sensor_<class>  (uORB センサー)   │
   │  /dev/legomotor[N]         (モーター制御)    │
   └────────────┬───────────────┬────────────────┘
                │               │
@@ -41,11 +41,18 @@
 
 ### LUMP センサー uORB トピック (boot 時に登録)
 
-| デバイス | パス | 用途 |
-|---|---|---|
-| LUMP センサー | `/dev/uorb/sensor_lego0` 〜 `5` | LUMP プロトコルで流れる **全デバイス** (sensor + motor encoder telemetry) を 56 byte `struct lump_sample_s` envelope で publish。Issue #45 |
+| デバイス | パス | LPF2 type_id | 用途 |
+|---|---|---|---|
+| カラーセンサー | `/dev/uorb/sensor_color` | 61 | LPF2 Color の telemetry。56 byte `struct lump_sample_s` envelope で publish。Issue #79 |
+| 超音波センサー | `/dev/uorb/sensor_ultrasonic` | 62 | LPF2 Ultrasonic の telemetry |
+| フォースセンサー | `/dev/uorb/sensor_force` | 63 | LPF2 Force の telemetry |
+| Module/Arm Motor | `/dev/uorb/sensor_motor_m` | 49 | SPIKE Large Motor (アーム/マニピュレーター、高トルク) の encoder + status |
+| 右輪 Motor | `/dev/uorb/sensor_motor_r` | 48 (port A/C/E) | SPIKE Medium Motor (driving wheel、port パリティで分離) |
+| 左輪 Motor | `/dev/uorb/sensor_motor_l` | 48 (port B/D/F) | 同上 |
 
-接続なしポートも常時登録、`type_id=0,len=0` の sentinel sample で disconnect を通知 (subscriber fd の一貫性維持)。
+各 class topic は **同時に最大 1 port** を bind (1 topic = 1 port ルール)。複数 port が同 class に分類された場合は port 番号の小さい方が勝ち、残りは frame drop。詳細は [sensor.md](sensor.md) §2.2。
+
+接続なしクラスも常時登録、`type_id=0,len=0` の sentinel sample で disconnect / takeover を通知 (subscriber fd の一貫性維持)。
 
 ### 動的デバイス (将来)
 
