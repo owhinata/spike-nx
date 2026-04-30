@@ -1,7 +1,8 @@
 /****************************************************************************
  * apps/legoport/legoport_main.c
  *
- * CLI utility for the SPIKE Prime Hub I/O port DCM (Issue #42).
+ * CLI utility for the SPIKE Prime Hub I/O port DCM (Issue #42) and the
+ * LUMP UART engine diagnostics (Issue #43, gated by CONFIG_LEGO_LUMP_DIAG).
  *
  * Usage:
  *   legoport             - same as `legoport list`
@@ -10,6 +11,9 @@
  *   legoport wait <N> [timeout_ms]
  *                        - block on connect (timeout_ms=0: infinite)
  *   legoport stats       - HPWORK cadence stats (max step / max interval)
+ *   legoport lump-hw dump
+ *                        - dump RCC / USART / NVIC state for the 6 LUMP
+ *                          UARTs (CONFIG_LEGO_LUMP_DIAG=y only)
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -256,6 +260,33 @@ static int do_stats(bool reset)
   return 0;
 }
 
+#ifdef CONFIG_LEGO_LUMP_DIAG
+static int do_lump_hw_dump(void)
+{
+  /* Any port works — the dump ioctl is per-engine, not per-port. */
+
+  char path[24];
+  build_devpath(0, path, sizeof(path));
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    {
+      printf("cannot open %s: %d\n", path, errno);
+      return 1;
+    }
+
+  if (ioctl(fd, LEGOPORT_LUMP_HW_DUMP, 0) < 0)
+    {
+      printf("ioctl LUMP_HW_DUMP failed: %d\n", errno);
+      close(fd);
+      return 1;
+    }
+
+  printf("lump-hw: dump emitted to syslog (use `dmesg` to view)\n");
+  close(fd);
+  return 0;
+}
+#endif
+
 static void usage(void)
 {
   printf("Usage:\n");
@@ -266,6 +297,10 @@ static void usage(void)
          "                       - block on connect edge\n");
   printf("  legoport stats       - HPWORK cadence stats\n");
   printf("  legoport stats reset - clear max_step_us / max_interval_us\n");
+#ifdef CONFIG_LEGO_LUMP_DIAG
+  printf("  legoport lump-hw dump\n"
+         "                       - dump RCC/USART/NVIC for 6 LUMP UARTs\n");
+#endif
 }
 
 /****************************************************************************
@@ -305,6 +340,18 @@ int main(int argc, FAR char *argv[])
       bool reset = (argc >= 3 && strcmp(argv[2], "reset") == 0);
       return do_stats(reset);
     }
+
+#ifdef CONFIG_LEGO_LUMP_DIAG
+  if (strcmp(argv[1], "lump-hw") == 0)
+    {
+      if (argc < 3 || strcmp(argv[2], "dump") != 0)
+        {
+          usage();
+          return 1;
+        }
+      return do_lump_hw_dump();
+    }
+#endif
 
   usage();
   return 1;

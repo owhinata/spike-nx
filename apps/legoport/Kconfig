@@ -4,3 +4,7 @@ config APP_LEGOPORT
 	---help---
 		CLI for inspecting and waiting on /dev/legoport0..5
 		(Issue #42).  Subcommands: list, info, wait, stats.
+
+		With CONFIG_LEGO_LUMP_DIAG=y, also exposes the
+		`lump-hw dump` subcommand that triggers a kernel-side
+		register dump for the 6 LUMP UARTs (Issue #43 Phase 1).

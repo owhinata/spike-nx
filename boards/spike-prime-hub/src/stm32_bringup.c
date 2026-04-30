@@ -69,6 +69,28 @@ int stm32_bringup(void)
   up_prioritize_irq(STM32_IRQ_PENDSV,  NVIC_SYSH_PRIORITY_MIN);
   up_prioritize_irq(STM32_IRQ_SYSTICK, NVIC_SYSH_PRIORITY_MIN);
 
+#ifdef CONFIG_LEGO_LUMP
+  /* step 1.5: LUMP UART (Issue #43) — UART4/5/7/8/9/10 at 0x90, the
+   * reserved slot directly below the OS tick (0x80) and above
+   * Bluetooth (0xA0).  pybricks puts these IRQs at preempt=0 (highest)
+   * so RX byte servicing is not held off; we compress that into 0x90
+   * within the BASEPRI band so NuttX-API calls from these ISRs remain
+   * safe.  All six are co-equal — none preempts any other.
+   */
+  up_prioritize_irq(STM32_IRQ_UART4,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_UART5,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_UART7,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_UART8,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_UART9,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+  up_prioritize_irq(STM32_IRQ_UART10,
+                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+#endif
+
   /* step 2: TLC5955 SPI1 + DMA (0xE0) */
   up_prioritize_irq(STM32_IRQ_SPI1,
                     NVIC_SYSH_PRIORITY_DEFAULT + 6 * NVIC_SYSH_PRIORITY_STEP);
@@ -298,6 +320,15 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: stm32_legoport_initialize() failed: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_LEGO_LUMP
+  ret = stm32_legoport_lump_register();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_legoport_lump_register() failed: %d\n",
+             ret);
     }
 #endif
 

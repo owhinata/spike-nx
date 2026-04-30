@@ -103,6 +103,13 @@ struct legoport_stats_s
 #define LEGOPORT_GET_STATS        _LEGOPORTIOC(0x0005) /* arg: struct legoport_stats_s* */
 #define LEGOPORT_RESET_STATS      _LEGOPORTIOC(0x0006) /* arg: 0 (clear max_step_us / max_interval_us) */
 
+/* LUMP UART engine diagnostics (Issue #43, CONFIG_LEGO_LUMP_DIAG only).
+ * Triggers a kernel-side `lump_uart_hw_dump()` that prints RCC / USART /
+ * NVIC register state to syslog for the 6 LUMP UARTs.  No arg.
+ */
+
+#define LEGOPORT_LUMP_HW_DUMP     _LEGOPORTIOC(0x0007)
+
 /* Pre-computed GPIO descriptors for one I/O port.  All entries except
  * `*_af` are NuttX `stm32_configgpio()` arguments — packed uint32_t with
  * mode/pull/speed/output/port/pin baked in.  `uart_tx_af` / `uart_rx_af`

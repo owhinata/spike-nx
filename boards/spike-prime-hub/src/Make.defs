@@ -63,3 +63,8 @@ endif
 ifeq ($(CONFIG_LEGO_PORT),y)
 CSRCS += stm32_legoport.c stm32_legoport_chardev.c
 endif
+
+ifeq ($(CONFIG_LEGO_LUMP),y)
+CSRCS += stm32_legoport_lump.c stm32_legoport_lump_table.c \
+         stm32_legoport_uart_hw.c
+endif

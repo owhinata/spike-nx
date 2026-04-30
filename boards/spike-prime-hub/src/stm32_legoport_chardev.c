@@ -26,6 +26,10 @@
 
 #include "spike_prime_hub.h"
 
+#ifdef CONFIG_LEGO_LUMP_DIAG
+#  include "stm32_legoport_uart_hw.h"
+#endif
+
 #ifdef CONFIG_LEGO_PORT
 
 #define LEGOPORT_MAX_POLLWAITERS  2
@@ -282,6 +286,12 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
       case LEGOPORT_RESET_STATS:
         stm32_legoport_reset_stats();
         return OK;
+
+#ifdef CONFIG_LEGO_LUMP_DIAG
+      case LEGOPORT_LUMP_HW_DUMP:
+        lump_uart_hw_dump();
+        return OK;
+#endif
 
       default:
         return -ENOTTY;

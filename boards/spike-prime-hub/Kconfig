@@ -36,3 +36,29 @@ config LEGO_PORT_DCM_NOOP
 		immediately without performing any GPIO work, but the HPWORK
 		invocation timing is still measured by stm32_legoport_get_stats().
 		Used to rule the DCM in or out of HPWORK contention bugs.
+
+config LEGO_LUMP
+	bool "LEGO LUMP UART protocol engine (Issue #43)"
+	default n
+	depends on LEGO_PORT
+	depends on ARCH_CHIP_STM32F413VG || ARCH_CHIP_STM32F413ZH
+	---help---
+		Per-port LUMP protocol kthread for the 6 SPIKE Prime Hub I/O
+		ports (UART7/4/8/5/10/9 for A..F).  Required by the upcoming
+		motor (#44) and sensor (#45) drivers.
+
+		Owns UART4/5/7/8/9/10 directly without going through the
+		standard NuttX serial driver — CONFIG_STM32_UARTn is NOT set
+		(it would auto-select STM32_UARTn_SERIALDRIVER and register
+		/dev/ttyS*).  RCC clocks and pin AF are enabled by the board
+		code (`stm32_legoport_uart_hw.c`) on per-port handoff.
+
+config LEGO_LUMP_DIAG
+	bool "LUMP diagnostics: lump-hw dump CLI subcommand"
+	default n
+	depends on LEGO_LUMP
+	---help---
+		Builds the `legoport lump-hw dump` debug command that reads
+		RCC APB1ENR / APB2ENR, USART BRR / CR1, and NVIC priority and
+		enable bits for all six LUMP UARTs.  Useful for bring-up and
+		regression diagnosis; leave off for production builds.

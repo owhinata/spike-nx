@@ -264,5 +264,18 @@ int stm32_legoport_initialize(void);
 int stm32_legoport_chardev_register(void);
 #endif
 
+#ifdef CONFIG_LEGO_LUMP
+/* Initialise the LUMP UART protocol engine (Issue #43).  Pre-creates
+ * 6 per-port kernel threads (sleeping), registers the DCM handoff
+ * callback for each port, and installs per-port watchdog timers.
+ * Must be called after `stm32_legoport_initialize()` so the DCM is
+ * already running and the handoff registry is alive.
+ *
+ * Returns 0 on success or a negated errno.  `-EALREADY` if called twice.
+ */
+
+int stm32_legoport_lump_register(void);
+#endif
+
 #endif /* __ASSEMBLY__ */
 #endif /* __BOARDS_SPIKE_PRIME_HUB_SRC_SPIKE_PRIME_HUB_H */
