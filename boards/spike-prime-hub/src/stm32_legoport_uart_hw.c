@@ -475,6 +475,15 @@ int lump_uart_write(int port, const uint8_t *buf, size_t len,
   return OK;
 }
 
+uint8_t lump_uart_get_ore_count(int port)
+{
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
+    {
+      return 0;
+    }
+  return g_lump_uart[port].ore_count;
+}
+
 void lump_uart_flush_rx(int port)
 {
   if (port < 0 || port >= BOARD_LEGOPORT_COUNT)

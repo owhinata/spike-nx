@@ -29,6 +29,10 @@
 
 #include <arch/board/board_legoport.h>
 
+#ifdef CONFIG_LEGO_LUMP
+#  include <arch/board/board_lump.h>
+#endif
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -260,6 +264,100 @@ static int do_stats(bool reset)
   return 0;
 }
 
+#ifdef CONFIG_LEGO_LUMP
+static const char * const g_lump_data_type_names[] =
+{
+  [LUMP_DATA_INT8]  = "INT8",
+  [LUMP_DATA_INT16] = "INT16",
+  [LUMP_DATA_INT32] = "INT32",
+  [LUMP_DATA_FLOAT] = "FLOAT",
+};
+
+static const char *lump_data_type_name(uint8_t t)
+{
+  if (t < sizeof(g_lump_data_type_names) /
+          sizeof(g_lump_data_type_names[0]))
+    {
+      return g_lump_data_type_names[t];
+    }
+  return "?";
+}
+
+static int do_lump_info(int port)
+{
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
+    {
+      printf("invalid port: %d\n", port);
+      return 1;
+    }
+
+  char path[24];
+  build_devpath(port, path, sizeof(path));
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    {
+      printf("cannot open %s: %d\n", path, errno);
+      return 1;
+    }
+
+  struct lump_device_info_s info;
+  if (ioctl(fd, LEGOPORT_LUMP_GET_INFO, (unsigned long)&info) < 0)
+    {
+      if (errno == EAGAIN)
+        {
+          printf("Port %c: not synced yet (engine in SYNCING/INFO/IDLE)\n",
+                 'A' + port);
+        }
+      else
+        {
+          printf("ioctl LUMP_GET_INFO failed: %d\n", errno);
+        }
+      close(fd);
+      return 1;
+    }
+  close(fd);
+
+  printf("Port %c LUMP info:\n", 'A' + port);
+  printf("  type_id:      %u\n", info.type_id);
+  printf("  num_modes:    %u\n", info.num_modes);
+  printf("  current_mode: %u\n", info.current_mode);
+  printf("  flags:        0x%02x %s%s%s\n",
+         info.flags,
+         (info.flags & LUMP_FLAG_SYNCED) ? "[SYNCED]" : "",
+         (info.flags & LUMP_FLAG_DATA_OK) ? "[DATA_OK]" : "",
+         (info.flags & LUMP_FLAG_ERROR) ? "[ERROR]" : "");
+  printf("  baud:         %lu\n", (unsigned long)info.baud);
+  if (info.fw_version || info.hw_version)
+    {
+      printf("  fw_version:   0x%08lx\n", (unsigned long)info.fw_version);
+      printf("  hw_version:   0x%08lx\n", (unsigned long)info.hw_version);
+    }
+
+  for (uint8_t m = 0; m < info.num_modes && m < LUMP_MAX_MODES; m++)
+    {
+      const struct lump_mode_info_s *mi = &info.modes[m];
+      printf("  mode %u  %-12s  %u x %s%s",
+             m,
+             mi->name[0] ? mi->name : "?",
+             mi->num_values,
+             lump_data_type_name(mi->data_type),
+             mi->writable ? "  writable" : "");
+      if (mi->units[0])
+        {
+          printf("  unit=%s", mi->units);
+        }
+      if (mi->raw_min != mi->raw_max)
+        {
+          printf("  raw=%g..%g",
+                 (double)mi->raw_min, (double)mi->raw_max);
+        }
+      printf("\n");
+    }
+
+  return 0;
+}
+#endif
+
 #ifdef CONFIG_LEGO_LUMP_DIAG
 static int do_lump_hw_dump(void)
 {
@@ -297,6 +395,10 @@ static void usage(void)
          "                       - block on connect edge\n");
   printf("  legoport stats       - HPWORK cadence stats\n");
   printf("  legoport stats reset - clear max_step_us / max_interval_us\n");
+#ifdef CONFIG_LEGO_LUMP
+  printf("  legoport lump info <N>\n"
+         "                       - dump LUMP device info (post-SYNC)\n");
+#endif
 #ifdef CONFIG_LEGO_LUMP_DIAG
   printf("  legoport lump-hw dump\n"
          "                       - dump RCC/USART/NVIC for 6 LUMP UARTs\n");
@@ -340,6 +442,23 @@ int main(int argc, FAR char *argv[])
       bool reset = (argc >= 3 && strcmp(argv[2], "reset") == 0);
       return do_stats(reset);
     }
+
+#ifdef CONFIG_LEGO_LUMP
+  if (strcmp(argv[1], "lump") == 0)
+    {
+      if (argc >= 3 && strcmp(argv[2], "info") == 0)
+        {
+          if (argc < 4)
+            {
+              usage();
+              return 1;
+            }
+          return do_lump_info(atoi(argv[3]));
+        }
+      usage();
+      return 1;
+    }
+#endif
 
 #ifdef CONFIG_LEGO_LUMP_DIAG
   if (strcmp(argv[1], "lump-hw") == 0)

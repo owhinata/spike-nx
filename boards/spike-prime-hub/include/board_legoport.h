@@ -110,6 +110,14 @@ struct legoport_stats_s
 
 #define LEGOPORT_LUMP_HW_DUMP     _LEGOPORTIOC(0x0007)
 
+/* LUMP UART engine info snapshot (Issue #43 Phase 2 onward).  Returns
+ * the per-port `lump_device_info_s` once the engine has reached the
+ * SYNCED state.  arg: `struct lump_device_info_s *`.  Returns -EAGAIN
+ * if not yet synced.  Defined in `board_lump.h`.
+ */
+
+#define LEGOPORT_LUMP_GET_INFO    _LEGOPORTIOC(0x0008)
+
 /* Pre-computed GPIO descriptors for one I/O port.  All entries except
  * `*_af` are NuttX `stm32_configgpio()` arguments — packed uint32_t with
  * mode/pull/speed/output/port/pin baked in.  `uart_tx_af` / `uart_rx_af`

@@ -30,6 +30,10 @@
 #  include "stm32_legoport_uart_hw.h"
 #endif
 
+#ifdef CONFIG_LEGO_LUMP
+#  include <arch/board/board_lump.h>
+#endif
+
 #ifdef CONFIG_LEGO_PORT
 
 #define LEGOPORT_MAX_POLLWAITERS  2
@@ -291,6 +295,28 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
       case LEGOPORT_LUMP_HW_DUMP:
         lump_uart_hw_dump();
         return OK;
+#endif
+
+#ifdef CONFIG_LEGO_LUMP
+      case LEGOPORT_LUMP_GET_INFO:
+        {
+          FAR struct lump_device_info_s *user =
+              (FAR struct lump_device_info_s *)arg;
+          struct lump_device_info_s info;
+
+          if (user == NULL)
+            {
+              return -EINVAL;
+            }
+
+          int rc = lump_get_info(priv->port, &info);
+          if (rc < 0)
+            {
+              return rc;
+            }
+          memcpy(user, &info, sizeof(info));
+          return OK;
+        }
 #endif
 
       default:

@@ -260,8 +260,21 @@ int stm32_btuart_chardev_register(FAR struct btuart_lowerhalf_s *lower);
  * polling loop at 2 ms cadence.
  */
 
+#include <arch/board/board_legoport.h>
+
 int stm32_legoport_initialize(void);
 int stm32_legoport_chardev_register(void);
+
+/* DCM handoff API used by the LUMP engine (Issue #43).  Per the
+ * contract in `board_legoport.h:154`, owners MUST call
+ * `stm32_legoport_release_uart(port)` from every exit path; the LUMP
+ * engine then re-registers the CB to accept the next handoff.
+ */
+
+int stm32_legoport_register_uart_handoff(int port,
+                                         legoport_uart_handoff_cb_t cb,
+                                         void *priv);
+int stm32_legoport_release_uart(int port);
 #endif
 
 #ifdef CONFIG_LEGO_LUMP

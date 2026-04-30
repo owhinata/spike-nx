@@ -37,12 +37,14 @@
 #define LUMP_UART_RXRING_SIZE   256u
 #define LUMP_UART_RXRING_MASK   (LUMP_UART_RXRING_SIZE - 1u)
 
-/* RX ISR coalescing threshold — bytes accumulated before posting the
- * kthread wakeup sem (or sooner on frame-end detection).  See plan
- * "Wake coalescing" section.
+/* RX ISR coalescing threshold.  Set to 1 so single-byte LUMP frames
+ * (SYS_SYNC, SYS_ACK, SYS_NACK) reliably wake the kthread — these end
+ * a sync stream and miss-waking on them stalls the engine.  The
+ * `post_pending` flag still bounds the sem-post rate to one per
+ * kthread service cycle, so coalescing still works under load.
  */
 
-#define LUMP_UART_RXRING_POST_THRESH   8u
+#define LUMP_UART_RXRING_POST_THRESH   1u
 
 /****************************************************************************
  * Public Types
@@ -128,6 +130,13 @@ void lump_uart_flush_rx(int port);
 
 void lump_uart_hw_dump(void);
 #endif
+
+/* Snapshot the per-port USART overrun counter (ISR detected ORE).  Used
+ * by the LUMP engine for diagnostic logging.  Returns 0 if `port` is
+ * out of range.
+ */
+
+uint8_t lump_uart_get_ore_count(int port);
 
 #endif /* CONFIG_LEGO_LUMP */
 #endif /* __BOARDS_SPIKE_PRIME_HUB_SRC_STM32_LEGOPORT_UART_HW_H */
