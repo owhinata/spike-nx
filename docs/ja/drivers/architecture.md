@@ -5,9 +5,9 @@
 ```
                     ユーザー空間
   ┌─────────────────────────────────────────────┐
-  │  /dev/legoport[0-5]    (ポートマネージャ)    │
-  │  /dev/legosensor[N]    (センサーデータ)      │
-  │  /dev/legomotor[N]     (モーター制御)        │
+  │  /dev/legoport[0-5]        (DCM)             │
+  │  /dev/uorb/sensor_lego[N]  (uORB センサー)   │
+  │  /dev/legomotor[N]         (モーター制御)    │
   └────────────┬───────────────┬────────────────┘
                │               │
            カーネル空間         │
@@ -39,14 +39,19 @@
 |---|---|---|
 | ポートマネージャ | `/dev/legoport0` 〜 `5` | ポート状態管理、デバイス検出通知 |
 
-### 動的デバイス (デバイス接続時に登録)
+### LUMP センサー uORB トピック (boot 時に登録)
+
+| デバイス | パス | 用途 |
+|---|---|---|
+| LUMP センサー | `/dev/uorb/sensor_lego0` 〜 `5` | LUMP プロトコルで流れる **全デバイス** (sensor + motor encoder telemetry) を 56 byte `struct lump_sample_s` envelope で publish。Issue #45 |
+
+接続なしポートも常時登録、`type_id=0,len=0` の sentinel sample で disconnect を通知 (subscriber fd の一貫性維持)。
+
+### 動的デバイス (将来)
 
 | デバイス | パス | 登録条件 |
 |---|---|---|
-| センサー | `/dev/legosensor0` 〜 | LUMP で非モーターデバイス検出時 |
-| モーター | `/dev/legomotor0` 〜 | LUMP でモーターデバイス検出時 |
-
-切断時に `unregister_driver()` で動的に削除。
+| モーター | `/dev/legomotor0` 〜 | LUMP でモーターデバイス検出時 (Issue #44) |
 
 ## 3. ホットプラグライフサイクル
 

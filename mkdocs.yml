@@ -61,6 +61,7 @@ nav:
       - drivers/implementation-plan.md
       - drivers/port-detection.md
       - drivers/lump-protocol.md
+      - drivers/sensor.md
       - drivers/motor-control.md
       - drivers/imu.md
       - drivers/led.md

@@ -5,9 +5,9 @@
 ```
                     User Space
   +---------------------------------------------+
-  |  /dev/legoport[0-5]    (Port Manager)        |
-  |  /dev/legosensor[N]    (Sensor Data)         |
-  |  /dev/legomotor[N]     (Motor Control)       |
+  |  /dev/legoport[0-5]         (DCM)            |
+  |  /dev/uorb/sensor_lego[N]   (uORB Sensor)    |
+  |  /dev/legomotor[N]          (Motor Control)  |
   +--------------+---------------+---------------+
                  |               |
              Kernel Space        |
@@ -39,14 +39,19 @@
 |---|---|---|
 | Port Manager | `/dev/legoport0` through `5` | Port state management, device detection notification |
 
-### Dynamic Devices (Registered on Device Connection)
+### LUMP Sensor uORB Topics (Registered at Boot)
+
+| Device | Path | Purpose |
+|---|---|---|
+| LUMP Sensor | `/dev/uorb/sensor_lego0` through `5` | Publishes a 56 byte `struct lump_sample_s` envelope for **every** LUMP-capable device (sensor + motor encoder telemetry).  Issue #45 |
+
+Topics stay registered even when the port is empty; disconnect is signalled with a `type_id=0,len=0` sentinel sample so subscriber fds remain stable.
+
+### Dynamic Devices (Future)
 
 | Device | Path | Registration Condition |
 |---|---|---|
-| Sensor | `/dev/legosensor0` and up | Non-motor device detected via LUMP |
-| Motor | `/dev/legomotor0` and up | Motor device detected via LUMP |
-
-Dynamically removed with `unregister_driver()` on disconnection.
+| Motor | `/dev/legomotor0` and up | Motor device detected via LUMP (Issue #44) |
 
 ## 3. Hot-Plug Lifecycle
 

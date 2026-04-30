@@ -11,7 +11,7 @@ Implementation plan for device drivers to control hardware on the SPIKE Prime Hu
 | 1 | I/O Port Detection (DCM) | `/dev/legoport[0-5]` | **Done** | GPIO, Issue #42 |
 | 2 | LUMP UART Protocol | (internal) + ioctl | **Done** | UART4/5/7/8/9/10, Issue #43, [lump-protocol.md](lump-protocol.md) |
 | 3 | H-Bridge Motor Control | `/dev/legomotor[N]` | **P0** | TIM1/3/4 PWM, Issue #44 |
-| 4 | Sensor Data Reading | `/dev/legosensor[N]` | **P1** | LUMP, Issue #45 |
+| 4 | Sensor Data Reading | `/dev/uorb/sensor_lego[N]` | **Done** | LUMP, Issue #45, [sensor.md](sensor.md) |
 | 5 | TLC5955 LED Driver | `/dev/leds` | **Done** | SPI1 |
 | 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **Done** | I2C2 |
 | 7 | DAC Audio | `/dev/tone0` + `/dev/pcm0` | **Done** | DAC1 + DMA1 + TIM6 |
@@ -62,11 +62,12 @@ PA13 (BAT_PWR_EN) and PA14 (PORT_3V3_EN) initialization is already implemented i
 
 ### Phase 2: Sensors and LEDs (P1)
 
-#### 2a. Sensor Data Reading
+#### 2a. Sensor Data Reading (Done, Issue #45)
 
-- Expose sensor data received during LUMP data phase via `/dev/legosensor[N]`
-- Mode switching via ioctl, data retrieval via read()
-- Supported: Color Sensor (Type 61), Ultrasonic Sensor (Type 62), Force Sensor (Type 63)
+- Sensor data received during the LUMP data phase is exposed through the **NuttX uORB sensor framework** at `/dev/uorb/sensor_lego[N]` (N=0..5).  See [sensor.md](sensor.md)
+- Fixed 56 byte `struct lump_sample_s` envelope plus a C union (`raw[32]/i8/i16/i32/f32`) absorbs the dynamic mode / data shape; consumers `switch` on `data_type` and access the typed view directly
+- Mode switching and writable-mode TX go through custom ioctls (`LEGOSENSOR_SELECT/SEND/CLAIM/RELEASE`); CLAIM/RELEASE arbitrates the control owner and is auto-released by `sensor_ops_s::close(filep)`
+- Supported: Color Sensor (Type 61), Ultrasonic Sensor (Type 62), Force Sensor (Type 63), and BOOST/Technic/SPIKE motor encoder telemetry (Type 38/46/47/48/49/65/75/76)
 
 #### 2b. TLC5955 LED Driver (Done)
 
