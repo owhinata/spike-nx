@@ -146,6 +146,12 @@ struct legoport_lump_send_arg_s
 
 #define LEGOPORT_LUMP_POLL_DATA   _LEGOPORTIOC(0x000B)
 
+/* Full per-port engine status (Issue #43 Phase 4).  arg:
+ * `struct lump_status_full_s *`.  Used by `legoport lump status`.
+ */
+
+#define LEGOPORT_LUMP_GET_STATUS_EX _LEGOPORTIOC(0x000C)
+
 /* Pre-computed GPIO descriptors for one I/O port.  All entries except
  * `*_af` are NuttX `stm32_configgpio()` arguments — packed uint32_t with
  * mode/pull/speed/output/port/pin baked in.  `uart_tx_af` / `uart_rx_af`

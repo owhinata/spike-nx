@@ -205,9 +205,9 @@ RESET -> SYNC_TYPE -> SYNC_MODES -> SYNC_DATA -> ACK -> DATA
 3. **Baud Rate Switching**: LUMP protocol requires dynamic switching such as 115200 -> 460800
 4. **Hot-Plug**: Detection -> UART communication -> disconnection detection -> re-detection loop runs in a persistent thread
 
-## 7. NuttX Implementation Status (Issue #42)
+## 7. NuttX Implementation Status (Issue #42 / #43 — both done)
 
-DCM (passive detection + UART handoff hook) is implemented (`feat/42-legoport-dcm` branch). The LUMP protocol itself is Issue #43.
+DCM (passive detection + UART handoff hook) was delivered in Issue #42.  The LUMP protocol engine was delivered in Issue #43 — see [lump-protocol.md](lump-protocol.md).
 
 ### Implementation Files
 

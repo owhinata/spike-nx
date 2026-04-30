@@ -358,6 +358,68 @@ static int do_lump_info(int port)
 }
 #endif
 
+static const char *lump_state_name(uint8_t s)
+{
+  static const char * const names[] =
+  {
+    [LUMP_ENGINE_IDLE]    = "IDLE",
+    [LUMP_ENGINE_SYNCING] = "SYNCING",
+    [LUMP_ENGINE_INFO]    = "INFO",
+    [LUMP_ENGINE_DATA]    = "DATA",
+    [LUMP_ENGINE_ERR]     = "ERR",
+  };
+  if (s < sizeof(names) / sizeof(names[0]) && names[s])
+    {
+      return names[s];
+    }
+  return "?";
+}
+
+static int do_lump_status(void)
+{
+  printf("Port  State    Type  Mode  Baud    RX(B)     TX(B)   "
+         "Drops  Backoff  StkHWM\n");
+  printf("----  -------  ----  ----  ------  --------  ------  "
+         "-----  -------  ----------\n");
+
+  for (int p = 0; p < BOARD_LEGOPORT_COUNT; p++)
+    {
+      char path[24];
+      build_devpath(p, path, sizeof(path));
+      int fd = open(path, O_RDONLY);
+      if (fd < 0)
+        {
+          printf("  %c   <open: %d>\n", 'A' + p, errno);
+          continue;
+        }
+
+      struct lump_status_full_s s;
+      if (ioctl(fd, LEGOPORT_LUMP_GET_STATUS_EX, (unsigned long)&s) < 0)
+        {
+          printf("  %c   <ioctl: %d>\n", 'A' + p, errno);
+          close(fd);
+          continue;
+        }
+      close(fd);
+
+      printf("  %c   %-7s  %3u   %3u   %6lu  %8lu  %6lu  %5lu  %7lu  "
+             "%4lu/%4lu\n",
+             'A' + p,
+             lump_state_name(s.state),
+             s.type_id,
+             s.current_mode,
+             (unsigned long)s.baud,
+             (unsigned long)s.rx_bytes,
+             (unsigned long)s.tx_bytes,
+             (unsigned long)s.dq_dropped,
+             (unsigned long)s.backoff_step,
+             (unsigned long)s.stk_used,
+             (unsigned long)s.stk_size);
+    }
+
+  return 0;
+}
+
 static int do_lump_set_mode(int port, int mode)
 {
   if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
@@ -564,6 +626,7 @@ static void usage(void)
   printf("  legoport stats       - HPWORK cadence stats\n");
   printf("  legoport stats reset - clear max_step_us / max_interval_us\n");
 #ifdef CONFIG_LEGO_LUMP
+  printf("  legoport lump status     - per-port engine state table\n");
   printf("  legoport lump info <N>\n"
          "                       - dump LUMP device info (post-SYNC)\n");
   printf("  legoport lump set-mode <N> <m>\n"
@@ -620,6 +683,10 @@ int main(int argc, FAR char *argv[])
 #ifdef CONFIG_LEGO_LUMP
   if (strcmp(argv[1], "lump") == 0)
     {
+      if (argc >= 3 && strcmp(argv[2], "status") == 0)
+        {
+          return do_lump_status();
+        }
       if (argc >= 3 && strcmp(argv[2], "info") == 0)
         {
           if (argc < 4)

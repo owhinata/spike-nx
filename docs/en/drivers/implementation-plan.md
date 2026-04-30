@@ -8,10 +8,10 @@ Implementation plan for device drivers to control hardware on the SPIKE Prime Hu
 
 | # | Driver | Device Path | Priority | Dependency |
 |---|---|---|---|---|
-| 1 | I/O Port Detection (DCM) | `/dev/legoport[0-5]` | **P0** | GPIO |
-| 2 | LUMP UART Protocol | (internal) | **P0** | UART4/5/7/8/9/10 |
-| 3 | H-Bridge Motor Control | `/dev/legomotor[N]` | **P0** | TIM1/3/4 PWM |
-| 4 | Sensor Data Reading | `/dev/legosensor[N]` | **P1** | LUMP |
+| 1 | I/O Port Detection (DCM) | `/dev/legoport[0-5]` | **Done** | GPIO, Issue #42 |
+| 2 | LUMP UART Protocol | (internal) + ioctl | **Done** | UART4/5/7/8/9/10, Issue #43, [lump-protocol.md](lump-protocol.md) |
+| 3 | H-Bridge Motor Control | `/dev/legomotor[N]` | **P0** | TIM1/3/4 PWM, Issue #44 |
+| 4 | Sensor Data Reading | `/dev/legosensor[N]` | **P1** | LUMP, Issue #45 |
 | 5 | TLC5955 LED Driver | `/dev/leds` | **Done** | SPI1 |
 | 6 | IMU (LSM6DS3TR-C) | `/dev/imu0` | **Done** | I2C2 |
 | 7 | DAC Audio | `/dev/tone0` + `/dev/pcm0` | **Done** | DAC1 + DMA1 + TIM6 |
@@ -46,12 +46,13 @@ PA13 (BAT_PWR_EN) and PA14 (PORT_3V3_EN) initialization is already implemented i
 - Stable detection (20 consecutive matches = approx. 400ms) to confirm device type
 - Polling implemented via NuttX HPWORK queue
 
-#### 1c. LUMP UART Protocol
+#### 1c. LUMP UART Protocol (Done, Issue #43)
 
-- Implementation of LEGO UART Messaging Protocol
-- Sync phase: 2400 baud -> device mode info acquisition -> switch to 115200 baud
-- Data phase: periodic data reception + keep-alive (200ms)
-- State machine driven by dedicated kernel thread
+- Full LEGO UART Messaging Protocol implementation. Details in [lump-protocol.md](lump-protocol.md).
+- Sync phase: 115200 baud SPEED probe → 2400 fallback if no ACK → CMD_TYPE → INFO frames → SYS_ACK → 10ms wait → negotiated baud (typically 115200)
+- Data phase: 100 ms `SYS_NACK` keepalive + DATA frame reception (~100 Hz/port)
+- Six kthreads pre-created at boot; DCM handoff CB only does `nxsem_post()` to wake them
+- Per-port watchdog (2 s) + capped exp backoff (100ms→1s→5s→30s) for disconnect / recovery
 
 #### 1d. H-Bridge Motor Control
 

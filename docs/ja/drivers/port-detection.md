@@ -205,9 +205,9 @@ RESET → SYNC_TYPE → SYNC_MODES → SYNC_DATA → ACK → DATA
 3. **ボーレート切替**: LUMP プロトコルで 115200 → 460800 等の動的切替が必要
 4. **ホットプラグ**: 検出 → UART 通信 → 切断検出 → 再検出のループを永続スレッドで実行
 
-## 7. NuttX 実装ステータス (Issue #42)
+## 7. NuttX 実装ステータス (Issue #42 / #43 完了)
 
-DCM (パッシブ検出 + UART ハンドオフフック) は実装済 (`feat/42-legoport-dcm` ブランチ)。LUMP プロトコル本体は Issue #43 で別途実装。
+DCM (パッシブ検出 + UART ハンドオフフック) は Issue #42 で実装済。LUMP プロトコルエンジン本体は Issue #43 で実装済 — 詳細は [lump-protocol.md](lump-protocol.md)。
 
 ### 実装ファイル
 
@@ -255,4 +255,4 @@ CB 未登録 or 失敗時は `LATCHED_UART_UNOWNED_IDLE` で 100 ms ごとにフ
 - [pybricks/technical-info UART Protocol](https://github.com/pybricks/technical-info/blob/master/uart-protocol.md)
 - [ev3dev UART Sensor Protocol](http://docs.ev3dev.org/projects/lego-linux-drivers/en/ev3dev-stretch/sensors.html)
 - `pybricks/lib/pbio/drv/legodev/legodev_pup.c` -- ポートレベルドライバ (DCM 移植元)
-- `pybricks/lib/pbio/drv/legodev/legodev_pup_uart.c` -- LUMP UART プロトコル (1265 行、#43 で移植予定)
+- `pybricks/lib/pbio/drv/legodev/legodev_pup_uart.c` -- LUMP UART プロトコル (1265 行、#43 で移植済)

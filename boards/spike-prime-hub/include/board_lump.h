@@ -97,6 +97,40 @@ struct lump_data_frame_s
 
 #define LUMP_DATA_QUEUE   16    /* engine-side DATA frame ring depth */
 
+/* Per-port engine state codes — surfaced via `lump_status_full_s::state`
+ * (Issue #43 Phase 4).  Useful for `legoport lump status` table.
+ */
+
+enum lump_engine_state_e
+{
+  LUMP_ENGINE_IDLE     = 0,  /* waiting for handoff */
+  LUMP_ENGINE_SYNCING  = 1,  /* CMD SPEED probe, waiting for CMD_TYPE */
+  LUMP_ENGINE_INFO     = 2,  /* reading INFO frames */
+  LUMP_ENGINE_DATA     = 3,  /* SYNCED, DATA loop active */
+  LUMP_ENGINE_ERR      = 4,  /* transient error — going through backoff */
+};
+
+/* Full per-port status snapshot returned by `LEGOPORT_LUMP_GET_STATUS_EX`
+ * ioctl (Issue #43 Phase 4).  Packs everything the `legoport lump status`
+ * CLI needs for the per-port summary table — engine state, baud, mode,
+ * traffic counters, error counts, drop count, kthread stack high-water.
+ */
+
+struct lump_status_full_s
+{
+  uint8_t  state;           /* enum lump_engine_state_e */
+  uint8_t  flags;           /* LUMP_FLAG_* */
+  uint8_t  type_id;
+  uint8_t  current_mode;
+  uint32_t baud;
+  uint32_t rx_bytes;
+  uint32_t tx_bytes;
+  uint32_t backoff_step;    /* 0..LUMP_BACKOFF_MAX */
+  uint32_t dq_dropped;      /* DATA-frame ring overflow drops */
+  uint32_t stk_used;        /* kthread stack high-water in bytes */
+  uint32_t stk_size;        /* configured kthread stack bytes */
+};
+
 /* Callback invoked once on SYNCING -> DATA transition.  `info` is owned
  * by the engine and remains valid until the next SYNC cycle on the same
  * port.  Caller may snapshot fields they need.
@@ -169,5 +203,9 @@ int lump_get_info(int port, struct lump_device_info_s *out);
 int lump_get_status(int port, uint8_t *flags_out,
                     uint32_t *rx_bytes_out,
                     uint32_t *tx_bytes_out);
+
+/* Phase 4: full status snapshot used by `legoport lump status` CLI. */
+
+int lump_get_status_full(int port, struct lump_status_full_s *out);
 
 #endif /* __BOARDS_SPIKE_PRIME_HUB_INCLUDE_BOARD_LUMP_H */

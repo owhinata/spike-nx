@@ -41,8 +41,10 @@
 #include <nuttx/clock.h>
 #include <nuttx/kthread.h>
 #include <nuttx/mutex.h>
+#include <nuttx/sched.h>
 #include <nuttx/semaphore.h>
 #include <nuttx/signal.h>
+#include <nuttx/wdog.h>
 
 #include <arch/board/board.h>
 #include <arch/board/board_legoport.h>
@@ -121,6 +123,17 @@
 #define LUMP_IO_TIMEOUT_MS         250u
 #define LUMP_ACK_BAUD_DELAY_MS     10u
 #define LUMP_KEEPALIVE_MS          100u
+
+#define LUMP_DATA_RECV_SLICE_MS    20u
+#define LUMP_DATA_MISS_LIMIT       6u  /* 6 missed keepalives = ~600 ms */
+
+/* Per-port watchdog timeout.  Worst case for one DATA-loop iteration is
+ * the recv_msg slice (~20 ms) + a full padded frame (35 bytes × 20 ms
+ * timeout each at slow line = ~700 ms) + keepalive TX (~50 ms) + TX
+ * drain.  2 seconds gives a comfortable margin.
+ */
+
+#define LUMP_WATCHDOG_MS           2000u
 
 /* Baud rate band (pybricks `EV3_UART_SPEED_*`). */
 
@@ -242,6 +255,16 @@ struct lump_engine_s
   bool     cb_attached;
   bool     in_callback;
   struct lump_callbacks_s cb;
+
+  /* Phase 4: per-port watchdog supervisor.  Pets on each DATA-loop
+   * iteration; if the kthread stalls > LUMP_WATCHDOG_MS, the wdog
+   * callback (IRQ context) sets `wdog_stall` + posts the wakeup sem,
+   * and the kthread context handles release/register/backoff (no
+   * release_uart from IRQ context per the plan).
+   */
+
+  struct wdog_s wdog;
+  volatile bool wdog_stall;
 
   /* Stats */
 
@@ -1174,6 +1197,32 @@ static int lump_sync(struct lump_engine_s *e)
 }
 
 /****************************************************************************
+ * Watchdog supervisor — Phase 4
+ *
+ * Pets per DATA-loop iteration; on stall, fires from the system timer
+ * IRQ context and just sets a flag + posts the wakeup sem so the
+ * kthread can run release/register/backoff in thread context.
+ ****************************************************************************/
+
+static void lump_wdog_handler(wdparm_t arg)
+{
+  struct lump_engine_s *e = (struct lump_engine_s *)arg;
+  e->wdog_stall = true;
+  nxsem_post(&e->wakeup);
+}
+
+static inline void lump_wdog_pet(struct lump_engine_s *e)
+{
+  wd_start(&e->wdog, MSEC2TICK(LUMP_WATCHDOG_MS),
+           lump_wdog_handler, (wdparm_t)e);
+}
+
+static inline void lump_wdog_cancel(struct lump_engine_s *e)
+{
+  wd_cancel(&e->wdog);
+}
+
+/****************************************************************************
  * DATA loop — Phase 3: receive DATA frames, send keepalive, drain TX queue
  ****************************************************************************/
 
@@ -1307,8 +1356,9 @@ static int lump_drain_tx_requests(struct lump_engine_s *e)
   return OK;
 }
 
-#define LUMP_DATA_RECV_SLICE_MS  20u
-#define LUMP_DATA_MISS_LIMIT     6u    /* 6 missed keepalives = ~600 ms */
+/* (DATA-loop / watchdog constants moved to the file-scope #define block
+ * near the top of the file so the wdog handler can reference them.)
+ */
 
 static int lump_data_loop(struct lump_engine_s *e)
 {
@@ -1322,8 +1372,26 @@ static int lump_data_loop(struct lump_engine_s *e)
   uint8_t  miss_count     = 0;
   bool     data_rec       = false;
 
+  /* Phase 4: arm the per-port watchdog and pet on each iteration. */
+
+  e->wdog_stall = false;
+  lump_wdog_pet(e);
+
   for (;;)
     {
+      /* Stall detected by wdog (IRQ ctx) — exit the loop so the
+       * kthread can run release/register/backoff.
+       */
+
+      if (e->wdog_stall)
+        {
+          syslog(LOG_WARNING,
+                 "lump: port %c: watchdog stall, resetting session\n",
+                 'A' + e->port);
+          lump_wdog_cancel(e);
+          return -ETIMEDOUT;
+        }
+
       /* Try to read one frame within a short slice — we want the loop
        * to come around to the keepalive / TX-drain checks at least
        * every ~20 ms even if no DATA frames are arriving.
@@ -1360,12 +1428,14 @@ static int lump_data_loop(struct lump_engine_s *e)
               nxmutex_lock(&e->info_lock);
               e->info.flags &= (uint8_t)~LUMP_FLAG_DATA_OK;
               nxmutex_unlock(&e->info_lock);
+              lump_wdog_cancel(e);
               return -ETIMEDOUT;
             }
 
           int wret = lump_send_sys(e, LUMP_SYS_NACK);
           if (wret < 0)
             {
+              lump_wdog_cancel(e);
               return wret;
             }
           last_keepalive = now;
@@ -1377,6 +1447,7 @@ static int lump_data_loop(struct lump_engine_s *e)
       ret = lump_drain_tx_requests(e);
       if (ret < 0)
         {
+          lump_wdog_cancel(e);
           return ret;
         }
 
@@ -1384,8 +1455,21 @@ static int lump_data_loop(struct lump_engine_s *e)
 
       if (nxsem_trywait(&e->wakeup) == OK)
         {
+          /* Could be wdog stall (set flag), genuine reset, or stale
+           * post — wdog flag check at loop top handles the wdog case.
+           */
+
+          if (e->wdog_stall)
+            {
+              continue;
+            }
+          lump_wdog_cancel(e);
           return -EINTR;
         }
+
+      /* Pet the watchdog before going around again. */
+
+      lump_wdog_pet(e);
     }
 }
 
@@ -1470,13 +1554,17 @@ static int lump_kthread_entry(int argc, FAR char *argv[])
 
       /* 3. Tear down: close USART, give pins back to DCM, re-register
        *    the handoff so the next plug-in cycles us back here.
+       *    Mark the engine state as ERR so `lump status` reflects the
+       *    transient post-session period instead of stale DATA.
        */
+
+      e->state = LUMP_ST_ERR;
 
       lump_uart_close(e->port);
       stm32_legoport_release_uart(e->port);
 
       nxmutex_lock(&e->info_lock);
-      e->info.flags = 0;  /* clear SYNCED, etc. */
+      e->info.flags = 0;  /* clear SYNCED / DATA_OK */
       nxmutex_unlock(&e->info_lock);
 
       stm32_legoport_register_uart_handoff(e->port, lump_handoff_cb, e);
@@ -1505,6 +1593,13 @@ static int lump_kthread_entry(int argc, FAR char *argv[])
         }
 
       nxsig_usleep(sleep_ms * 1000);
+
+      /* Backoff complete — engine is now idle, waiting for the next
+       * handoff sem post.  `lump_reset_session_state` will set IDLE
+       * again at the top of the next iteration.
+       */
+
+      e->state = LUMP_ST_IDLE;
     }
 
   return 0;
@@ -1561,6 +1656,56 @@ int lump_get_status(int port, uint8_t *flags_out,
     {
       *tx_bytes_out = e->tx_bytes;
     }
+
+  return OK;
+}
+
+int lump_get_status_full(int port, struct lump_status_full_s *out)
+{
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT || out == NULL)
+    {
+      return -EINVAL;
+    }
+
+  struct lump_engine_s *e = &g_lump[port];
+
+  memset(out, 0, sizeof(*out));
+
+  nxmutex_lock(&e->info_lock);
+  out->state        = (uint8_t)e->state;
+  out->flags        = e->info.flags;
+  out->type_id      = e->info.type_id;
+  out->current_mode = e->info.current_mode;
+  out->baud         = e->info.baud;
+  nxmutex_unlock(&e->info_lock);
+
+  out->rx_bytes     = e->rx_bytes;
+  out->tx_bytes     = e->tx_bytes;
+  out->backoff_step = e->backoff_step;
+
+  nxmutex_lock(&e->dq_lock);
+  out->dq_dropped   = e->dq_dropped;
+  nxmutex_unlock(&e->dq_lock);
+
+  /* Stack high-water — needs CONFIG_STACK_COLORATION (set in defconfig).
+   * `up_check_tcbstack(tcb, full_size)` walks from the stack base up,
+   * skipping the still-poisoned bottom and returning the deepest the
+   * stack ever grew (bytes used).  Passing 0 returns 0, so we have to
+   * give it the full allocation size.
+   */
+
+#ifdef CONFIG_STACK_COLORATION
+  if (e->kthread > 0)
+    {
+      FAR struct tcb_s *tcb = nxsched_get_tcb(e->kthread);
+      if (tcb != NULL)
+        {
+          out->stk_size = (uint32_t)tcb->adj_stack_size;
+          out->stk_used = (uint32_t)up_check_tcbstack(tcb,
+                                                     tcb->adj_stack_size);
+        }
+    }
+#endif
 
   return OK;
 }

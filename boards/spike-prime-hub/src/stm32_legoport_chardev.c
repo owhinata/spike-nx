@@ -355,6 +355,26 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
           memcpy(user, &frame, sizeof(frame));
           return OK;
         }
+
+      case LEGOPORT_LUMP_GET_STATUS_EX:
+        {
+          FAR struct lump_status_full_s *user =
+              (FAR struct lump_status_full_s *)arg;
+          struct lump_status_full_s status;
+
+          if (user == NULL)
+            {
+              return -EINVAL;
+            }
+
+          int rc = lump_get_status_full(priv->port, &status);
+          if (rc < 0)
+            {
+              return rc;
+            }
+          memcpy(user, &status, sizeof(status));
+          return OK;
+        }
 #endif
 
       default:
