@@ -227,37 +227,39 @@ Expired requests are silently dropped.
 
 ### 4.4 SET_PWM (LED / motor PWM)
 
-| Class | Implemented | Backend | Channel meaning |
+| Class | Implemented | Alternative / Backend | Channel meaning |
 |---|---|---|---|
-| COLOR | ✅ | LUMP writable mode "LIGHT" (mode index resolved from info_cache by name) | channels[0..2] = LED 0..2 brightness 0..10000 (.01 % units) |
-| ULTRASONIC | ✅ | same | channels[0..3] = eye LED 0..3 brightness 0..10000 |
+| COLOR | `-ENOTSUP` (Issue #92) | use `LEGOSENSOR_SEND mode=3` (LIGHT, 3×INT8 PCT) directly | — |
+| ULTRASONIC | `-ENOTSUP` (Issue #92) | use `LEGOSENSOR_SEND mode=5` (LIGHT, 4×INT8 PCT) directly | — |
 | FORCE | `-ENOTSUP` (permanent) | — | no actuator on the device |
-| MOTOR_M / R / L | `-ENOTSUP` (this release) | (STM32 TIM PWM, lands with Issue #80) | channels[0] = signed duty -10000..10000 |
+| MOTOR_M / R / L | `-ENOTSUP` (this release) | STM32 TIM PWM (lands with Issue #80) | channels[0] = signed duty -10000..10000 |
 
-LIGHT-mode resolution and payload conversion:
+**SET_PWM semantics**: reserved for **H-bridge physical PWM** (motors).
+LIGHT-mode brightness on COLOR / ULTRASONIC is a writable-mode WRITE,
+not PWM in the H-bridge sense, so it has been removed from SET_PWM in
+Issue #92.  Callers should use `LEGOSENSOR_SEND` (mode=3 for COLOR,
+mode=5 for ULTRASONIC) directly.  Brightness payload is INT8 PCT
+(0..100) per channel.
 
-- On `on_sync` the driver scans `info_cache.modes[]` for the writable
-  entry whose `name == "LIGHT"`, validates the shape (color = INT8 × 3,
-  ultrasonic = INT8 × 4), and caches the index in `light_mode_idx`.
-  Mismatched shape → `light_mode_idx = -1`, SET_PWM returns `-ENOTSUP`
-- **Payload conversion**: `channels[i]` (0..10000) is quantised to a
-  percent (0..100 in INT8) using
-  `(channels[i] * 100 + 5000) / 10000` (mid-point round-up)
-- The frame goes out via `lump_send_data(port, light_mode_idx,
-  payload, num_channels)`
-- `lump_send_data` queues `CMD SELECT light_mode_idx` ahead of the
-  DATA frame whenever `current_mode != light_mode_idx` (Issue #92), so
-  the engine's `current_mode` ends up aligned with LIGHT.  The earlier
+LIGHT writes via `LEGOSENSOR_SEND` (Issue #92):
+
+- The user app sends a `legosensor_send_arg_s` with `mode = 3` for
+  COLOR or `mode = 5` for ULTRASONIC and one INT8 PCT byte per LED
+  in `data[0..N-1]` (range 0..100, no scaling on the kernel side).
+- `lump_send_data(port, mode, data, len)` is the engine entry point.
+  When `current_mode != mode` it queues `CMD SELECT mode` ahead of
+  the DATA frame in the same drain pass, so the engine's
+  `current_mode` ends up aligned with LIGHT.  The earlier
   implementation skipped SELECT and relied on "writable-mode SEND is
   independent of the active SELECT" — but the SPIKE Color Sensor's
-  firmware-driven auto-LED policy overrides any LIGHT value written in
-  another mode, so pre-SELECTing is needed to make the brightness
-  actually stick.  Behaviour now matches pybricks' send-thread
-  (SELECT → wait → WRITE)
-- (Historical note) The LUMP wire format itself does allow a writable-
-  mode WRITE without a preceding SELECT — that path is what the engine
-  was originally relying on.  Color Sensor firmware quirks are the
-  reason we no longer use it
+  firmware-driven auto-LED policy overrides any LIGHT value written
+  in another mode, so pre-SELECTing is needed to make the
+  brightness actually stick.  Behaviour now matches pybricks' send-
+  thread (SELECT → wait → WRITE).
+- (Historical note) The LUMP wire format itself does allow a
+  writable-mode WRITE without a preceding SELECT — that path is what
+  the engine was originally relying on.  Color/Ultrasonic firmware
+  quirks are the reason we no longer use it.
 
 > **Physical LED illumination depends on the H-bridge supply pin
 > (lands with Issue #80).**
@@ -267,10 +269,10 @@ LIGHT-mode resolution and payload conversion:
 > `-MAX_DUTY` after SYNC to power the device's LEDs (see the pybricks
 > reference at `pbio/drv/legodev/legodev_pup_uart.c:894-900` and the
 > capability map at `legodev_spec.c:201-208`).  This release (#79)
-> does not yet ship the H-bridge driver, so `LEGOSENSOR_SET_PWM`
-> emits the LUMP LIGHT frame onto the wire (visible as `tx_bytes`
-> growth) but **the physical LED stays dark for lack of supply
-> voltage**.  Once Issue #80 lands, the H-bridge will be driven
+> does not yet ship the H-bridge driver, so `LEGOSENSOR_SEND` for
+> mode=LIGHT emits the LUMP frame onto the wire (visible as
+> `tx_bytes` growth) but **the physical LED stays dark for lack of
+> supply voltage**.  Once Issue #80 lands, the H-bridge will be driven
 > automatically on SYNC and the brightness commanded here will
 > also light the LEDs.
 
@@ -323,6 +325,30 @@ array" but **not** for "dim the measurement-mode LEDs of mode 5/6/etc"
 Standard NuttX "mechanism in kernel, policy in userspace".
 Subscribers may still call SELECT / SET_PWM directly if they want
 finer control — the helper library is convenience, not enforcement.
+
+### 4.7 SPIKE Ultrasonic Sensor modes (45604)
+
+The LEGO marketing spec quotes 100 Hz sample rate but it isn't carried
+in LUMP info; firmware output rate varies per mode (Issue #92 observed
+~110 fps in motion, ~67 fps stationary on mode 5).
+
+| mode | Name | Size | pybricks API | Purpose |
+|---|---|---|---|---|
+| 0 | DISTL | 1×INT16 | `distance` | distance (cm), long range |
+| 1 | DISTS | 1×INT16 | — | short-range distance (pybricks unused) |
+| 2 | SINGL | 1×INT16 | — | single-ping distance (pybricks unused) |
+| 3 | LISTN | 1×INT8 | `presence` | other-ultrasonic-signal detection (0/1) |
+| 4 | TRAW | 1×INT32 | — | raw time-of-flight (pybricks unused) |
+| 5 | LIGHT | 4×INT8 (writable) | `lights` | 4 eye-LED brightness (0..100 %) |
+| 6 | PING | 1×INT8 (writable, raw 0..1) | — | pybricks marks this "??" (`legodev.h:333`).  Hardware INFO confirms **writable + raw 0..1 + unit PCT** (`sensor ultrasonic info` 2026-05-02), strongly suggesting "fire one ping" trigger semantics (write 1 = fire, 0 = idle).  pybricks does not invoke it, side-effects unverified — leave alone unless explicitly needed |
+| 7 | ADRAW | 1×INT16 | — | raw ADC value (pybricks unused) |
+| 8 | CALIB | 7×INT16 | — | calibration (pybricks unused) |
+
+Port supply: same as COLOR — `NEEDS_SUPPLY_PIN1`, the H-bridge must be
+driven `-MAX_DUTY` after SYNC to power the LEDs (Issue #80).
+LIGHT-mode brightness is assumed to follow the same firmware-gating
+behaviour as COLOR (only effective while mode 5 is the active SELECT —
+hypothesis A in §4.5); ULTRASONIC re-verification is still TODO.
 
 ## 5. CLI (`sensor`)
 

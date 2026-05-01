@@ -177,24 +177,24 @@ driver 側は per-port mutex 下で `pending_select_mode` + `pending_select_dead
 
 ### 4.4 SET_PWM (LED / motor PWM)
 
-| Class | 実装 | バックエンド | values 意味 |
+| Class | 実装 | 代替手段 / バックエンド | values 意味 |
 |---|---|---|---|
-| COLOR | ✅ | LUMP writable mode "LIGHT" (mode index は info_cache から `name == "LIGHT"` を検索してキャッシュ) | channels[0..2] = LED 0..2 brightness 0..10000 (.01 % 単位) |
-| ULTRASONIC | ✅ | 同上 | channels[0..3] = eye LED 0..3 brightness 0..10000 |
+| COLOR | `-ENOTSUP` (Issue #92) | `LEGOSENSOR_SEND mode=3` (LIGHT、3×INT8 PCT) を直接使う | — |
+| ULTRASONIC | `-ENOTSUP` (Issue #92) | `LEGOSENSOR_SEND mode=5` (LIGHT、4×INT8 PCT) を直接使う | — |
 | FORCE | `-ENOTSUP` (恒久) | — | アクチュエータなし |
-| MOTOR_M / R / L | `-ENOTSUP` (本リリース段階) | (LUMP ではなく STM32 TIM PWM、Issue #80 で実装) | channels[0] = signed duty -10000..10000 |
+| MOTOR_M / R / L | `-ENOTSUP` (本リリース段階) | LUMP ではなく STM32 TIM PWM、Issue #80 で実装 | channels[0] = signed duty -10000..10000 |
 
-LIGHT mode 解決と payload 変換:
+**SET_PWM の意味付け**: H-bridge ベースの物理 PWM 専用 (motor 系)。LIGHT 系 (COLOR / ULTRASONIC) は LUMP writable mode への WRITE であって PWM ではないので SET_PWM 経路から外し、SEND を直に叩く形に統一した (Issue #92)。LIGHT mode の brightness は INT8 PCT (0..100) なので、`LEGOSENSOR_SEND` の `data[0..N]` にそれぞれ 0..100 を入れる。
 
-- `on_sync` 時に `info_cache.modes[i].name == "LIGHT"` を走査して `light_mode_idx` にキャッシュ。同時に該当 mode の shape を検証 (color = INT8 × 3、ultrasonic = INT8 × 4)。一致しない場合は `light_mode_idx = -1`、SET_PWM は `-ENOTSUP`
-- **payload 変換**: `channels[i]` (0..10000) を percent (0..100, INT8) に量子化 — `(channels[i] * 100 + 5000) / 10000` (中点四捨五入)
-- `lump_send_data(port, light_mode_idx, payload, num_channels)` で送信
-- `lump_send_data` は `current_mode != light_mode_idx` のときに `CMD SELECT light_mode_idx` を **同じドレインパスで先送り** してから DATA を流す (Issue #92)。これにより `current_mode` も LIGHT 側に揃う — 古い実装は SELECT を呼ばず "writable mode SEND は active SELECT 独立" を利用していたが、SPIKE Color Sensor の firmware 自動 LED 制御の都合で SELECT 経由にした方が pybricks 流儀と合致する
-- (旧仕様メモ) LUMP プロトコル仕様としては writable mode への SEND は active SELECT mode から独立しており、SELECT を打たずに LED brightness を書くことも理論上は可能。ただし SPIKE Color Sensor の firmware は SELECT 通知に対して自動 LED 制御を被せてくるため、SELECT を経由しないと LIGHT 値が即上書きされて意味を成さない
+LIGHT 書込み (`LEGOSENSOR_SEND` 経由、Issue #92):
+
+- `legosensor_send_arg_s` に `mode = 3` (COLOR) または `mode = 5` (ULTRASONIC) と、LED 1 個あたり INT8 PCT (0..100) を 1 byte ずつ `data[0..N-1]` に積んで `LEGOSENSOR_SEND` ioctl を発行する。kernel 側でのスケーリングは無し
+- engine entry は `lump_send_data(port, mode, data, len)`。`current_mode != mode` のときに `CMD SELECT mode` を **同じドレインパスで先送り** してから DATA を流す (Issue #92)。これにより `current_mode` も LIGHT 側に揃う — 古い実装は SELECT を呼ばず "writable mode SEND は active SELECT 独立" を利用していたが、SPIKE Color Sensor の firmware 自動 LED 制御の都合で SELECT 経由にした方が pybricks 流儀と合致する
+- (旧仕様メモ) LUMP プロトコル仕様としては writable mode への SEND は active SELECT mode から独立しており、SELECT を打たずに LED brightness を書くことも理論上は可能。ただし Color / Ultrasonic の firmware は SELECT 通知に対して自動 LED 制御を被せてくるため、SELECT を経由しないと LIGHT 値が即上書きされて意味を成さない
 
 > **物理 LED 点灯は H-bridge supply pin に依存 (Issue #80 で実装)**
 >
-> SPIKE Color Sensor (`NEEDS_SUPPLY_PIN1`) と Ultrasonic Sensor (`NEEDS_SUPPLY_PIN1`) は SYNC 完了後に H-bridge を `-MAX_DUTY` で駆動して LED に電源を供給する必要がある (pybricks 参考実装: `pbio/drv/legodev/legodev_pup_uart.c:894-900`、capability map: `legodev_spec.c:201-208`)。本リリース (#79) では H-bridge driver が未実装のため、`LEGOSENSOR_SET_PWM` は LUMP LIGHT frame を wire 上に送出する (`tx_bytes` で確認可能) が **物理 LED は電源供給がないため点灯しない**。Issue #80 の H-bridge driver が landed すると、SYNC 後に該当 port の supply pin が自動駆動され、本 ioctl の brightness 設定が物理的にも反映される想定。
+> SPIKE Color Sensor (`NEEDS_SUPPLY_PIN1`) と Ultrasonic Sensor (`NEEDS_SUPPLY_PIN1`) は SYNC 完了後に H-bridge を `-MAX_DUTY` で駆動して LED に電源を供給する必要がある (pybricks 参考実装: `pbio/drv/legodev/legodev_pup_uart.c:894-900`、capability map: `legodev_spec.c:201-208`)。本リリース (#79) では H-bridge driver が未実装のため、`LEGOSENSOR_SEND mode=LIGHT` は LUMP frame を wire 上に送出する (`tx_bytes` で確認可能) が **物理 LED は電源供給がないため点灯しない**。Issue #80 の H-bridge driver が landed すると、SYNC 後に該当 port の supply pin が自動駆動され、本 ioctl の brightness 設定が物理的にも反映される想定。
 
 ### 4.5 SPIKE Color Sensor の自動 LED 制御 (実機観測)
 
@@ -230,6 +230,24 @@ SPIKE Color Sensor (type_id=61) は SELECT を受け取るたびに firmware 側
 | **userspace ヘルパライブラリ (#78、別 Issue)** | firmware の既定 policy を**上書き**したい場合の被せ層。例: 「mode 0 でも LED を消したい」「mode 3 で常時 50% で点けっぱなしにする」等を `legolib_color_*` 系 API でカプセル化 | firmware が既に "正しい" LED 制御をしているので、#78 はあくまで override 用途。デフォで十分なら #78 を経由しなくて良い |
 
 NuttX 流の "mechanism in kernel, policy in userspace" を踏襲。subscriber が直接 SELECT / SET_PWM を叩くのも引き続き OK (ライブラリは convenience で、enforce ではない)。
+
+### 4.7 SPIKE Ultrasonic Sensor modes (45604)
+
+LEGO 公式 spec PDF (`techspecs_techniccolorsensor.pdf` の姉妹版) では 100 Hz の sample rate を謳っているが、LUMP info にこのレートは encode されておらず、firmware の実出力を観測すると mode によってバラつく (動きあり ~110 fps、静止 ~67 fps、Issue #92 で計測)。
+
+| mode | 名称 | サイズ | pybricks API | 用途 |
+|---|---|---|---|---|
+| 0 | DISTL | 1×INT16 | `distance` | 距離 (cm)、long range |
+| 1 | DISTS | 1×INT16 | — | 距離 short range (pybricks 未使用) |
+| 2 | SINGL | 1×INT16 | — | single-ping 距離 (pybricks 未使用) |
+| 3 | LISTN | 1×INT8 | `presence` | 他超音波信号の検知 (0/1) |
+| 4 | TRAW | 1×INT32 | — | raw time-of-flight (pybricks 未使用) |
+| 5 | LIGHT | 4×INT8 (writable) | `lights` | eye-LED 4 灯の輝度 (0..100 %) |
+| 6 | PING | 1×INT8 (writable, raw 0..1) | — | pybricks は "??" (`legodev.h:333`)、用途不明だが LUMP info で **writable + raw 0..1 + unit PCT** を実機確認 (`sensor ultrasonic info` 2026-05-02)。ほぼ間違いなく "ping を 1 発撃つトリガ" (write 1=fire / 0=idle)。pybricks 未実装で副作用も未検証なので勝手に呼ばない方針 |
+| 7 | ADRAW | 1×INT16 | — | raw ADC 値 (pybricks 未使用) |
+| 8 | CALIB | 7×INT16 | — | キャリブレーション (pybricks 未使用) |
+
+ポート給電: COLOR と同じく `NEEDS_SUPPLY_PIN1`、SYNC 後に H-bridge を `-MAX_DUTY` に振って LED 系を通電する必要あり (Issue #80)。LIGHT mode の brightness は COLOR と同じく **mode 5 滞在中に書いた値だけ有効** と仮定 (実機検証は未だ — COLOR の §4.5 仮説 A と同パターンが想定される)。
 
 ## 5. CLI (`sensor`)
 
