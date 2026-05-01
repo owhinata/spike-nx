@@ -188,8 +188,9 @@ LIGHT mode 解決と payload 変換:
 
 - `on_sync` 時に `info_cache.modes[i].name == "LIGHT"` を走査して `light_mode_idx` にキャッシュ。同時に該当 mode の shape を検証 (color = INT8 × 3、ultrasonic = INT8 × 4)。一致しない場合は `light_mode_idx = -1`、SET_PWM は `-ENOTSUP`
 - **payload 変換**: `channels[i]` (0..10000) を percent (0..100, INT8) に量子化 — `(channels[i] * 100 + 5000) / 10000` (中点四捨五入)
-- `lump_send_data(port, light_mode_idx, payload, num_channels)` で送信 (SELECT は呼ばない)
-- LED 制御は **active SELECT mode から独立** (LUMP 仕様: writable mode への SEND は active SELECT に影響しない) → 測定継続中も LED 制御可能
+- `lump_send_data(port, light_mode_idx, payload, num_channels)` で送信
+- `lump_send_data` は `current_mode != light_mode_idx` のときに `CMD SELECT light_mode_idx` を **同じドレインパスで先送り** してから DATA を流す (Issue #92)。これにより `current_mode` も LIGHT 側に揃う — 古い実装は SELECT を呼ばず "writable mode SEND は active SELECT 独立" を利用していたが、SPIKE Color Sensor の firmware 自動 LED 制御の都合で SELECT 経由にした方が pybricks 流儀と合致する
+- (旧仕様メモ) LUMP プロトコル仕様としては writable mode への SEND は active SELECT mode から独立しており、SELECT を打たずに LED brightness を書くことも理論上は可能。ただし SPIKE Color Sensor の firmware は SELECT 通知に対して自動 LED 制御を被せてくるため、SELECT を経由しないと LIGHT 値が即上書きされて意味を成さない
 
 > **物理 LED 点灯は H-bridge supply pin に依存 (Issue #80 で実装)**
 >

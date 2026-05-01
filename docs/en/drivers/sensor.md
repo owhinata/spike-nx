@@ -244,9 +244,20 @@ LIGHT-mode resolution and payload conversion:
   percent (0..100 in INT8) using
   `(channels[i] * 100 + 5000) / 10000` (mid-point round-up)
 - The frame goes out via `lump_send_data(port, light_mode_idx,
-  payload, num_channels)`; SELECT is **not** issued — writable-mode
-  SEND is independent of the active SELECT, so LED control does not
-  disturb the streaming sensor mode
+  payload, num_channels)`
+- `lump_send_data` queues `CMD SELECT light_mode_idx` ahead of the
+  DATA frame whenever `current_mode != light_mode_idx` (Issue #92), so
+  the engine's `current_mode` ends up aligned with LIGHT.  The earlier
+  implementation skipped SELECT and relied on "writable-mode SEND is
+  independent of the active SELECT" — but the SPIKE Color Sensor's
+  firmware-driven auto-LED policy overrides any LIGHT value written in
+  another mode, so pre-SELECTing is needed to make the brightness
+  actually stick.  Behaviour now matches pybricks' send-thread
+  (SELECT → wait → WRITE)
+- (Historical note) The LUMP wire format itself does allow a writable-
+  mode WRITE without a preceding SELECT — that path is what the engine
+  was originally relying on.  Color Sensor firmware quirks are the
+  reason we no longer use it
 
 > **Physical LED illumination depends on the H-bridge supply pin
 > (lands with Issue #80).**

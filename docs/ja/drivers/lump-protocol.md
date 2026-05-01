@@ -146,7 +146,7 @@ int lump_get_status_full(int port, struct lump_status_full_s *out);
 |---|---|---|
 | `LEGOPORT_LUMP_GET_INFO` | `lump_device_info_s *` | SYNCED 時のみ完全 info、未同期は -EAGAIN |
 | `LEGOPORT_LUMP_SELECT` | `uint8_t mode` | CMD SELECT を kthread に queue |
-| `LEGOPORT_LUMP_SEND` | `legoport_lump_send_arg_s *` | DATA TX を queue (writable mode) |
+| `LEGOPORT_LUMP_SEND` | `legoport_lump_send_arg_s *` | writable mode への DATA TX を queue。`current_mode` が `arg.mode` と異なる場合は **同じドレインパスで CMD SELECT を先送り** してから DATA を流す |
 | `LEGOPORT_LUMP_POLL_DATA` | `lump_data_frame_s *` | DATA frame ring から 1 frame pop、空は -EAGAIN |
 | `LEGOPORT_LUMP_GET_STATUS_EX` | `lump_status_full_s *` | per-port full status snapshot |
 | `LEGOPORT_LUMP_HW_DUMP` | (なし) | RCC/USART/NVIC レジスタを syslog 出力 (`CONFIG_LEGO_LUMP_DIAG`) |

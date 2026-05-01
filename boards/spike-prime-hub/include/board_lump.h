@@ -217,11 +217,13 @@ int lump_select_mode(int port, uint8_t mode);
 
 /* Send a writable-mode payload (`DATA` with mode in header).
  *
- * `mode` only needs to be a writable mode of the currently SYNCED
- * device — it does **not** have to be the active SELECT mode.  The
- * engine sends the DATA frame independently of the reporting mode, so
- * for example LED control on the Color / Ultrasonic sensor can be
- * issued while the device is still streaming COLOR / DISTANCE samples.
+ * `mode` must be a writable mode of the currently SYNCED device.  The
+ * engine queues `CMD SELECT mode` ahead of the DATA frame whenever the
+ * port's `current_mode` differs from the target, so the device is on
+ * the requested mode by the time the payload is delivered.  This
+ * mirrors pybricks' send-thread (SELECT → wait → WRITE) and keeps the
+ * engine's `current_mode` aligned for any caller that immediately
+ * snapshots `lump_get_info` or polls `LEGOPORT_LUMP_POLL_DATA`.
  *
  * Returns:
  *   `-EINVAL`  - bad arguments or `mode` index out of range

@@ -150,7 +150,7 @@ Note that `on_error` fires on **every session-ending transition**, including pur
 |---|---|---|
 | `LEGOPORT_LUMP_GET_INFO` | `lump_device_info_s *` | Full info if SYNCED, else `-EAGAIN` |
 | `LEGOPORT_LUMP_SELECT` | `uint8_t mode` | Queue a CMD SELECT |
-| `LEGOPORT_LUMP_SEND` | `legoport_lump_send_arg_s *` | Queue a DATA TX (writable mode) |
+| `LEGOPORT_LUMP_SEND` | `legoport_lump_send_arg_s *` | Queue a DATA TX for the writable mode.  When `current_mode != arg.mode` the engine **prepends a CMD SELECT** in the same drain pass before emitting DATA |
 | `LEGOPORT_LUMP_POLL_DATA` | `lump_data_frame_s *` | Pop one frame from the engine ring; empty → `-EAGAIN` |
 | `LEGOPORT_LUMP_GET_STATUS_EX` | `lump_status_full_s *` | Full per-port snapshot |
 | `LEGOPORT_LUMP_HW_DUMP` | (none) | Print RCC/USART/NVIC state to syslog (`CONFIG_LEGO_LUMP_DIAG`) |

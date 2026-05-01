@@ -1994,6 +1994,8 @@ int lump_select_mode(int port, uint8_t mode)
 
 int lump_send_data(int port, uint8_t mode, const uint8_t *buf, size_t len)
 {
+  bool need_select;
+
   if (port < 0 || port >= BOARD_LEGOPORT_COUNT ||
       buf == NULL || len == 0 || len > LUMP_MAX_PAYLOAD)
     {
@@ -2018,9 +2020,25 @@ int lump_send_data(int port, uint8_t mode, const uint8_t *buf, size_t len)
       nxmutex_unlock(&e->info_lock);
       return -ENOTSUP;
     }
+  need_select = (e->info.current_mode != mode);
   nxmutex_unlock(&e->info_lock);
 
+  /* Queue SELECT first when not already on the target mode, then DATA.
+   * `lump_drain_tx_requests` honours the order (SELECT before DATA in
+   * the same drain pass), mirroring pybricks' send-thread behaviour
+   * (see `legodev_pup_uart.c:923` send_thread).  Writable-mode DATA
+   * itself bypasses the active SELECT on the sensor side, but pre-
+   * SELECTing keeps the engine's `current_mode` aligned with the mode
+   * just written — useful for callers that immediately follow up with
+   * `LEGOPORT_LUMP_POLL_DATA` or `lump_get_info` snapshots.
+   */
+
   nxmutex_lock(&e->tx_lock);
+  if (need_select)
+    {
+      e->pending_select       = true;
+      e->pending_select_mode  = mode;
+    }
   e->pending_send       = true;
   e->pending_send_mode  = mode;
   e->pending_send_len   = (uint8_t)len;
