@@ -416,10 +416,20 @@ static const char *lump_state_name(uint8_t s)
 
 static int do_lump_status(void)
 {
+  /* Column legend:
+   *   DqDrop : drops from the engine snapshot ring (read by `port lump
+   *            <P> watch/fps` / `LUMP_POLL_DATA` ioctl).  Does NOT
+   *            affect the on_data callback path used by uORB / btsensor.
+   *   Err    : lifetime session-end errors (sync timeout, no-DATA
+   *            keepalive miss, watchdog stall, recv error).
+   *   BadMsg : lifetime malformed RX frames in the DATA loop
+   *            (-EBADMSG header / -EILSEQ checksum).
+   */
+
   printf("Port  State    Type  Mode  Baud    RX(B)     TX(B)   "
-         "Drops  Backoff  StkHWM\n");
+         "DqDrop  Err   BadMsg  Backoff  StkHWM\n");
   printf("----  -------  ----  ----  ------  --------  ------  "
-         "-----  -------  ----------\n");
+         "------  ----  ------  -------  ----------\n");
 
   for (int p = 0; p < BOARD_LEGOPORT_COUNT; p++)
     {
@@ -441,8 +451,8 @@ static int do_lump_status(void)
         }
       close(fd);
 
-      printf("  %c   %-7s  %3u   %3u   %6lu  %8lu  %6lu  %5lu  %7lu  "
-             "%4lu/%4lu\n",
+      printf("  %c   %-7s  %3u   %3u   %6lu  %8lu  %6lu  "
+             "%6lu  %4lu  %6lu  %7lu  %4lu/%4lu\n",
              'A' + p,
              lump_state_name(s.state),
              s.type_id,
@@ -451,6 +461,8 @@ static int do_lump_status(void)
              (unsigned long)s.rx_bytes,
              (unsigned long)s.tx_bytes,
              (unsigned long)s.dq_dropped,
+             (unsigned long)s.err_count,
+             (unsigned long)s.bad_msg_count,
              (unsigned long)s.backoff_step,
              (unsigned long)s.stk_used,
              (unsigned long)s.stk_size);

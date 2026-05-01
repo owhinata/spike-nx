@@ -114,7 +114,7 @@ checksum: 0xFF XOR all preceding bytes
 struct lump_device_info_s    /* type_id, num_modes, baud, modes[8] */
 struct lump_mode_info_s      /* name, num_values, data_type, writable, raw/pct/si min/max, units */
 struct lump_data_frame_s     /* mode, len, data[32] — DATA frame snapshot */
-struct lump_status_full_s    /* state, type, mode, baud, rx/tx bytes, drops, backoff, stack high-water */
+struct lump_status_full_s    /* state, type, mode, baud, rx/tx bytes, dq_dropped, err_count, bad_msg_count, backoff, stack high-water */
 
 int lump_attach(int port, const struct lump_callbacks_s *cb);
 int lump_detach(int port);

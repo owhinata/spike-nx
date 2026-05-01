@@ -158,7 +158,13 @@ struct lump_status_full_s
   uint32_t rx_bytes;
   uint32_t tx_bytes;
   uint32_t backoff_step;    /* 0..LUMP_BACKOFF_MAX */
-  uint32_t dq_dropped;      /* DATA-frame ring overflow drops */
+  uint32_t dq_dropped;      /* DATA-frame ring overflow drops (snapshot
+                             * ring used by LUMP_POLL_DATA — does not
+                             * affect on_data / uORB path) */
+  uint32_t err_count;       /* lifetime session-end errors (sync fail,
+                             * keepalive miss, watchdog stall, etc.) */
+  uint32_t bad_msg_count;   /* lifetime malformed RX frames in the DATA
+                             * loop (-EBADMSG header / -EILSEQ checksum) */
   uint32_t stk_used;        /* kthread stack high-water in bytes */
   uint32_t stk_size;        /* configured kthread stack bytes */
 };

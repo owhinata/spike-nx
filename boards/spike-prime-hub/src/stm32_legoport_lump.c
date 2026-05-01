@@ -266,10 +266,17 @@ struct lump_engine_s
   struct wdog_s wdog;
   volatile bool wdog_stall;
 
-  /* Stats */
+  /* Stats — lifetime, monotonic.  `lifetime_err_count` ticks every
+   * time `lump_run_session` returns a negative value (sync failure,
+   * keepalive miss, watchdog stall, etc.).  `bad_msg_count` ticks
+   * every time `lump_recv_msg` returns -EBADMSG / -EILSEQ inside the
+   * DATA loop (malformed header or checksum mismatch).
+   */
 
   uint32_t rx_bytes;
   uint32_t tx_bytes;
+  uint32_t lifetime_err_count;
+  uint32_t bad_msg_count;
 };
 
 /****************************************************************************
@@ -1536,7 +1543,13 @@ static int lump_data_loop(struct lump_engine_s *e)
             }
           (void)lump_parse_msg(e);
         }
-      /* -EBADMSG / -EILSEQ / -ETIMEDOUT all fall through to keepalive. */
+      else if (ret == -EBADMSG || ret == -EILSEQ)
+        {
+          e->bad_msg_count++;
+        }
+      /* -ETIMEDOUT (no byte arrived in slice) is not a parse error and
+       * does not bump bad_msg_count; falls through to keepalive.
+       */
 
       /* Keepalive cadence. */
 
@@ -1681,6 +1694,18 @@ static int lump_kthread_entry(int argc, FAR char *argv[])
 
       lump_reset_session_state(e);
       ret = lump_run_session(e);
+
+      /* Bump the lifetime err counter on every session-ending error
+       * (sync failure, no-DATA timeout, watchdog stall, parse fault
+       * propagated from `lump_data_loop`, etc.).  Does not include
+       * orderly disconnects through `-EINTR` from the wakeup-driven
+       * shutdown path.
+       */
+
+      if (ret < 0 && ret != -EINTR)
+        {
+          e->lifetime_err_count++;
+        }
 
       /* 3. Tear down: close USART, give pins back to DCM, re-register
        *    the handoff so the next plug-in cycles us back here.
@@ -1848,9 +1873,11 @@ int lump_get_status_full(int port, struct lump_status_full_s *out)
   out->baud         = e->info.baud;
   nxmutex_unlock(&e->info_lock);
 
-  out->rx_bytes     = e->rx_bytes;
-  out->tx_bytes     = e->tx_bytes;
-  out->backoff_step = e->backoff_step;
+  out->rx_bytes      = e->rx_bytes;
+  out->tx_bytes      = e->tx_bytes;
+  out->backoff_step  = e->backoff_step;
+  out->err_count     = e->lifetime_err_count;
+  out->bad_msg_count = e->bad_msg_count;
 
   nxmutex_lock(&e->dq_lock);
   out->dq_dropped   = e->dq_dropped;
