@@ -456,25 +456,24 @@ static int do_fps(const struct class_entry_s *c, int duration_ms)
 
   while (remaining > 0)
     {
-      int pr = poll(&pfd, 1, remaining);
-      if (pr < 0)
+      /* Drain everything currently buffered in the uORB upper-half ring
+       * before going back to poll().  Each read() pops one sample; in
+       * O_NONBLOCK mode it returns -EAGAIN once the ring is empty.
+       * Without this drain step, a single poll() wake would only
+       * reclaim one sample no matter how many had piled up between
+       * loop iterations, which capped throughput around the system
+       * tick rate.
+       */
+
+      for (;;)
         {
-          if (errno == EINTR)
+          struct lump_sample_s s;
+          ssize_t n = read(fd, &s, sizeof(s));
+          if (n != (ssize_t)sizeof(s))
             {
-              continue;
+              break;    /* -EAGAIN or short read */
             }
-          break;
-        }
 
-      if (pr == 0)
-        {
-          break;        /* timeout */
-        }
-
-      struct lump_sample_s s;
-      ssize_t n = read(fd, &s, sizeof(s));
-      if (n == sizeof(s))
-        {
           if (s.len == 0)
             {
               sentinels++;
@@ -491,6 +490,24 @@ static int do_fps(const struct class_entry_s *c, int duration_ms)
       long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
                         (t1.tv_nsec - t0.tv_nsec) / 1000000;
       remaining = duration_ms - (int)elapsed_ms;
+      if (remaining <= 0)
+        {
+          break;
+        }
+
+      int pr = poll(&pfd, 1, remaining);
+      if (pr < 0)
+        {
+          if (errno == EINTR)
+            {
+              continue;
+            }
+          break;
+        }
+      if (pr == 0)
+        {
+          break;        /* timeout */
+        }
     }
 
   struct timespec t1;

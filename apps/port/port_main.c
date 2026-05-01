@@ -690,6 +690,13 @@ static int do_lump_fps(int port, int duration_ms)
         {
           frames++;
           last_mode = frame.mode;
+          /* Drain back-to-back without sleeping — the engine ring is
+           * depth 16 and may have multiple frames queued from a single
+           * burst; the original 1 ms sleep here capped throughput at
+           * roughly the tick rate, so we only sleep when the ring is
+           * empty (EAGAIN) below.
+           */
+          continue;
         }
       else if (errno != EAGAIN)
         {
@@ -698,7 +705,12 @@ static int do_lump_fps(int port, int duration_ms)
           return 1;
         }
 
-      usleep(1000);     /* 1 ms — drain ring fast */
+      /* Ring empty — short sleep to give the kthread time to push more
+       * frames; 100 us is < 1 frame interval at 1 kHz so we don't
+       * accumulate latency.
+       */
+
+      usleep(100);
     }
 
   struct timespec end;
