@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ImuViewer.App.Services;
@@ -12,8 +11,21 @@ namespace ImuViewer.App.ViewModels;
 /// <summary>
 /// Single-class write panel for the left sidebar.  The user picks
 /// which class to control via <see cref="SelectedClass"/>; the rest
-/// of the panel (mode list, PWM channel count, etc.) re-binds
-/// accordingly.
+/// of the panel (mode list, slider channel count / range / target
+/// ioctl) re-binds accordingly.
+///
+/// Per-class slider routing (Issue #92):
+/// <list type="bullet">
+///   <item>COLOR — sliders write to LIGHT (mode 3) via SENSOR SEND
+///         (0..100 INT8 PCT per channel).  SET_PWM is not used:
+///         the kernel ioctl returns -ENOTSUP for COLOR because
+///         "PWM" isn't the right semantic — see sensor.md §4.5</item>
+///   <item>ULTRASONIC — eye-LED LIGHT mode via SET_PWM (current
+///         backend, may also migrate to SEND later)</item>
+///   <item>MOTOR_* — H-bridge duty (-100..+100) via SET_PWM
+///         (returns -ENOTSUP until Issue #80 lands)</item>
+///   <item>FORCE — no actuator, slider hidden</item>
+/// </list>
 /// </summary>
 public sealed partial class SensorWriteViewModel : ObservableObject
 {
@@ -36,7 +48,7 @@ public sealed partial class SensorWriteViewModel : ObservableObject
             .Select(id => new ClassOption(id, ScaleTables.ClassName(id)))
             .ToImmutableArray();
         SelectedClass = AvailableClasses.FirstOrDefault();
-        // OnSelectedClassChanged populates Modes / PWM via partial method.
+        // OnSelectedClassChanged populates Modes / sliders via partial method.
     }
 
     public ImmutableArray<ClassOption> AvailableClasses { get; }
@@ -52,13 +64,7 @@ public sealed partial class SensorWriteViewModel : ObservableObject
     private ModeOption? _selectedMode;
 
     [ObservableProperty]
-    private byte _sendModeId;
-
-    [ObservableProperty]
-    private string _sendHexInput = string.Empty;
-
-    [ObservableProperty]
-    private bool _pwmIsSupported;
+    private bool _writeSliderVisible;
 
     [ObservableProperty]
     private int _pwmChannelCount;
@@ -72,6 +78,15 @@ public sealed partial class SensorWriteViewModel : ObservableObject
     [ObservableProperty] private int _pwmCh1;
     [ObservableProperty] private int _pwmCh2;
     [ObservableProperty] private int _pwmCh3;
+
+    [ObservableProperty] private int _writeSliderMin = -100;
+    [ObservableProperty] private int _writeSliderMax = 100;
+
+    [ObservableProperty]
+    private string _writeSliderHeader = "Write";
+
+    [ObservableProperty]
+    private string _writeSliderApplyLabel = "Apply";
 
     [ObservableProperty]
     private bool _writeEnabled;
@@ -97,7 +112,7 @@ public sealed partial class SensorWriteViewModel : ObservableObject
         {
             AvailableModes = ImmutableArray<ModeOption>.Empty;
             SelectedMode = null;
-            PwmIsSupported = false;
+            WriteSliderVisible = false;
             PwmChannelCount = 0;
             PwmCh0Visible = PwmCh1Visible = PwmCh2Visible = PwmCh3Visible = false;
             return;
@@ -105,12 +120,43 @@ public sealed partial class SensorWriteViewModel : ObservableObject
 
         AvailableModes = BuildModes(value.Id);
         SelectedMode = AvailableModes.FirstOrDefault();
-        PwmChannelCount = PwmCountFor(value.Id);
-        PwmIsSupported = PwmChannelCount > 0;
+        PwmChannelCount = WriteChannelCount(value.Id);
+        WriteSliderVisible = PwmChannelCount > 0;
         PwmCh0Visible = PwmChannelCount >= 1;
         PwmCh1Visible = PwmChannelCount >= 2;
         PwmCh2Visible = PwmChannelCount >= 3;
         PwmCh3Visible = PwmChannelCount >= 4;
+
+        // Class-specific slider range / labelling.
+        switch (value.Id)
+        {
+            case LegoClassId.Color:
+                WriteSliderMin = 0;
+                WriteSliderMax = 100;
+                WriteSliderHeader = "LIGHT  (mode 3, 0..100 % per LED)";
+                WriteSliderApplyLabel = "Apply LIGHT (SEND mode 3)";
+                break;
+            case LegoClassId.Ultrasonic:
+                WriteSliderMin = 0;
+                WriteSliderMax = 100;
+                WriteSliderHeader = "Eye LEDs  (LIGHT, 0..100 % per LED)";
+                WriteSliderApplyLabel = "Apply PWM";
+                break;
+            case LegoClassId.MotorM:
+            case LegoClassId.MotorR:
+            case LegoClassId.MotorL:
+                WriteSliderMin = -100;
+                WriteSliderMax = 100;
+                WriteSliderHeader = "Motor PWM  (-100..+100 %, signed duty)";
+                WriteSliderApplyLabel = "Apply PWM";
+                break;
+            default:
+                WriteSliderMin = -100;
+                WriteSliderMax = 100;
+                WriteSliderHeader = "Write";
+                WriteSliderApplyLabel = "Apply";
+                break;
+        }
     }
 
     [RelayCommand]
@@ -130,30 +176,6 @@ public sealed partial class SensorWriteViewModel : ObservableObject
     }
 
     [RelayCommand]
-    public async Task SendDataAsync()
-    {
-        if (SelectedClass is null) return;
-        byte[]? bytes = TryParseHex(SendHexInput);
-        if (bytes is null || bytes.Length == 0)
-        {
-            StatusText = "SEND: invalid hex";
-            return;
-        }
-        try
-        {
-            BtsensorReply r = await _orchestrator.SensorSendAsync(
-                SelectedClass.Id, SendModeId, bytes, CancellationToken.None);
-            StatusText = r.IsOk
-                ? $"SEND mode={SendModeId} ({bytes.Length}B)"
-                : "SEND: " + r;
-        }
-        catch (Exception ex)
-        {
-            StatusText = "SEND: " + ex.Message;
-        }
-    }
-
-    [RelayCommand]
     public async Task ApplyPwmAsync()
     {
         if (SelectedClass is null || PwmChannelCount == 0) return;
@@ -168,16 +190,46 @@ public sealed partial class SensorWriteViewModel : ObservableObject
         if (vals.Length == 0) return;
         try
         {
-            BtsensorReply r = await _orchestrator.SensorPwmAsync(
-                SelectedClass.Id, vals, CancellationToken.None);
+            BtsensorReply r = SelectedClass.Id == LegoClassId.Color
+                ? await ApplyColorLightAsync(vals)
+                : await _orchestrator.SensorPwmAsync(
+                    SelectedClass.Id, vals, CancellationToken.None);
+
             StatusText = r.IsOk
-                ? $"PWM → [{string.Join(',', vals)}]"
-                : "PWM: " + r;
+                ? FormatApplyOk(SelectedClass.Id, vals)
+                : (SelectedClass.Id == LegoClassId.Color ? "SEND: " : "PWM: ") + r;
         }
         catch (Exception ex)
         {
-            StatusText = "PWM: " + ex.Message;
+            StatusText = (SelectedClass.Id == LegoClassId.Color ? "SEND: " : "PWM: ")
+                         + ex.Message;
         }
+    }
+
+    private async Task<BtsensorReply> ApplyColorLightAsync(int[] vals)
+    {
+        // COLOR LIGHT: mode 3, 3 × INT8 PCT (0..100).  Clamp to byte and
+        // route via SENSOR SEND (the equivalent SET_PWM ioctl returns
+        // -ENOTSUP for COLOR — Issue #92).
+        byte[] payload = new byte[vals.Length];
+        for (int i = 0; i < vals.Length; i++)
+        {
+            int v = vals[i];
+            if (v < 0) v = 0;
+            else if (v > 100) v = 100;
+            payload[i] = (byte)v;
+        }
+
+        return await _orchestrator.SensorSendAsync(
+            LegoClassId.Color, mode: 3, payload, CancellationToken.None);
+    }
+
+    private static string FormatApplyOk(LegoClassId classId, int[] vals)
+    {
+        string joined = string.Join(',', vals);
+        return classId == LegoClassId.Color
+            ? $"SEND mode=3 → [{joined}]"
+            : $"PWM → [{joined}]";
     }
 
     private static ImmutableArray<ModeOption> BuildModes(LegoClassId classId)
@@ -193,7 +245,7 @@ public sealed partial class SensorWriteViewModel : ObservableObject
             .ToImmutableArray();
     }
 
-    private static int PwmCountFor(LegoClassId classId) => classId switch
+    private static int WriteChannelCount(LegoClassId classId) => classId switch
     {
         LegoClassId.Color      => 3,
         LegoClassId.Ultrasonic => 4,
@@ -202,22 +254,4 @@ public sealed partial class SensorWriteViewModel : ObservableObject
         LegoClassId.MotorL     => 1,
         _ => 0,
     };
-
-    private static byte[]? TryParseHex(string s)
-    {
-        if (string.IsNullOrWhiteSpace(s)) return null;
-        string trimmed = new(s.Where(c => !char.IsWhiteSpace(c)).ToArray());
-        if ((trimmed.Length & 1) != 0) return null;
-        byte[] bytes = new byte[trimmed.Length / 2];
-        for (int i = 0; i < bytes.Length; i++)
-        {
-            if (!byte.TryParse(trimmed.AsSpan(i * 2, 2),
-                NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte b))
-            {
-                return null;
-            }
-            bytes[i] = b;
-        }
-        return bytes;
-    }
 }
