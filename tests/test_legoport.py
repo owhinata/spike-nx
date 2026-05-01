@@ -1,6 +1,6 @@
 """LEGO Powered Up I/O port DCM tests (Issue #42).
 
-These exercise /dev/legoport0..5 and the `legoport` CLI without
+These exercise /dev/legoport0..5 and the `port` CLI without
 requiring a physical Powered Up device plugged in.  Hardware-coupled
 checks (passive device detection, UART device latching) are marked
 ``interactive`` so they only run when the operator opts in.
@@ -20,7 +20,7 @@ def legoport_idle(p):
     this fixture; the operator running them must keep the I/O ports
     unplugged.
     """
-    output = p.sendCommand("legoport list")
+    output = p.sendCommand("port list")
     for port_letter in "ABCDEF":
         # Lines look like "  A   NONE             [] #0"
         line = next(
@@ -45,8 +45,8 @@ def test_legoport_devices_present(p):
 
 
 def test_legoport_list_smoke(p):
-    """`legoport list` prints a header plus six rows."""
-    output = p.sendCommand("legoport list")
+    """`port list` prints a header plus six rows."""
+    output = p.sendCommand("port list")
     assert "Port" in output and "Type" in output and "Flags" in output
     rows = [
         line for line in output.splitlines()
@@ -76,7 +76,7 @@ def test_legoport_step_time_under_1ms(legoport_idle):
     # queues all hit steady state.
     time.sleep(5)
 
-    output = p.sendCommand("legoport stats")
+    output = p.sendCommand("port stats")
     m = re.search(r"max step:\s+(\d+)\s+us", output)
     assert m, f"max step not reported:\n{output}"
     max_step_us = int(m.group(1))
@@ -95,7 +95,7 @@ def test_legoport_interval_under_4ms(legoport_idle):
     """
     p = legoport_idle
     time.sleep(5)
-    output = p.sendCommand("legoport stats")
+    output = p.sendCommand("port stats")
     m = re.search(r"max interval:\s+(\d+)\s+us", output)
     assert m, f"max interval not reported:\n{output}"
     max_interval_us = int(m.group(1))
@@ -116,6 +116,6 @@ def test_legoport_wait_connect(p):
     test.
     """
     print("\n>>> plug ANY Powered Up device into port A within 30 seconds <<<")
-    output = p.sendCommand("legoport wait 0 30000", timeout=35)
+    output = p.sendCommand("port wait 0 30000", timeout=35)
     assert "connected:" in output, f"no connect detected:\n{output}"
     assert "NONE" not in output.splitlines()[-1]

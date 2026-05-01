@@ -4,8 +4,8 @@ Implementation status (Issue #80, 2026-05): the H-bridge PWM HAL lives in
 `boards/spike-prime-hub/src/stm32_legoport_pwm.c` and is exposed through
 the `/dev/legoport[N]` chardev (`CONFIG_LEGO_PORT=y`) via the
 `LEGOPORT_PWM_SET_DUTY / COAST / BRAKE / GET_STATUS` ioctls.  The
-userspace CLI is `legoport pwm <port> {set|coast|brake|status}`
-(`apps/legoport/`).  Full ABI lives in
+userspace CLI is `port pwm <port> {set|coast|brake|status}`
+(`apps/port/`).  Full ABI lives in
 `boards/spike-prime-hub/include/board_legoport.h`.
 
 Phase B (auto-driving the SUPPLY pin on LUMP SYNC for sensors that

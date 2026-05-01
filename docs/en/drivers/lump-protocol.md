@@ -11,7 +11,7 @@ Reference implementation: `pybricks/lib/pbio/drv/legodev/legodev_pup_uart.c` (12
 ### 2.1 Layering
 
 ```
-[user]   apps/legoport/legoport_main.c (CLI)
+[user]   apps/port/port_main.c (CLI)
    │
 [user]   /dev/legoport[N] ioctl (LUMP_*)
    │
@@ -155,15 +155,15 @@ Note that `on_error` fires on **every session-ending transition**, including pur
 | `LEGOPORT_LUMP_GET_STATUS_EX` | `lump_status_full_s *` | Full per-port snapshot |
 | `LEGOPORT_LUMP_HW_DUMP` | (none) | Print RCC/USART/NVIC state to syslog (`CONFIG_LEGO_LUMP_DIAG`) |
 
-## 7. CLI (`legoport lump <subcommand>`)
+## 7. CLI (`port lump <subcommand>`)
 
 ```
-legoport lump status              - per-port engine state table
-legoport lump info <N>            - dump full lump_device_info_s
-legoport lump set-mode <N> <m>    - request CMD SELECT
-legoport lump send <N> <m> <hex>...   - DATA TX (writable mode, 1..32 hex pairs)
-legoport lump watch <N> <ms>      - dump DATA frames for `ms` ms (10 ms poll)
-legoport lump-hw dump             - RCC/USART/NVIC dump (diag build only)
+port lump status              - per-port engine state table
+port lump info <N>            - dump full lump_device_info_s
+port lump set-mode <N> <m>    - request CMD SELECT
+port lump send <N> <m> <hex>...   - DATA TX (writable mode, 1..32 hex pairs)
+port lump watch <N> <ms>      - dump DATA frames for `ms` ms (10 ms poll)
+port lump-hw dump             - RCC/USART/NVIC dump (diag build only)
 ```
 
 ## 8. Handoff contract (with DCM, Issue #42)

@@ -1,5 +1,5 @@
 /****************************************************************************
- * apps/legosensor/legosensor_main.c
+ * apps/sensor/sensor_main.c
  *
  * CLI for the SPIKE Prime Hub LEGO sensor uORB driver (Issue #79).
  *
@@ -18,7 +18,7 @@
  *   <class> send <mode> <hex>...     open → CLAIM → SEND  → close
  *   <class> pwm <ch0> [ch1 ch2 ch3]  open → CLAIM → SET_PWM → close
  *
- * `legosensor` / `legosensor list` enumerates all six class topics.
+ * `sensor` / `sensor list` enumerates all six class topics.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -506,7 +506,7 @@ static int do_send(const struct class_entry_s *c, uint8_t mode,
 {
   if (argc <= 0)
     {
-      fprintf(stderr, "usage: legosensor %s send <m> <hex>...\n", c->name);
+      fprintf(stderr, "usage: sensor %s send <m> <hex>...\n", c->name);
       return -EINVAL;
     }
 
@@ -620,15 +620,15 @@ static void usage(void)
 {
   fprintf(stderr,
           "usage:\n"
-          "  legosensor                                 list all class topics\n"
-          "  legosensor list                            same as above\n"
-          "  legosensor <class>                         status one-liner\n"
-          "  legosensor <class> info                    device info / mode schema\n"
-          "  legosensor <class> status                  engine + traffic counters\n"
-          "  legosensor <class> watch [ms]              decode samples (default 1000)\n"
-          "  legosensor <class> select <mode>           SELECT mode\n"
-          "  legosensor <class> send <mode> <hex>...    SEND writable-mode payload\n"
-          "  legosensor <class> pwm <ch0> [ch1 ch2 ch3] LED brightness / motor duty\n"
+          "  sensor                                 list all class topics\n"
+          "  sensor list                            same as above\n"
+          "  sensor <class>                         status one-liner\n"
+          "  sensor <class> info                    device info / mode schema\n"
+          "  sensor <class> status                  engine + traffic counters\n"
+          "  sensor <class> watch [ms]              decode samples (default 1000)\n"
+          "  sensor <class> select <mode>           SELECT mode\n"
+          "  sensor <class> send <mode> <hex>...    SEND writable-mode payload\n"
+          "  sensor <class> pwm <ch0> [ch1 ch2 ch3] LED brightness / motor duty\n"
           "  <class> ::= color | ultrasonic | force | motor_m | motor_r | motor_l\n");
 }
 
@@ -646,7 +646,7 @@ int main(int argc, FAR char *argv[])
       return 1;
     }
 
-  /* `legosensor <class>` (no verb) → status one-liner. */
+  /* `sensor <class>` (no verb) → status one-liner. */
 
   if (argc == 2)
     {

@@ -235,7 +235,7 @@ struct lump_engine_s
   uint8_t  pending_send_len;
 
   /* Per-port DATA-frame ring served by `LEGOPORT_LUMP_POLL_DATA` ioctl
-   * (used by `legoport lump watch <N>`).  The kthread is the producer;
+   * (used by `port lump watch <N>`).  The kthread is the producer;
    * `lump_pop_data_frame()` is the consumer.  Drops oldest on overflow.
    */
 

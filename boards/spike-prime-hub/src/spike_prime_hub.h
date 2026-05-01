@@ -282,7 +282,7 @@ struct lump_data_frame_s;
 
 /* Pop one DATA frame off the per-port LUMP ring (Phase 3).  Used by
  * `LEGOPORT_LUMP_POLL_DATA` ioctl in the legoport chardev to feed
- * `legoport lump watch`.  Returns 0 on success, -EAGAIN if empty.
+ * `port lump watch`.  Returns 0 on success, -EAGAIN if empty.
  */
 
 int lump_pop_data_frame(int port, struct lump_data_frame_s *out);

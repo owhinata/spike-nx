@@ -76,7 +76,7 @@ config LEGO_LUMP_DIAG
 	default n
 	depends on LEGO_LUMP
 	---help---
-		Builds the `legoport lump-hw dump` debug command that reads
+		Builds the `port lump-hw dump` debug command that reads
 		RCC APB1ENR / APB2ENR, USART BRR / CR1, and NVIC priority and
 		enable bits for all six LUMP UARTs.  Useful for bring-up and
 		regression diagnosis; leave off for production builds.

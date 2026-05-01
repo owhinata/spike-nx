@@ -130,7 +130,7 @@ struct lump_data_frame_s
 #define LUMP_DATA_QUEUE   16    /* engine-side DATA frame ring depth */
 
 /* Per-port engine state codes — surfaced via `lump_status_full_s::state`
- * (Issue #43 Phase 4).  Useful for `legoport lump status` table.
+ * (Issue #43 Phase 4).  Useful for `port lump status` table.
  */
 
 enum lump_engine_state_e
@@ -143,7 +143,7 @@ enum lump_engine_state_e
 };
 
 /* Full per-port status snapshot returned by `LEGOPORT_LUMP_GET_STATUS_EX`
- * ioctl (Issue #43 Phase 4).  Packs everything the `legoport lump status`
+ * ioctl (Issue #43 Phase 4).  Packs everything the `port lump status`
  * CLI needs for the per-port summary table — engine state, baud, mode,
  * traffic counters, error counts, drop count, kthread stack high-water.
  */
@@ -245,7 +245,7 @@ int lump_get_status(int port, uint8_t *flags_out,
                     uint32_t *rx_bytes_out,
                     uint32_t *tx_bytes_out);
 
-/* Phase 4: full status snapshot used by `legoport lump status` CLI. */
+/* Phase 4: full status snapshot used by `port lump status` CLI. */
 
 int lump_get_status_full(int port, struct lump_status_full_s *out);
 

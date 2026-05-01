@@ -1,10 +1,10 @@
 include $(APPDIR)/Make.defs
 
-PROGNAME = legosensor
+PROGNAME = sensor
 PRIORITY = SCHED_PRIORITY_DEFAULT
 STACKSIZE = $(CONFIG_DEFAULT_TASK_STACKSIZE)
-MODULE = $(CONFIG_APP_LEGOSENSOR)
+MODULE = $(CONFIG_APP_SENSOR)
 
-MAINSRC = legosensor_main.c
+MAINSRC = sensor_main.c
 
 include $(APPDIR)/Application.mk

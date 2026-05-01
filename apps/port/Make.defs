@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_APP_PORT),)
+CONFIGURED_APPS += $(APPDIR)/external/port
+endif

@@ -1,4 +1,4 @@
-config APP_LEGOPORT
+config APP_PORT
 	tristate "LEGO Powered Up I/O port utility"
 	default n
 	---help---
@@ -13,9 +13,9 @@ config APP_LEGOPORT
 
 		Port arguments accept A..F / a..f / 0..5.
 
-		WARNING (until #78 legolib gating): driving PWM into a
-		non-motor LUMP device (SPIKE Color sensor type 61,
-		Ultrasonic type 62, Force type 63, etc.) can damage it.
-		Motors are safe — both passive (M-motor 45303, Train
-		motor 88011) and active SPIKE motors (M=48, L=49, S=65)
-		are driven by the same H-bridge that pybricks uses.
+		WARNING: driving PWM into a non-motor LUMP device (SPIKE
+		Color sensor type 61, Ultrasonic type 62, Force type 63,
+		etc.) can damage it.  Motors are safe — both passive
+		(M-motor 45303, Train motor 88011) and active SPIKE motors
+		(M=48, L=49, S=65) are driven by the same H-bridge that
+		pybricks uses.

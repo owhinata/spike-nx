@@ -726,7 +726,7 @@ int stm32_legoport_pwm_pin_supply(int idx, int sign)
 /* chardev-internal API: runaway-motor cleanup on fd close.  Coasts
  * only if the port was actively driven (state == PWM); stable stop
  * states (BRAKE, COAST) survive close() so an explicit
- * `legoport pwm <P> brake` actually keeps the windings shorted after
+ * `port pwm <P> brake` actually keeps the windings shorted after
  * the CLI exits.  Pinned ports (LUMP-held SUPPLY rail) are also
  * left alone — `coast()` itself absorbs that case, but the test
  * here keeps the cleanup intent explicit at this layer.

@@ -20,7 +20,7 @@ mode 切替・writable mode TX (LED / 書込 mode 送信) は `sensor_lowerhalf_
 ## 2. アーキテクチャ
 
 ```
-[user]   apps/legosensor/legosensor_main.c (CLI)
+[user]   apps/sensor/sensor_main.c (CLI)
    │ open(/dev/uorb/sensor_<class>) + read() + ioctl()
    │
 [kernel uORB upper-half]  nuttx/drivers/sensors/sensor.c
@@ -204,18 +204,18 @@ LIGHT mode 解決と payload 変換:
 
 NuttX 流の "mechanism in kernel, policy in userspace" を踏襲。subscriber が直接 SELECT / SET_PWM を叩くのも引き続き OK (ライブラリは convenience で、enforce ではない)。
 
-## 5. CLI (`legosensor`)
+## 5. CLI (`sensor`)
 
 ```
-legosensor                                 全 class topic の状態一覧
-legosensor list                            同上
-legosensor <class>                         1 class topic の status
-legosensor <class> info                    bound port + per-mode schema
-legosensor <class> status                  engine + traffic counters
-legosensor <class> watch [ms]              poll → read decoded samples (default 1000)
-legosensor <class> select <mode>           open → CLAIM → SELECT → close (auto-RELEASE)
-legosensor <class> send <mode> <hex>...    open → CLAIM → SEND → close
-legosensor <class> pwm <ch0> [ch1 ch2 ch3] open → CLAIM → SET_PWM → close
+sensor                                 全 class topic の状態一覧
+sensor list                            同上
+sensor <class>                         1 class topic の status
+sensor <class> info                    bound port + per-mode schema
+sensor <class> status                  engine + traffic counters
+sensor <class> watch [ms]              poll → read decoded samples (default 1000)
+sensor <class> select <mode>           open → CLAIM → SELECT → close (auto-RELEASE)
+sensor <class> send <mode> <hex>...    open → CLAIM → SEND → close
+sensor <class> pwm <ch0> [ch1 ch2 ch3] open → CLAIM → SET_PWM → close
 ```
 
 `<class>` は `color | ultrasonic | force | motor_m | motor_r | motor_l`。
@@ -226,18 +226,18 @@ legosensor <class> pwm <ch0> [ch1 ch2 ch3] open → CLAIM → SET_PWM → close
 
 ```sh
 # Color sensor を port A に挿す
-legosensor color info                    # bound port=A, modes 一覧
-legosensor color watch                   # 1 秒間 sample を decode 表示
-legosensor color select 1                # REFLT mode へ (mode 1)
-legosensor color pwm 5000 0 0            # LED0 を 50% 点灯
-legosensor color pwm 0 0 0               # 全 LED off
+sensor color info                    # bound port=A, modes 一覧
+sensor color watch                   # 1 秒間 sample を decode 表示
+sensor color select 1                # REFLT mode へ (mode 1)
+sensor color pwm 5000 0 0            # LED0 を 50% 点灯
+sensor color pwm 0 0 0               # 全 LED off
 
 # Ultrasonic を別 port に挿す
-legosensor ultrasonic pwm 5000 5000 0 0  # eye LED 上 2 個点灯
+sensor ultrasonic pwm 5000 5000 0 0  # eye LED 上 2 個点灯
 
 # Force / motor の SET_PWM は本リリースでは未対応
-legosensor force pwm 0                   # -ENOTSUP
-legosensor motor_m pwm 0                 # -ENOTSUP (#80 で実装)
+sensor force pwm 0                   # -ENOTSUP
+sensor motor_m pwm 0                 # -ENOTSUP
 ```
 
 ### 5.2 `dd` / `sensortest` が使えない理由
@@ -245,7 +245,7 @@ legosensor motor_m pwm 0                 # -ENOTSUP (#80 で実装)
 - **`dd`**: poll(2) を使わず単一 `read()` を発行する。upper-half の non-fetch read path は新 sample がない時に `-ENODATA` を即返すため、push_event との race で `Unknown error 61` (ENODATA) を返す
 - **`sensortest`**: `g_sensor_info[]` table の標準 sensor type 名 (accel0, gyro0 等) しか受け付けない。`sensor_<class>` は custom path なので reject
 
-`legosensor watch` が正しい end-to-end 検証ツール。
+`sensor watch` が正しい end-to-end 検証ツール。
 
 ## 6. デバイス対応
 
@@ -286,6 +286,6 @@ legosensor motor_m pwm 0                 # -ENOTSUP (#80 で実装)
 - 設計詳細: [lump-protocol.md](lump-protocol.md), [port-detection.md](port-detection.md)
 - 公開 ABI: `boards/spike-prime-hub/include/board_legosensor.h`
 - driver 実装: `boards/spike-prime-hub/src/legosensor_uorb.c`
-- CLI: `apps/legosensor/legosensor_main.c`
+- CLI: `apps/sensor/sensor_main.c`
 - LUMP API: `boards/spike-prime-hub/include/board_lump.h`
 - NuttX sensor framework: `nuttx/include/nuttx/sensors/sensor.h`, `nuttx/drivers/sensors/sensor.c`

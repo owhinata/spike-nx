@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_APP_SENSOR),)
+CONFIGURED_APPS += $(APPDIR)/external/sensor
+endif

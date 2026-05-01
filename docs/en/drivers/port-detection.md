@@ -214,7 +214,7 @@ DCM (passive detection + UART handoff hook) was delivered in Issue #42.  The LUM
 - `boards/spike-prime-hub/include/board_legoport.h` — public ABI (ioctl numbers, type enum, structs)
 - `boards/spike-prime-hub/src/stm32_legoport.c` — DCM state machine + handoff registry
 - `boards/spike-prime-hub/src/stm32_legoport_chardev.c` — `/dev/legoport[0-5]` chardev shim
-- `apps/legoport/legoport_main.c` — `legoport list / info / wait / stats` CLI
+- `apps/port/port_main.c` — `port list / info / wait / stats` CLI
 
 ### Execution Model
 

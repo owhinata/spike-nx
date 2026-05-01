@@ -72,7 +72,7 @@ struct legoport_info_s
 };
 
 /* HPWORK cadence stats returned by LEGOPORT_GET_STATS — used by the
- * `legoport stats` CLI and tests/test_legoport.py to catch HPWORK
+ * `port stats` CLI and tests/test_legoport.py to catch HPWORK
  * contention regressions when DCM coexists with TLC5955 LED frame sync,
  * battery polling, IMU DRDY, etc.
  */
@@ -140,14 +140,14 @@ struct legoport_lump_send_arg_s
 
 /* Poll one DATA frame from the per-port engine ring.  arg:
  * `struct lump_data_frame_s *`.  Returns 0 with frame, -EAGAIN if
- * empty, -EAGAIN also if not yet synced.  Used by `legoport lump
+ * empty, -EAGAIN also if not yet synced.  Used by `port lump
  * watch`; ~10 ms polling cadence is comfortable.
  */
 
 #define LEGOPORT_LUMP_POLL_DATA   _LEGOPORTIOC(0x000B)
 
 /* Full per-port engine status (Issue #43 Phase 4).  arg:
- * `struct lump_status_full_s *`.  Used by `legoport lump status`.
+ * `struct lump_status_full_s *`.  Used by `port lump status`.
  */
 
 #define LEGOPORT_LUMP_GET_STATUS_EX _LEGOPORTIOC(0x000C)

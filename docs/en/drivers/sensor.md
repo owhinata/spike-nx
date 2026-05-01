@@ -29,7 +29,7 @@ Multi-subscriber + single-control-owner arbitration is handled by the
 ## 2. Architecture
 
 ```
-[user]   apps/legosensor/legosensor_main.c (CLI)
+[user]   apps/sensor/sensor_main.c (CLI)
    |  open(/dev/uorb/sensor_<class>) + read() + ioctl()
    |
 [kernel uORB upper-half]  nuttx/drivers/sensors/sensor.c
@@ -274,18 +274,18 @@ Standard NuttX "mechanism in kernel, policy in userspace".
 Subscribers may still call SELECT / SET_PWM directly if they want
 finer control — the helper library is convenience, not enforcement.
 
-## 5. CLI (`legosensor`)
+## 5. CLI (`sensor`)
 
 ```
-legosensor                                 list all class topics (status one-liner each)
-legosensor list                            same as above
-legosensor <class>                         status one-liner
-legosensor <class> info                    bound port + per-mode schema
-legosensor <class> status                  engine + traffic counters
-legosensor <class> watch [ms]              poll -> read decoded samples (default 1000)
-legosensor <class> select <mode>           open -> CLAIM -> SELECT -> close (auto-RELEASE)
-legosensor <class> send <mode> <hex>...    open -> CLAIM -> SEND -> close
-legosensor <class> pwm <ch0> [ch1 ch2 ch3] open -> CLAIM -> SET_PWM -> close
+sensor                                 list all class topics (status one-liner each)
+sensor list                            same as above
+sensor <class>                         status one-liner
+sensor <class> info                    bound port + per-mode schema
+sensor <class> status                  engine + traffic counters
+sensor <class> watch [ms]              poll -> read decoded samples (default 1000)
+sensor <class> select <mode>           open -> CLAIM -> SELECT -> close (auto-RELEASE)
+sensor <class> send <mode> <hex>...    open -> CLAIM -> SEND -> close
+sensor <class> pwm <ch0> [ch1 ch2 ch3] open -> CLAIM -> SET_PWM -> close
 ```
 
 `<class>` is `color | ultrasonic | force | motor_m | motor_r | motor_l`.
@@ -299,18 +299,18 @@ drivebase for an example).
 
 ```sh
 # Plug a Color sensor into port A
-legosensor color info                    # bound port=A, modes listed
-legosensor color watch                   # 1 s of decoded samples
-legosensor color select 1                # switch to REFLT (mode 1)
-legosensor color pwm 5000 0 0            # LED0 at 50 %
-legosensor color pwm 0 0 0               # all LEDs off
+sensor color info                    # bound port=A, modes listed
+sensor color watch                   # 1 s of decoded samples
+sensor color select 1                # switch to REFLT (mode 1)
+sensor color pwm 5000 0 0            # LED0 at 50 %
+sensor color pwm 0 0 0               # all LEDs off
 
 # Plug an Ultrasonic sensor elsewhere
-legosensor ultrasonic pwm 5000 5000 0 0  # top two eye LEDs at 50 %
+sensor ultrasonic pwm 5000 5000 0 0  # top two eye LEDs at 50 %
 
 # Force / motor SET_PWM is unsupported in this release
-legosensor force pwm 0                   # -ENOTSUP
-legosensor motor_m pwm 0                 # -ENOTSUP (lands in #80)
+sensor force pwm 0                   # -ENOTSUP
+sensor motor_m pwm 0                 # -ENOTSUP
 ```
 
 ### 5.2 Why `dd` / `sensortest` don't work
@@ -323,7 +323,7 @@ legosensor motor_m pwm 0                 # -ENOTSUP (lands in #80)
   `g_sensor_info[]`'s standard types (accel0, gyro0, …) and rejects
   the custom `sensor_<class>` paths
 
-`legosensor watch` is the canonical end-to-end verification tool.
+`sensor watch` is the canonical end-to-end verification tool.
 
 ## 6. Device support
 
@@ -367,7 +367,7 @@ through the LUMP-direct `/dev/legoport[N]` chardev with port-scoped
 - [lump-protocol.md](lump-protocol.md), [port-detection.md](port-detection.md)
 - Public ABI: `boards/spike-prime-hub/include/board_legosensor.h`
 - Driver: `boards/spike-prime-hub/src/legosensor_uorb.c`
-- CLI: `apps/legosensor/legosensor_main.c`
+- CLI: `apps/sensor/sensor_main.c`
 - LUMP API: `boards/spike-prime-hub/include/board_lump.h`
 - NuttX sensor framework: `nuttx/include/nuttx/sensors/sensor.h`,
   `nuttx/drivers/sensors/sensor.c`

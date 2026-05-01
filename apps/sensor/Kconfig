@@ -1,4 +1,4 @@
-config APP_LEGOSENSOR
+config APP_SENSOR
 	tristate "LEGO sensor uORB CLI utility"
 	default n
 	depends on LEGO_SENSOR
@@ -8,7 +8,7 @@ config APP_LEGOSENSOR
 		motor_m,motor_r,motor_l} (Issue #79).  Subcommands per class:
 		info, status, watch, select, send, pwm.
 
-		`legosensor <class> watch` is the canonical end-to-end
+		`sensor <class> watch` is the canonical end-to-end
 		verification tool — `dd` and the standard `sensortest` are
 		not compatible with the SENSOR_TYPE_CUSTOM uORB topic naming
 		used here.

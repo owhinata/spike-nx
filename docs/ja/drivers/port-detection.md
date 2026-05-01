@@ -214,7 +214,7 @@ DCM (パッシブ検出 + UART ハンドオフフック) は Issue #42 で実装
 - `boards/spike-prime-hub/include/board_legoport.h` — 公開 ABI (ioctl 番号、type enum、構造体)
 - `boards/spike-prime-hub/src/stm32_legoport.c` — DCM ステートマシン + ハンドオフレジストリ
 - `boards/spike-prime-hub/src/stm32_legoport_chardev.c` — `/dev/legoport[0-5]` chardev shim
-- `apps/legoport/legoport_main.c` — `legoport list / info / wait / stats` CLI
+- `apps/port/port_main.c` — `port list / info / wait / stats` CLI
 
 ### 実行モデル
 

@@ -1,3 +1,0 @@
-ifneq ($(CONFIG_APP_LEGOSENSOR),)
-CONFIGURED_APPS += $(APPDIR)/external/legosensor
-endif

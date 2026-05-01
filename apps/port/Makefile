@@ -1,10 +1,10 @@
 include $(APPDIR)/Make.defs
 
-PROGNAME = legoport
+PROGNAME = port
 PRIORITY = SCHED_PRIORITY_DEFAULT
 STACKSIZE = $(CONFIG_DEFAULT_TASK_STACKSIZE)
-MODULE = $(CONFIG_APP_LEGOPORT)
+MODULE = $(CONFIG_APP_PORT)
 
-MAINSRC = legoport_main.c
+MAINSRC = port_main.c
 
 include $(APPDIR)/Application.mk

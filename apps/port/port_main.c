@@ -1,19 +1,19 @@
 /****************************************************************************
- * apps/legoport/legoport_main.c
+ * apps/port/port_main.c
  *
  * CLI utility for the SPIKE Prime Hub I/O port DCM (Issue #42) and the
  * LUMP UART engine diagnostics (Issue #43, gated by CONFIG_LEGO_LUMP_DIAG).
  *
  * Usage:
- *   legoport             - same as `legoport list`
- *   legoport list        - dump all 6 ports' detected type + flags
- *   legoport info <N>    - verbose single-port view (N = 0..5)
- *   legoport wait <N> [timeout_ms]
- *                        - block on connect (timeout_ms=0: infinite)
- *   legoport stats       - HPWORK cadence stats (max step / max interval)
- *   legoport lump-hw dump
- *                        - dump RCC / USART / NVIC state for the 6 LUMP
- *                          UARTs (CONFIG_LEGO_LUMP_DIAG=y only)
+ *   port             - same as `port list`
+ *   port list        - dump all 6 ports' detected type + flags
+ *   port info <N>    - verbose single-port view (N = 0..5)
+ *   port wait <N> [timeout_ms]
+ *                    - block on connect (timeout_ms=0: infinite)
+ *   port stats       - HPWORK cadence stats (max step / max interval)
+ *   port lump-hw dump
+ *                    - dump RCC / USART / NVIC state for the 6 LUMP
+ *                      UARTs (CONFIG_LEGO_LUMP_DIAG=y only)
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -758,32 +758,32 @@ static int do_pwm_status(int port)
 static void usage(void)
 {
   printf("Usage:\n");
-  printf("  legoport             - alias of `legoport list`\n");
-  printf("  legoport list        - dump all 6 ports\n");
-  printf("  legoport info <P>    - single-port info (P = A..F or 0..5)\n");
-  printf("  legoport wait <P> [timeout_ms]\n"
-         "                       - block on connect edge\n");
-  printf("  legoport stats       - HPWORK cadence stats\n");
-  printf("  legoport stats reset - clear max_step_us / max_interval_us\n");
-  printf("  legoport pwm <P> set <duty> [-k]\n"
-         "                       - set H-bridge duty (-10000..10000), -k holds fd\n");
-  printf("  legoport pwm <P> coast  - free-wheel\n");
-  printf("  legoport pwm <P> brake  - short windings\n");
-  printf("  legoport pwm <P> status - duty + state + pinned flag\n");
+  printf("  port             - alias of `port list`\n");
+  printf("  port list        - dump all 6 ports\n");
+  printf("  port info <P>    - single-port info (P = A..F or 0..5)\n");
+  printf("  port wait <P> [timeout_ms]\n"
+         "                   - block on connect edge\n");
+  printf("  port stats       - HPWORK cadence stats\n");
+  printf("  port stats reset - clear max_step_us / max_interval_us\n");
+  printf("  port pwm <P> set <duty> [-k]\n"
+         "                   - set H-bridge duty (-10000..10000), -k holds fd\n");
+  printf("  port pwm <P> coast  - free-wheel\n");
+  printf("  port pwm <P> brake  - short windings\n");
+  printf("  port pwm <P> status - duty + state + pinned flag\n");
 #ifdef CONFIG_LEGO_LUMP
-  printf("  legoport lump status     - per-port engine state table\n");
-  printf("  legoport lump <P> info\n"
-         "                       - dump LUMP device info (post-SYNC)\n");
-  printf("  legoport lump <P> set-mode <m>\n"
-         "                       - request mode switch (CMD SELECT)\n");
-  printf("  legoport lump <P> send <m> <hex>...\n"
-         "                       - send DATA frame (writable mode)\n");
-  printf("  legoport lump <P> watch <ms>\n"
-         "                       - dump DATA frames for `ms` ms\n");
+  printf("  port lump status     - per-port engine state table\n");
+  printf("  port lump <P> info\n"
+         "                   - dump LUMP device info (post-SYNC)\n");
+  printf("  port lump <P> set-mode <m>\n"
+         "                   - request mode switch (CMD SELECT)\n");
+  printf("  port lump <P> send <m> <hex>...\n"
+         "                   - send DATA frame (writable mode)\n");
+  printf("  port lump <P> watch <ms>\n"
+         "                   - dump DATA frames for `ms` ms\n");
 #endif
 #ifdef CONFIG_LEGO_LUMP_DIAG
-  printf("  legoport lump-hw dump\n"
-         "                       - dump RCC/USART/NVIC for 6 LUMP UARTs\n");
+  printf("  port lump-hw dump\n"
+         "                   - dump RCC/USART/NVIC for 6 LUMP UARTs\n");
 #endif
   printf("\n  Ports accept letters (A..F / a..f) or digits (0..5).\n");
 }
@@ -891,7 +891,7 @@ int main(int argc, FAR char *argv[])
         }
 
       /* All other "lump" subcommands take a port first to mirror
-       * "legoport pwm <P> <verb>".  argv[2] = port, argv[3] = verb.
+       * "port pwm <P> <verb>".  argv[2] = port, argv[3] = verb.
        */
 
       if (argc < 4)
