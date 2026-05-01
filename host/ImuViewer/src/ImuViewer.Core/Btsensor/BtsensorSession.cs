@@ -35,7 +35,7 @@ public sealed class BtsensorSession : IAsyncDisposable
         _ownsStream = ownsStream;
     }
 
-    public event Action<ImuFrame>? FrameReceived;
+    public event Action<BundleFrame>? BundleReceived;
     public event Action<string>? ReplyLineReceived;
 
     public void Start()
@@ -178,39 +178,48 @@ public sealed class BtsensorSession : IAsyncDisposable
     /// </returns>
     private int TryConsumeFrame(int start)
     {
-        if (_bufferLength - start < WireConstants.HeaderSize)
+        // Need at least envelope (5 B) to read type + frame_len.
+        if (_bufferLength - start < WireConstants.BundleEnvelopeSize)
         {
             return 0;
         }
-        ReadOnlySpan<byte> hdr = _buffer.AsSpan(start, WireConstants.HeaderSize);
-        byte type = hdr[2];
-        byte sampleCount = hdr[3];
-        ushort frameLen = (ushort)(hdr[16] | (hdr[17] << 8));
-        if (type != WireConstants.ImuFrameType ||
-            sampleCount < WireConstants.MinSampleCount ||
-            sampleCount > WireConstants.MaxSampleCount ||
-            frameLen != WireConstants.HeaderSize + sampleCount * WireConstants.SampleSize)
+
+        ReadOnlySpan<byte> envelope = _buffer.AsSpan(start, WireConstants.BundleEnvelopeSize);
+        byte type = envelope[2];
+        ushort frameLen = (ushort)(envelope[3] | (envelope[4] << 8));
+
+        if (type != WireConstants.BundleFrameType)
         {
             return -1;
         }
+
+        // Lower bound on a sane frame_len: envelope + bundle header.
+        if (frameLen < WireConstants.BundleEnvelopeSize + WireConstants.BundleHeaderSize ||
+            frameLen > WireConstants.MaxBundleFrameSize)
+        {
+            return -1;
+        }
+
         if (_bufferLength - start < frameLen)
         {
             return 0;
         }
 
-        FrameParser parser = new();
-        parser.Append(_buffer.AsSpan(start, frameLen));
-        if (parser.TryReadFrame(out ImuFrame frame))
+        BundleFrame? frame = BundleFrameParser.TryDecode(_buffer.AsSpan(start, frameLen));
+        if (frame is null)
         {
-            try
-            {
-                FrameReceived?.Invoke(frame);
-            }
-            catch
-            {
-                // Subscriber exceptions must not break the reader loop.
-            }
+            return -1;
         }
+
+        try
+        {
+            BundleReceived?.Invoke(frame);
+        }
+        catch
+        {
+            // Subscriber exceptions must not break the reader loop.
+        }
+
         return frameLen;
     }
 

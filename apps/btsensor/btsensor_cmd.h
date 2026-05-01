@@ -9,10 +9,9 @@
  * longer than BTSENSOR_CMD_MAX_LINE bytes are dropped with
  * `ERR overflow\n`.
  *
- *   IMU ON                  -> sampling on
- *   IMU OFF                 -> sampling off
- *   SET ODR <hz>            -> set ODR (only while IMU OFF)
- *   SET BATCH <n>           -> samples per RFCOMM frame (only while IMU OFF)
+ *   IMU ON | OFF            -> toggle IMU streaming (BUNDLE wire)
+ *   SENSOR ON | OFF         -> toggle LEGO sensor TLV streaming
+ *   SET ODR <hz>            -> set ODR (only while IMU OFF, must be <=833)
  *   SET ACCEL_FSR <g>       -> accel FSR g (only while IMU OFF)
  *   SET GYRO_FSR <dps>      -> gyro FSR dps (only while IMU OFF)
  ****************************************************************************/

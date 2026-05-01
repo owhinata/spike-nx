@@ -1,16 +1,22 @@
 # Receiving the SPP stream on a PC
 
-The SPIKE Prime Hub `btsensor` app emits IMU samples over Classic
-Bluetooth SPP (RFCOMM channel 1) as a little-endian binary stream.
-This page walks through the host-side receive procedure for Linux and
-macOS, the on-wire frame format, the ASCII command protocol, and a
-reusable Python parser.
+The SPIKE Prime Hub `btsensor` app emits **100 Hz BUNDLE** binary frames
+over Classic Bluetooth SPP (RFCOMM channel 1).  Each bundle carries the
+IMU samples that arrived during the 10 ms window plus a status entry
+for every one of the six LEGO Powered Up sensor classes
+(color/ultrasonic/force/motor_m/motor_r/motor_l).  This page walks
+through the host-side receive procedure for Linux and macOS, the
+on-wire BUNDLE layout, the ASCII command protocol, and a reusable
+Python parser.
 
-!!! warning "Wire-format change in Issue #56 Commit E"
-    The frame magic moved from `0xA55A` to `0xB66B` and the per-sample
-    layout grew from 12 to 16 bytes (added a `ts_delta_us` field).
-    Pre-Commit-E PC scripts that hard-coded `0xA55A` will not parse
-    the new stream — refresh the parser per the section below.
+!!! warning "Wire-format change in Issue #88"
+    The frame magic stays at `0xB66B` but `type` flips from `0x01`
+    (legacy IMU-only) to `0x02` (BUNDLE), `frame_len` moved from
+    offset 16 to offset 3, and the bundle now ends with six TLV
+    entries (one per LEGO sensor class).  Pre-#88 scripts cannot
+    parse the new stream — refresh the parser per the section below.
+    `SET BATCH` is removed and `SET ODR` now caps at 833 Hz.  New
+    commands `SENSOR ON | OFF` toggle the LEGO TLV section.
 
 ## Linux (BlueZ)
 
@@ -29,10 +35,10 @@ The `rfcomm` CLI lives in `bluez-tools` on most distros (or
 
 ### Pairing
 
-With the daemon running on the Hub (`btsensor start [batch]`; the BT
-button on the Hub or any future control surface enables advertising —
-see the [Bluetooth driver page](../drivers/bluetooth.md) for the BT
-state machine):
+With the daemon running on the Hub (`btsensor start`; the BT button on
+the Hub or any future control surface enables advertising — see the
+[Bluetooth driver page](../drivers/bluetooth.md) for the BT state
+machine):
 
 ```bash
 bluetoothctl
@@ -64,19 +70,18 @@ You should see `Service Name: SPIKE IMU Stream`, `Channel: 1`,
 sudo rfcomm bind 0 F8:2E:0C:A0:3E:64 1
 ls -l /dev/rfcomm0
 
-# lazy open — Linux initiates the RFCOMM session on first I/O.  Send
-# `IMU ON\n` first so the Hub starts streaming (sampling is OFF by
-# default at daemon start; see the ASCII command section below).
+# lazy open — Linux initiates the RFCOMM session on first I/O.  IMU and
+# SENSOR are both off at daemon start, so send `IMU ON\n` and/or
+# `SENSOR ON\n` first.
 printf 'IMU ON\n' | sudo tee /dev/rfcomm0 > /dev/null
+printf 'SENSOR ON\n' | sudo tee /dev/rfcomm0 > /dev/null
 sudo cat /dev/rfcomm0 | xxd | head
 ```
 
-The first bytes should be `6b b6 ...` (magic `0xB66B` in little-endian)
-followed by type / sample_count / rate / FSR / seq / first-sample
-timestamp / frame_len + samples.
+The first bytes should be `6b b6 02 LL LL ...` (magic `0xB66B` + BUNDLE
+type 0x02 + frame_len LE).
 
-Throughput probe (default batch=8 at 833 Hz → 18 + 8×16 = 146 B/frame
-× 104 Hz ≈ 15 KB/s ≈ 121 kbps):
+Throughput probe (10 ms tick × ~233 B average ≈ 22 KB/s ≈ 186 kbps):
 
 ```bash
 sudo cat /dev/rfcomm0 | pv > /dev/null
@@ -177,26 +182,38 @@ if __name__ == "__main__":
 Run with `python3 pc_receive_spp.py`.  The Hub console should print
 `RFCOMM incoming` → `RFCOMM open cid=...` as the channel comes up.
 
-## Wire format (Commit E layout)
+## Wire format (BUNDLE / Issue #88)
 
-All fields are little-endian.  Frame = 18-byte header + N × 16-byte
-samples, where N = `sample_count` (1..80, default 8).
+All fields are little-endian.  Each 100 Hz tick emits one frame:
+**envelope (5 B) + bundle header (16 B) + IMU subsection (0..8 samples
+× 16 B) + TLV subsection (always 6 entries, variable length)**.  All
+six LEGO sensor classes (color / ultrasonic / force / motor_m /
+motor_r / motor_l) emit a TLV every tick; the `flags` field's `BOUND`
+and `FRESH` bits report liveness and per-tick novelty.
 
-### Header (18 bytes)
+### Envelope (5 B)
 
 | Offset | Size | Field | Notes |
 |---:|---:|---|---|
 | 0 | 2 | `magic` | always `0xB66B` |
-| 2 | 1 | `type` | `0x01` = IMU |
-| 3 | 1 | `sample_count` | 1..80 |
-| 4 | 2 | `sample_rate_hz` | current driver ODR |
-| 6 | 2 | `accel_fsr_g` | 2 / 4 / 8 / 16 |
-| 8 | 2 | `gyro_fsr_dps` | 125 / 250 / 500 / 1000 / 2000 |
-| 10 | 2 | `seq` | monotonic per frame |
-| 12 | 4 | `first_sample_ts_us` | low 32 bits of `CLOCK_BOOTTIME` µs (mod 2³², ≈71m35s wrap — PC must unwrap for long captures) |
-| 16 | 2 | `frame_len` | `= 18 + sample_count × 16` |
+| 2 | 1 | `type` | `0x02` = BUNDLE |
+| 3 | 2 | `frame_len` | total frame length including envelope |
 
-### Per sample (16 bytes)
+### Bundle header (16 B, offsets 5..20)
+
+| Offset | Size | Field | Notes |
+|---:|---:|---|---|
+| 5  | 2 | `seq` | monotonic per bundle |
+| 7  | 4 | `tick_ts_us` | absolute timestamp of this bundle's oldest IMU sample (low 32 bits of `CLOCK_BOOTTIME` µs; run-loop now() if no IMU samples). Per-sample `ts_delta_us` is therefore always non-negative |
+| 11 | 2 | `imu_section_len` | `= imu_sample_count × 16` |
+| 13 | 1 | `imu_sample_count` | 0..8 |
+| 14 | 1 | `tlv_count` | always 6 |
+| 15 | 2 | `imu_sample_rate_hz` | current ODR (≤833) |
+| 17 | 1 | `imu_accel_fsr_g` | 2 / 4 / 8 / 16 |
+| 18 | 2 | `imu_gyro_fsr_dps` | 125 / 250 / 500 / 1000 / 2000 |
+| 20 | 1 | `flags` | bit0=IMU_ON, bit1=SENSOR_ON |
+
+### IMU sample (16 B each)
 
 | Offset (within sample) | Size | Field | Notes |
 |---:|---:|---|---|
@@ -206,7 +223,7 @@ samples, where N = `sample_count` (1..80, default 8).
 | 6 | 2 | `gx` | int16, Hub body frame |
 | 8 | 2 | `gy` | int16, Hub body frame |
 | 10 | 2 | `gz` | int16, Hub body frame |
-| 12 | 4 | `ts_delta_us` | uint32, sample timestamp − `first_sample_ts_us`; sample[0] = 0 |
+| 12 | 4 | `ts_delta_us` | uint32, sample timestamp − `tick_ts_us`; sample[0] = 0 |
 
 **Axis convention**: SPIKE Prime Hub body frame.  The LSM6DSL is
 mounted with chip Y/Z anti-parallel to the Hub body Y/Z, so the
@@ -215,15 +232,38 @@ With the Hub flat on a desk and its Z axis pointing up, accel reads
 ≈ (0, 0, +1 g) at rest.  No further rotation is needed on the PC
 side.
 
+### TLV (10 B header + 0..32 B payload, six entries concatenated)
+
+Emitted in fixed class order (color → ultrasonic → force → motor_m →
+motor_r → motor_l) every tick.
+
+| Offset (within TLV) | Size | Field | Notes |
+|---:|---:|---|---|
+| 0 | 1 | `class_id` | 0..5 (`enum legosensor_class_e`) |
+| 1 | 1 | `port_id` | 0..5 when BOUND, 0xFF otherwise |
+| 2 | 1 | `mode_id` | LUMP mode index (0 when not bound) |
+| 3 | 1 | `data_type` | 0:INT8 1:INT16 2:INT32 3:FLOAT |
+| 4 | 1 | `num_values` | INFO_FORMAT[2] |
+| 5 | 1 | `payload_len` | 0..32; 0 unless FRESH |
+| 6 | 1 | `flags` | bit0=BOUND, bit1=FRESH (this tick has a new sample) |
+| 7 | 1 | `age_10ms` | 10 ms units since last publish, 0xFF saturated |
+| 8 | 2 | `seq` | `lump_sample_s.seq & 0xFFFF` |
+| 10 | N | `payload` | only when FRESH=1 |
+
+A TLV with `FRESH=0` still carries a header — the host keeps the
+last-known payload from the most recent FRESH tick.  Hot-plug events
+are observed via the `BOUND` flag.
+
 ### Resync after byte loss
 
-Use `frame_len` to skip past truncated / corrupted frames:
-
 1. Find the next `0xB66B` magic.
-2. Read 18 bytes; sanity-check `type == 0x01`,
-   `1 ≤ sample_count ≤ 80`, and `frame_len == 18 + sample_count × 16`.
-3. If `frame_len` looks bogus, advance by 1 and rescan from step 1.
-4. Otherwise wait for `frame_len` bytes total and parse.
+2. Read the 5-byte envelope; sanity-check `type == 0x02` and that
+   `frame_len` is at least 21 bytes and within the worst-case bound.
+3. If anything looks bogus, advance by 1 and rescan from step 1.
+4. Wait for `frame_len` bytes total, parse the bundle header, the IMU
+   subsection, and the six TLVs in order.
+5. If the cumulative TLV size + IMU section size + headers does not
+   equal `frame_len`, advance by 1 and resync.
 
 ### Converting raw to physical units
 
@@ -259,28 +299,68 @@ piped the IOBluetooth delegate's bytes into a stream):
 # btsensor_parser.py
 import struct, sys, glob
 
-MAGIC       = 0xB66B
-HDR_FMT     = "<HBBHHHHIH"   # magic, type, count, rate, accel_fsr,
-                             # gyro_fsr, seq, first_ts_us, frame_len
-HDR_SIZE    = 18
-SAMPLE_FMT  = "<hhhhhhI"     # ax ay az gx gy gz ts_delta_us
-SAMPLE_SIZE = 16
+MAGIC          = 0xB66B
+ENVELOPE_FMT   = "<HBH"          # magic, type, frame_len
+ENVELOPE_SIZE  = 5
+HDR_FMT        = "<HIHBBHBHB"    # seq, tick_ts_us, imu_section_len,
+                                  # imu_sample_count, tlv_count, sample_rate,
+                                  # accel_fsr_g, gyro_fsr_dps, flags
+HDR_SIZE       = 16
+SAMPLE_FMT     = "<hhhhhhI"      # ax ay az gx gy gz ts_delta_us
+SAMPLE_SIZE    = 16
+TLV_HDR_FMT    = "<BBBBBBBBH"    # class_id, port_id, mode_id, data_type,
+                                  # num_values, payload_len, flags, age_10ms, seq
+TLV_HDR_SIZE   = 10
+TLV_COUNT      = 6
+CLASS_NAMES    = ["color", "ultrasonic", "force",
+                  "motor_m", "motor_r", "motor_l"]
 
-GRAVITY_MS2 = 9.80665
 
+def parse_bundle(buf, offset, length):
+    end = offset + length
+    (magic, typ, frame_len) = struct.unpack_from(ENVELOPE_FMT, buf, offset)
+    assert magic == MAGIC and typ == 0x02
+    p = offset + ENVELOPE_SIZE
 
-def parse_frame(buf, offs, accel_mg_lsb, gyro_dps_lsb,
-                seq, first_ts_us, sample_count):
-    for i in range(sample_count):
-        ax, ay, az, gx, gy, gz, dt = struct.unpack(
-            SAMPLE_FMT,
-            buf[offs + i * SAMPLE_SIZE : offs + (i + 1) * SAMPLE_SIZE])
-        ts_us = (first_ts_us + dt) & 0xffffffff
-        print(f"seq={seq} ts_us={ts_us} dt_us={dt} "
+    (seq, tick_ts_us, imu_section_len, imu_sample_count, tlv_count,
+     sample_rate, accel_fsr_g, gyro_fsr_dps, flags) = \
+        struct.unpack_from(HDR_FMT, buf, p)
+    p += HDR_SIZE
+
+    accel_mg_lsb = (accel_fsr_g * 1000.0) / 32768.0
+    gyro_dps_lsb = (gyro_fsr_dps * 0.035) / 1000.0
+
+    print(f"seq={seq} tick_ts_us={tick_ts_us} imu_n={imu_sample_count} "
+          f"odr={sample_rate} accel_fsr={accel_fsr_g}g "
+          f"gyro_fsr={gyro_fsr_dps}dps flags=0x{flags:02x}")
+
+    for i in range(imu_sample_count):
+        ax, ay, az, gx, gy, gz, dt = struct.unpack_from(SAMPLE_FMT, buf, p)
+        ts_us = (tick_ts_us + dt) & 0xffffffff
+        print(f"  imu[{i}] ts_us={ts_us} dt_us={dt} "
               f"accel_mg=({ax*accel_mg_lsb:7.2f},{ay*accel_mg_lsb:7.2f},"
               f"{az*accel_mg_lsb:7.2f}) "
               f"gyro_dps=({gx*gyro_dps_lsb:7.3f},{gy*gyro_dps_lsb:7.3f},"
               f"{gz*gyro_dps_lsb:7.3f})")
+        p += SAMPLE_SIZE
+
+    for i in range(tlv_count):
+        (class_id, port_id, mode_id, data_type, num_values,
+         payload_len, tlv_flags, age_10ms, tlv_seq) = \
+            struct.unpack_from(TLV_HDR_FMT, buf, p)
+        p += TLV_HDR_SIZE
+        payload = bytes(buf[p:p + payload_len])
+        p += payload_len
+        cname = CLASS_NAMES[class_id] if class_id < len(CLASS_NAMES) \
+                else f"#{class_id}"
+        bound = "bound" if (tlv_flags & 0x01) else "unbound"
+        fresh = "FRESH" if (tlv_flags & 0x02) else ""
+        port = "-" if port_id == 0xFF else f"{port_id}"
+        print(f"  tlv {cname:<10} port={port} mode={mode_id} "
+              f"{bound} {fresh} age={age_10ms*10}ms "
+              f"payload({payload_len})={payload.hex()}")
+
+    assert p == end
 
 
 def parse_stream(stream):
@@ -290,28 +370,26 @@ def parse_stream(stream):
         if not chunk:
             break
         buf += chunk
-        while len(buf) >= HDR_SIZE:
+        while len(buf) >= ENVELOPE_SIZE:
             idx = buf.find(b"\x6b\xb6")
             if idx < 0:
                 buf = buf[-1:]
                 break
             if idx > 0:
                 buf = buf[idx:]
-            if len(buf) < HDR_SIZE:
+            if len(buf) < ENVELOPE_SIZE:
                 break
-            (magic, typ, count, rate, accel_fsr, gyro_fsr,
-             seq, first_ts, frame_len) = struct.unpack(HDR_FMT,
-                                                       buf[:HDR_SIZE])
-            if magic != MAGIC or typ != 0x01 or not 1 <= count <= 80 \
-                    or frame_len != HDR_SIZE + count * SAMPLE_SIZE:
+            (magic, typ, frame_len) = struct.unpack_from(ENVELOPE_FMT, buf, 0)
+            if magic != MAGIC or typ != 0x02 or frame_len < ENVELOPE_SIZE + HDR_SIZE:
                 buf = buf[1:]
                 continue
             if len(buf) < frame_len:
                 break
-            accel_mg_lsb = (accel_fsr * 1000.0) / 32768.0
-            gyro_dps_lsb = (gyro_fsr  * 0.035) / 1000.0
-            parse_frame(buf, HDR_SIZE, accel_mg_lsb, gyro_dps_lsb,
-                        seq, first_ts, count)
+            try:
+                parse_bundle(buf, 0, frame_len)
+            except (struct.error, AssertionError):
+                buf = buf[1:]
+                continue
             buf = buf[frame_len:]
 
 
@@ -348,33 +426,38 @@ ahead of the next telemetry frame.
 
 | Command | Action | Constraint |
 |---|---|---|
-| `IMU ON\n`  | Start sampling (open the driver, auto-activate) | — |
-| `IMU OFF\n` | Stop sampling (close the driver, auto-deactivate) | — |
-| `SET ODR <hz>\n` | Set ODR (13/26/52/104/208/416/833/1660/3330/6660 Hz) | only while IMU OFF |
-| `SET BATCH <n>\n` | Samples per RFCOMM frame (1..80) | only while IMU OFF |
+| `IMU ON\n`  | Include the IMU subsection in the BUNDLE (auto-activates the uORB driver) | — |
+| `IMU OFF\n` | Drop the IMU subsection | — |
+| `SENSOR ON\n`  | Stream all 6 LEGO sensor TLVs | — (writes are added in Issue B/C) |
+| `SENSOR OFF\n` | Freeze TLVs to unbound/empty | — |
+| `SET ODR <hz>\n` | Set ODR (13/26/52/104/208/416/833 Hz) | only while IMU OFF.  **`> 833` returns `ERR invalid_odr`** |
 | `SET ACCEL_FSR <g>\n` | Accel FSR (2/4/8/16) | only while IMU OFF |
 | `SET GYRO_FSR <dps>\n` | Gyro FSR (125/250/500/1000/2000) | only while IMU OFF |
 
 Reply patterns:
 - `OK\n` on success
 - `ERR busy\n` if a `SET *` arrives while sampling is on
+- `ERR invalid_odr\n` for ODR > 833
 - `ERR invalid <token>\n` for malformed values / unknown subcommands
 - `ERR overflow\n` for lines longer than 64 bytes
 - `ERR unknown <cmd>\n` for an unrecognised first token
 
-Sampling is **off** at daemon start, so a typical session looks like:
+IMU and SENSOR are both **off** at daemon start; while both are off the
+100 Hz BUNDLE timer is parked so no bytes flow.  A typical session:
 
 ```text
 PC -> Hub:  IMU OFF\n              (idempotent)
 Hub -> PC:  OK\n
 PC -> Hub:  SET ODR 416\n
 Hub -> PC:  OK\n
-PC -> Hub:  SET BATCH 16\n
-Hub -> PC:  OK\n
 PC -> Hub:  IMU ON\n
 Hub -> PC:  OK\n
-            ... binary IMU frames flow ...
+PC -> Hub:  SENSOR ON\n
+Hub -> PC:  OK\n
+            ... 100 Hz BUNDLE frames flow ...
 PC -> Hub:  IMU OFF\n
+PC -> Hub:  SENSOR OFF\n
+Hub -> PC:  OK\n
 Hub -> PC:  OK\n
 ```
 
@@ -386,7 +469,7 @@ Hub -> PC:  OK\n
 | Linux: `Permission denied` | Hub's in-RAM link-key DB was wiped by the latest flash but the host still holds the stale key | `bluetoothctl remove <MAC>` then pair again |
 | macOS: `cat` returns nothing | macOS tty open alone does not establish RFCOMM | Use the PyObjC `IOBluetoothRFCOMMChannel` path above |
 | macOS: no "Connect" button in Settings | CoD 0x001F00 is filtered by macOS UI | Drive pairing with `blueutil --pair` from the CLI |
-| Frame drop counter rising | RFCOMM send can't keep up (e.g. PC disconnected) | Hub ring is 8 frames deep; drops oldest on overflow by design |
+| `dropped_oldest` counter rising | RFCOMM send can't keep up (e.g. PC disconnected) | Hub ring is 8 frames deep; drops oldest on overflow by design (drop-oldest) |
 
 ## See also
 

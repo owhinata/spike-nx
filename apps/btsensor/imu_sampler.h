@@ -1,41 +1,27 @@
 /****************************************************************************
  * apps/btsensor/imu_sampler.h
  *
- * LSM6DS3TR-C uORB -> RFCOMM frame producer.  Reads paired raw int16
- * accel + gyro samples from /dev/uorb/sensor_imu0 (Issue #56 Commit A),
- * batches them into a fixed-size IMU frame, and hands each completed
- * frame to btsensor_tx for arbitrated send.
+ * LSM6DS3TR-C uORB drain helper.  Subscribes to /dev/uorb/sensor_imu0,
+ * pulls every available sample into a private ring on each btstack data
+ * source read callback, and exposes a non-blocking drain API for
+ * bundle_emitter (Issue #88) to assemble the IMU section of each 100 Hz
+ * BUNDLE frame.  Framing / TX arbitration is no longer this module's job.
  ****************************************************************************/
 
 #ifndef __APPS_BTSENSOR_IMU_SAMPLER_H
 #define __APPS_BTSENSOR_IMU_SAMPLER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+
+#include <arch/board/board_lsm6dsl.h>
 
 #if defined __cplusplus
 extern "C" {
 #endif
 
-/* Wire-format frame header magic and type (Commit E).  The new magic
- * 0xB66B intentionally breaks compatibility with pre-Commit-E PC
- * scripts (which expected 0xA55A); the header now embeds the runtime
- * FSR / ODR plus a per-sample ts_delta_us so the receiver can derive
- * physical units and per-sample timing without out-of-band state.
- */
-
-#define BTSENSOR_FRAME_MAGIC       0xB66B
-#define BTSENSOR_FRAME_TYPE_IMU    0x01
-
-/* Wire-format sizes (used by both the producer and any in-tree
- * consumers / parsers that need the layout).  See the wire-format
- * table in apps/btsensor/imu_sampler.c.
- */
-
-#define BTSENSOR_HDR_SIZE          18
-#define BTSENSOR_SAMPLE_SIZE       16
-
-/* Initialise the sampler module.  Does NOT start sampling — call
+/* Initialise the sampler module.  Does NOT open the IMU fd — call
  * imu_sampler_set_enabled(true) (or have the PC send `IMU ON`) to
  * begin streaming.  Returns 0 on success.
  */
@@ -64,22 +50,42 @@ bool imu_sampler_is_enabled(void);
 /* Reconfiguration helpers — return -EBUSY while sampling is enabled.
  * On ioctl failure the local cache is rolled back to the previous value
  * so reads via get-state stay consistent with the hardware.
+ *
+ * imu_sampler_set_odr_hz() rejects values >833 Hz with -EINVAL: btsensor
+ * runs a 100 Hz BUNDLE tick and caps imu_sample_count per frame at 8, so
+ * higher ODRs would produce >8 samples per 10 ms window and we would
+ * silently drop most of them.  Use the local `btsensor dump` path for
+ * higher rate IMU work.
  */
 
 int  imu_sampler_set_odr_hz(uint32_t hz);
-int  imu_sampler_set_batch(uint8_t n);
 int  imu_sampler_set_accel_fsr(uint32_t g);
 int  imu_sampler_set_gyro_fsr(uint32_t dps);
 
-/* Read current cache (mirrors the live driver state).  Returns the
- * value matching the most recent successful set_*; defaults are 833 Hz
- * / 8 g / 2000 dps / Kconfig batch.
+/* Read current cache (mirrors the live driver state).  Defaults are
+ * 833 Hz / 8 g / 2000 dps.
  */
 
 uint32_t imu_sampler_get_odr_hz(void);
 uint32_t imu_sampler_get_accel_fsr_g(void);
 uint32_t imu_sampler_get_gyro_fsr_dps(void);
-uint8_t  imu_sampler_get_batch(void);
+
+/* Drain up to `max` samples from the private ring into `out` (oldest
+ * first), returning the count.  Called from the BTstack run loop
+ * (bundle_emitter tick).  Samples that don't fit in this drain remain
+ * in the ring for the next tick — bundle_emitter's 8-cap is meant to
+ * shape the bundle; we keep oldest-wins behaviour internally if the
+ * ring overflows (32 slots, ~38 ms at 833 Hz).
+ */
+
+size_t   imu_sampler_drain(struct sensor_imu *out, size_t max);
+
+/* Low 32 bits of CLOCK_BOOTTIME us.  Same time base as the driver's
+ * sensor_imu.timestamp; bundle_emitter uses this for tick_ts_us when
+ * the IMU section is empty.
+ */
+
+uint32_t imu_sampler_now_us(void);
 
 /* Notify the sampler that the RFCOMM channel is open (cid != 0) or
  * closed (cid == 0).  Forwarded to btsensor_tx so the arbiter knows

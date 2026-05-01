@@ -28,7 +28,7 @@ public sealed class SessionOrchestrator : IAsyncDisposable
 
     public bool IsConnected => _client is not null;
 
-    public event Action<ImuFrame>? FrameReceived;
+    public event Action<BundleFrame>? BundleReceived;
 
     public async Task ConnectAsync(string bdAddr, int channel, CancellationToken ct)
     {
@@ -40,7 +40,7 @@ public sealed class SessionOrchestrator : IAsyncDisposable
         _stream = await _transport.ConnectAsync(bdAddr, channel, ct).ConfigureAwait(false);
         _session = new BtsensorSession(_stream);
         _client = new BtsensorCommandClient(_session);
-        _session.FrameReceived += OnFrame;
+        _session.BundleReceived += OnBundle;
         _session.Start();
     }
 
@@ -53,8 +53,9 @@ public sealed class SessionOrchestrator : IAsyncDisposable
 
     public Task<BtsensorReply> ImuOffAsync(CancellationToken ct) => SendAsync("IMU OFF", ct);
     public Task<BtsensorReply> ImuOnAsync(CancellationToken ct) => SendAsync("IMU ON", ct);
+    public Task<BtsensorReply> SensorOnAsync(CancellationToken ct) => SendAsync("SENSOR ON", ct);
+    public Task<BtsensorReply> SensorOffAsync(CancellationToken ct) => SendAsync("SENSOR OFF", ct);
     public Task<BtsensorReply> SetOdrAsync(int hz, CancellationToken ct) => SendAsync($"SET ODR {hz}", ct);
-    public Task<BtsensorReply> SetBatchAsync(int n, CancellationToken ct) => SendAsync($"SET BATCH {n}", ct);
     public Task<BtsensorReply> SetAccelFsrAsync(int g, CancellationToken ct) => SendAsync($"SET ACCEL_FSR {g}", ct);
     public Task<BtsensorReply> SetGyroFsrAsync(int dps, CancellationToken ct) => SendAsync($"SET GYRO_FSR {dps}", ct);
 
@@ -91,7 +92,7 @@ public sealed class SessionOrchestrator : IAsyncDisposable
     {
         if (_session is not null)
         {
-            _session.FrameReceived -= OnFrame;
+            _session.BundleReceived -= OnBundle;
         }
         _client?.Dispose();
         _client = null;
@@ -107,12 +108,12 @@ public sealed class SessionOrchestrator : IAsyncDisposable
         }
     }
 
-    private void OnFrame(ImuFrame frame)
+    private void OnBundle(BundleFrame frame)
     {
-        _aggregator.OnFrame(frame);
+        _aggregator.OnBundle(frame);
         try
         {
-            FrameReceived?.Invoke(frame);
+            BundleReceived?.Invoke(frame);
         }
         catch
         {

@@ -6,18 +6,18 @@ using ImuViewer.Core.Wire;
 namespace ImuViewer.Core.Aggregation;
 
 /// <summary>
-/// Converts btsensor frames into world-frame <see cref="AggregatedSample"/>
-/// instances and hands them off to the consumer one-by-one. Each LSM6DSL raw
+/// Converts BUNDLE frames into world-frame <see cref="AggregatedSample"/>
+/// instances and hands them off to the consumer one-by-one.  Each LSM6DSL raw
 /// sample becomes one <see cref="AggregatedSample"/> with the absolute
-/// timestamp recovered from <c>first_sample_ts_us + ts_delta_us</c>; the
-/// orientation filter then integrates at chip ODR with the actual sample
-/// spacing as <c>dt</c>, instead of averaging at the UI tick rate.
+/// timestamp recovered from <c>tick_ts_us + ts_delta_us</c>; the orientation
+/// filter then integrates at chip ODR with the actual sample spacing as
+/// <c>dt</c>, instead of averaging at the UI tick rate.
 /// </summary>
 /// <remarks>
 /// Single writer (Bluetooth reader thread) → single reader (UI tick thread).
 /// Backed by an unbounded <see cref="Channel{T}"/>; under realistic conditions
-/// the queue holds at most a few frames worth of samples (~13 × 64 = 832/s)
-/// and the UI tick drains it every ~16 ms.
+/// the queue holds at most a few frames worth of samples (~833/s in 100 Hz
+/// BUNDLEs of 8 samples) and the UI tick drains it every ~16 ms.
 /// </remarks>
 public sealed class SensorAggregator
 {
@@ -37,21 +37,21 @@ public sealed class SensorAggregator
     /// <summary>Most recently emitted sample; useful for non-consuming display.</summary>
     public AggregatedSample? Latest => Volatile.Read(ref _latest);
 
-    public void OnFrame(ImuFrame frame)
+    public void OnBundle(BundleFrame frame)
     {
-        int n = frame.Samples.Length;
+        int n = frame.ImuSamples.Length;
         if (n <= 0)
         {
             return;
         }
 
-        int accelFsr = frame.Header.AccelFsrG;
-        int gyroFsr = frame.Header.GyroFsrDps;
-        uint baseTs = frame.Header.FirstSampleTimestampUs;
+        int accelFsr = frame.Header.ImuAccelFsrG;
+        int gyroFsr = frame.Header.ImuGyroFsrDps;
+        uint baseTs = frame.Header.TickTsUs;
 
         for (int i = 0; i < n; i++)
         {
-            ImuSample s = frame.Samples[i];
+            ImuSample s = frame.ImuSamples[i];
             uint absTs = unchecked(baseTs + s.TimestampDeltaUs);
 
             Vector3 accelChip = new(

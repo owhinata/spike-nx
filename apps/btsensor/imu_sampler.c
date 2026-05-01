@@ -1,42 +1,18 @@
 /****************************************************************************
  * apps/btsensor/imu_sampler.c
  *
- * IMU sampler — frame producer for btsensor.
+ * IMU drain helper for btsensor.
  *
- * The LSM6DSL uORB driver (Commit A) publishes a single struct
- * sensor_imu on /dev/uorb/sensor_imu0 carrying paired accel + gyro raw
- * int16 LSB values plus an ISR-captured timestamp.  We open the topic
- * non-blocking, register its fd as a btstack data source, copy each
- * sample's raw values straight into a wire-format slot (no physical-
- * unit conversion), and hand each completed batch to btsensor_tx for
- * arbitrated send.
+ * The LSM6DSL uORB driver publishes paired raw int16 accel + gyro values
+ * with an ISR-captured timestamp on /dev/uorb/sensor_imu0.  We open the
+ * topic non-blocking, register its fd as a btstack data source, and
+ * pull every available sample into a private ring on each read
+ * callback.  bundle_emitter (Issue #88) drains the ring once per 10 ms
+ * tick and folds the samples into the IMU section of a BUNDLE frame.
  *
- * Wire format (all little-endian) — Commit E layout (incompatible
- * with the Commit A/B 0xA55A layout):
- *
- *   struct spp_frame_hdr {                  // 18 bytes
- *     uint16_t magic;          // 0xB66B
- *     uint8_t  type;           // 0x01 = IMU
- *     uint8_t  sample_count;   // 1..BTSENSOR_FRAME_MAX_SAMPLES (80)
- *     uint16_t sample_rate_hz; // current ODR
- *     uint16_t accel_fsr_g;    // 2 / 4 / 8 / 16
- *     uint16_t gyro_fsr_dps;   // 125 / 250 / 500 / 1000 / 2000
- *     uint16_t seq;            // monotonic
- *     uint32_t first_sample_ts_us;  // low 32 bits of CLOCK_BOOTTIME us
- *                              // (mod 2^32, ~71m35s wrap — PC unwrap)
- *     uint16_t frame_len;      // = 18 + sample_count * 16
- *   };
- *
- *   struct imu_sample {                     // 16 bytes
- *     int16_t  ax, ay, az;     // accel raw LSB, Hub body frame
- *     int16_t  gx, gy, gz;     // gyro  raw LSB, Hub body frame
- *     uint32_t ts_delta_us;    // sample.ts - first_sample_ts_us
- *                              // (sample[0] = 0)
- *   };
- *
- * The header carries ODR + FSR so the PC can convert raw -> physical
- * units without an out-of-band probe; ts_delta_us per sample lets the
- * receiver reconstruct exact ISR timing for jitter analysis.
+ * Configuration ioctls (ODR, accel_fsr, gyro_fsr) stay live here.  ODR
+ * is capped at 833 Hz to keep the per-tick sample count under bundle's
+ * 8-sample limit.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -53,8 +29,6 @@
 
 #include <nuttx/sensors/ioctl.h>
 
-#include <arch/board/board_lsm6dsl.h>
-
 #include "btstack_event.h"
 #include "btstack_run_loop.h"
 
@@ -65,20 +39,17 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define IMU_DEVPATH                       "/dev/uorb/sensor_imu0"
+#define IMU_DEVPATH                "/dev/uorb/sensor_imu0"
 
-#ifndef CONFIG_APP_BTSENSOR_BATCH
-#  define CONFIG_APP_BTSENSOR_BATCH       8
-#endif
-
-/* BTSENSOR_HDR_SIZE / BTSENSOR_SAMPLE_SIZE come from the public
- * imu_sampler.h so any in-tree consumer sees the same constants.
- * Frame max = 18 + 80 * 16 = 1298 bytes (fits BTSENSOR_TX_FRAME_MAX_SIZE).
+/* Private ring size.  Sized for ~38 ms of 833 Hz samples so two missed
+ * 10 ms ticks still don't overflow.  Power-of-two for cheap modulus.
  */
 
-#define BTSENSOR_FRAME_MAX_SAMPLES        80
-#define BTSENSOR_FRAME_MAX_SIZE \
-    (BTSENSOR_HDR_SIZE + BTSENSOR_SAMPLE_SIZE * BTSENSOR_FRAME_MAX_SAMPLES)
+#define IMU_DRAIN_RING             32
+
+/* IMU ODR ceiling — see imu_sampler.h::imu_sampler_set_odr_hz(). */
+
+#define IMU_ODR_MAX_HZ             833
 
 /****************************************************************************
  * Private Data
@@ -89,139 +60,65 @@ static int                   g_imu_fd = -1;
 static bool                  g_initialized;
 static bool                  g_enabled;
 
-/* Cached configuration.  Mirrors the LSM6DSL driver's startup state
- * (Commit A) so the first PC-side `SET *` while disabled lines up with
- * the actual hardware.  These are kept in sync with the driver via
- * ioctl in imu_sampler_set_*; on ioctl failure we roll back the cache.
+/* Cached configuration.  Mirrors the LSM6DSL driver's startup state so
+ * the first PC-side `SET *` while disabled lines up with the actual
+ * hardware.  Kept in sync via ioctl in imu_sampler_set_*; on ioctl
+ * failure we roll back the cache.
  */
 
 static uint32_t g_odr_hz       = 833;
 static uint32_t g_accel_fsr_g  = 8;
 static uint32_t g_gyro_fsr_dps = 2000;
 
-/* Frame in progress (assembled sample-by-sample in a stack-resident
- * scratch buffer flushed via btsensor_tx_try_enqueue_frame()).
+/* Drain ring (single producer = btstack data source callback,
+ * single consumer = bundle_emitter tick callback; both run on the
+ * BTstack run-loop thread so no lock is needed).
  */
 
-static uint8_t  g_current[BTSENSOR_FRAME_MAX_SIZE];
-static uint8_t  g_current_count;
-static uint32_t g_current_first_ts;
-
-/* Runtime-tunable batch size (samples per RFCOMM frame). */
-
-static uint8_t  g_batch = CONFIG_APP_BTSENSOR_BATCH;
-
-/* Frame sequence counter. */
-
-static uint16_t g_seq;
-
-/* Session-start time in the same time base as the driver's sensor_imu
- * timestamp (low 32 bits of CLOCK_BOOTTIME us).  Per-frame ts_us is
- * `first_sample.timestamp - g_start_us` mod 2^32 (Issue #55).
- */
-
-static uint32_t g_start_us;
+static struct sensor_imu g_ring[IMU_DRAIN_RING];
+static uint16_t          g_ring_head;
+static uint16_t          g_ring_tail;
 
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
 
-static inline void put_u16le(uint8_t *dst, uint16_t v)
+static inline uint16_t ring_next(uint16_t i)
 {
-  dst[0] = (uint8_t)(v & 0xff);
-  dst[1] = (uint8_t)((v >> 8) & 0xff);
+  return (uint16_t)((i + 1U) % IMU_DRAIN_RING);
 }
 
-static inline void put_u32le(uint8_t *dst, uint32_t v)
+static inline bool ring_empty(void)
 {
-  dst[0] = (uint8_t)(v & 0xff);
-  dst[1] = (uint8_t)((v >> 8) & 0xff);
-  dst[2] = (uint8_t)((v >> 16) & 0xff);
-  dst[3] = (uint8_t)((v >> 24) & 0xff);
+  return g_ring_head == g_ring_tail;
 }
 
-static void encode_sample(uint8_t *dst, const struct sensor_imu *s,
-                          uint32_t ts_delta_us)
+static inline bool ring_full(void)
 {
-  put_u16le(dst + 0,  (uint16_t)s->ax);
-  put_u16le(dst + 2,  (uint16_t)s->ay);
-  put_u16le(dst + 4,  (uint16_t)s->az);
-  put_u16le(dst + 6,  (uint16_t)s->gx);
-  put_u16le(dst + 8,  (uint16_t)s->gy);
-  put_u16le(dst + 10, (uint16_t)s->gz);
-  put_u32le(dst + 12, ts_delta_us);
+  return ring_next(g_ring_head) == g_ring_tail;
 }
 
-static void flush_current_frame(void)
+static void ring_push(const struct sensor_imu *s)
 {
-  if (g_current_count == 0)
+  if (ring_full())
     {
-      return;
-    }
-
-  /* Patch the header fields that depend on flush-time state. */
-
-  uint16_t frame_len     = BTSENSOR_HDR_SIZE +
-                           BTSENSOR_SAMPLE_SIZE * g_current_count;
-  uint32_t first_ts_off  = g_current_first_ts - g_start_us; /* mod 2^32 */
-
-  g_current[3] = g_current_count;             /* sample_count */
-  put_u32le(&g_current[12], first_ts_off);    /* first_sample_ts_us */
-  put_u16le(&g_current[16], frame_len);       /* frame_len */
-
-  (void)btsensor_tx_try_enqueue_frame(g_current, frame_len);
-  g_current_count = 0;
-}
-
-static void append_sample(const struct sensor_imu *sample)
-{
-  if (g_current_count == 0)
-    {
-      g_current_first_ts = sample->timestamp;
-
-      /* Lay down the static portion of the header.  Fields patched at
-       * flush time (sample_count, first_sample_ts_us, frame_len) are
-       * left zeroed here for clarity.
+      /* Overflow: drop oldest to make room.  ring is small (32) but the
+       * bundle emitter is supposed to drain it every 10 ms; if it falls
+       * far enough behind to overflow, oldest-wins matches the rest of
+       * the daemon's drop policy.
        */
 
-      put_u16le(&g_current[0],  BTSENSOR_FRAME_MAGIC);  /* magic   */
-      g_current[2]  = BTSENSOR_FRAME_TYPE_IMU;          /* type    */
-      g_current[3]  = 0;                                /* count   */
-      put_u16le(&g_current[4],  (uint16_t)g_odr_hz);    /* rate    */
-      put_u16le(&g_current[6],  (uint16_t)g_accel_fsr_g);
-      put_u16le(&g_current[8],  (uint16_t)g_gyro_fsr_dps);
-      put_u16le(&g_current[10], g_seq++);               /* seq     */
-      put_u32le(&g_current[12], 0);                     /* first ts */
-      put_u16le(&g_current[16], 0);                     /* frame_len */
+      g_ring_tail = ring_next(g_ring_tail);
     }
 
-  /* Per-sample slot, including 4-byte ts_delta_us at offset 12. */
-
-  uint32_t ts_delta = sample->timestamp - g_current_first_ts;
-  uint8_t *slot = &g_current[BTSENSOR_HDR_SIZE +
-                             BTSENSOR_SAMPLE_SIZE * g_current_count];
-  encode_sample(slot, sample, ts_delta);
-  g_current_count++;
-
-  if (g_current_count >= g_batch)
-    {
-      flush_current_frame();
-    }
+  g_ring[g_ring_head] = *s;
+  g_ring_head = ring_next(g_ring_head);
 }
 
 static void imu_process(btstack_data_source_t *ds,
                         btstack_data_source_callback_type_t type)
 {
   (void)type;
-
-  /* Skip the encode + memcpy work entirely when no RFCOMM consumer is
-   * bound — the frames would just be dropped by btsensor_tx anyway,
-   * and uncosumed sensor reads dominate the daemon's CPU footprint
-   * while a PC isn't connected.  We still drain the kernel buffer so
-   * it doesn't grow unbounded.
-   */
-
-  bool has_consumer = btsensor_tx_has_consumer();
 
   while (1)
     {
@@ -232,11 +129,24 @@ static void imu_process(btstack_data_source_t *ds,
           break;
         }
 
-      if (has_consumer)
-        {
-          append_sample(&s);
-        }
+      ring_push(&s);
     }
+}
+
+/* Open a transient O_WRONLY fd to issue a reconfiguration ioctl without
+ * subscribing to the topic (sensor upper-half only auto-activates on
+ * O_RDOK).  Returns the fd or a negated errno.
+ */
+
+static int imu_open_ctrl_fd(void)
+{
+  int fd = open(IMU_DEVPATH, O_WRONLY);
+  if (fd < 0)
+    {
+      return -errno;
+    }
+
+  return fd;
 }
 
 /****************************************************************************
@@ -250,20 +160,10 @@ int imu_sampler_init(void)
       return 0;
     }
 
-  /* Module bring-up only: do not open the driver fd yet — sampling
-   * starts when the PC sends `IMU ON` (or the daemon explicitly calls
-   * imu_sampler_set_enabled(true)).
-   */
-
-  struct timespec start;
-  clock_gettime(CLOCK_BOOTTIME, &start);
-  uint64_t start_us = (uint64_t)start.tv_sec * 1000000ULL +
-                      (uint64_t)start.tv_nsec / 1000ULL;
-  g_start_us       = (uint32_t)start_us;
-  g_seq            = 0;
-  g_current_count  = 0;
-  g_enabled        = false;
-  g_initialized    = true;
+  g_ring_head    = 0;
+  g_ring_tail    = 0;
+  g_enabled      = false;
+  g_initialized  = true;
   return 0;
 }
 
@@ -311,8 +211,8 @@ int imu_sampler_set_enabled(bool on)
       btstack_run_loop_enable_data_source_callbacks(
           &g_imu_ds, DATA_SOURCE_CALLBACK_READ);
 
-      g_current_count = 0;
-      g_enabled       = true;
+      g_ring_head = g_ring_tail;       /* drop any stale samples */
+      g_enabled   = true;
       syslog(LOG_INFO, "btsensor: IMU sampling on (%u Hz / %ug / %udps)\n",
              (unsigned)g_odr_hz, (unsigned)g_accel_fsr_g,
              (unsigned)g_gyro_fsr_dps);
@@ -329,28 +229,11 @@ int imu_sampler_set_enabled(bool on)
           g_imu_fd = -1;
         }
 
-      g_current_count = 0;
-      g_enabled       = false;
+      g_enabled = false;
       syslog(LOG_INFO, "btsensor: IMU sampling off\n");
     }
 
   return 0;
-}
-
-/* Open a transient O_WRONLY fd to issue a reconfiguration ioctl without
- * subscribing to the topic (sensor upper-half only auto-activates on
- * O_RDOK).  Returns the fd or a negated errno.
- */
-
-static int imu_open_ctrl_fd(void)
-{
-  int fd = open(IMU_DEVPATH, O_WRONLY);
-  if (fd < 0)
-    {
-      return -errno;
-    }
-
-  return fd;
 }
 
 int imu_sampler_set_odr_hz(uint32_t hz)
@@ -358,6 +241,15 @@ int imu_sampler_set_odr_hz(uint32_t hz)
   if (g_enabled)
     {
       return -EBUSY;
+    }
+
+  if (hz == 0 || hz > IMU_ODR_MAX_HZ)
+    {
+      /* >833 Hz is rejected to keep the BUNDLE 100 Hz tick within its
+       * 8 samples / frame budget (Issue #88).
+       */
+
+      return -EINVAL;
     }
 
   int fd = imu_open_ctrl_fd();
@@ -376,22 +268,6 @@ int imu_sampler_set_odr_hz(uint32_t hz)
       return -errno;
     }
 
-  return 0;
-}
-
-int imu_sampler_set_batch(uint8_t n)
-{
-  if (g_enabled)
-    {
-      return -EBUSY;
-    }
-
-  if (n == 0 || n > BTSENSOR_FRAME_MAX_SAMPLES)
-    {
-      return -EINVAL;
-    }
-
-  g_batch = n;
   return 0;
 }
 
@@ -462,9 +338,25 @@ uint32_t imu_sampler_get_gyro_fsr_dps(void)
   return g_gyro_fsr_dps;
 }
 
-uint8_t imu_sampler_get_batch(void)
+size_t imu_sampler_drain(struct sensor_imu *out, size_t max)
 {
-  return g_batch;
+  size_t n = 0;
+  while (n < max && !ring_empty())
+    {
+      out[n++] = g_ring[g_ring_tail];
+      g_ring_tail = ring_next(g_ring_tail);
+    }
+
+  return n;
+}
+
+uint32_t imu_sampler_now_us(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_BOOTTIME, &ts);
+  uint64_t us = (uint64_t)ts.tv_sec * 1000000ULL +
+                (uint64_t)ts.tv_nsec / 1000ULL;
+  return (uint32_t)us;
 }
 
 void imu_sampler_set_rfcomm_cid(uint16_t rfcomm_cid, uint16_t mtu)
@@ -473,8 +365,7 @@ void imu_sampler_set_rfcomm_cid(uint16_t rfcomm_cid, uint16_t mtu)
 
   if (rfcomm_cid == 0)
     {
-      g_current_count = 0;
-      g_seq           = 0;
+      g_ring_head = g_ring_tail;       /* drop pending on disconnect */
     }
 
   btsensor_tx_set_rfcomm_cid(rfcomm_cid);

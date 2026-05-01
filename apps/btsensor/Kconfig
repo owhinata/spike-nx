@@ -25,27 +25,31 @@ config APP_BTSENSOR_STACKSIZE
 	int "Task stack size"
 	default 4096
 
-config APP_BTSENSOR_BATCH
-	int "Default IMU samples per RFCOMM frame"
-	default 8
-	range 1 80
+config APP_BTSENSOR_BUNDLE_TICK_MS
+	int "BUNDLE frame emission period (ms)"
+	default 10
+	range 5 100
 	---help---
-		Number of 12-byte IMU samples packed into one SPP frame.
-		8 samples gives ~108 byte payload (~9.6 ms of data at
-		833 Hz); the upper bound is set by the negotiated RFCOMM
-		MTU (typically 1016 bytes from BlueZ): 12 byte header +
-		80 * 12 byte sample = 972 bytes still fits one RFCOMM
-		frame.  This is the default; `btsensor [batch]` overrides
-		it at runtime.
+		Period of the BUNDLE wire frame emitter.  Default 10 ms
+		gives the 100 Hz cadence the host viewer expects.  Lower
+		values increase BT bandwidth pressure; higher values
+		reduce bandwidth but decimate IMU samples (max 8 per
+		BUNDLE).  Issue #88.
 
 config APP_BTSENSOR_RING_DEPTH
 	int "Frame ring buffer depth"
 	default 32
 	range 4 128
 	---help---
-		Number of frames kept between the sampler and the RFCOMM
-		send worker.  Deeper rings tolerate longer RF stalls at
-		the cost of RAM.
+		Number of frames kept between the BUNDLE emitter and
+		the RFCOMM send worker.  Default 32 covers ~320 ms of
+		100 Hz emission; deeper rings tolerate longer RF stalls
+		at the cost of RAM.  Each slot is BTSENSOR_TX_FRAME_MAX_SIZE
+		bytes (1408 in Issue #88).  The 32-frame default matches
+		main's pre-#88 layout to avoid an intermittent boot
+		failure observed when shrinking the user-space BSS by
+		~33 KB; the cause is not yet root-caused but is likely a
+		RAM-layout interaction during user-space init.
 
 config APP_BTSENSOR_BTN_LONG_PRESS_MS
 	int "BT button long-press threshold (ms)"

@@ -9,69 +9,115 @@ namespace ImuViewer.Core.Tests.Btsensor;
 
 public class BtsensorSessionTests
 {
-    private static byte[] BuildOneSampleFrame(ushort seq, short ax = 100)
+    /// <summary>
+    /// Build a minimal valid BUNDLE frame: one IMU sample, six "unbound"
+    /// TLVs (one per LegoClassId, all flags=0 / payload_len=0).
+    /// </summary>
+    internal static byte[] BuildOneSampleBundle(ushort seq, short ax = 100)
     {
-        int frameLen = WireConstants.HeaderSize + WireConstants.SampleSize;
+        const int imuSampleCount = 1;
+        const int imuSectionLen = imuSampleCount * WireConstants.ImuSampleSize;
+        int frameLen =
+            WireConstants.BundleEnvelopeSize +
+            WireConstants.BundleHeaderSize +
+            imuSectionLen +
+            WireConstants.TlvHeaderSize * WireConstants.TlvCount;
+
         byte[] buf = new byte[frameLen];
         Span<byte> s = buf;
+
+        // Envelope.
         BinaryPrimitives.WriteUInt16LittleEndian(s[0..2], WireConstants.Magic);
-        s[2] = WireConstants.ImuFrameType;
-        s[3] = 1;
-        BinaryPrimitives.WriteUInt16LittleEndian(s[4..6], 833);
-        BinaryPrimitives.WriteUInt16LittleEndian(s[6..8], 8);
-        BinaryPrimitives.WriteUInt16LittleEndian(s[8..10], 2000);
-        BinaryPrimitives.WriteUInt16LittleEndian(s[10..12], seq);
-        BinaryPrimitives.WriteUInt32LittleEndian(s[12..16], 0);
-        BinaryPrimitives.WriteUInt16LittleEndian(s[16..18], (ushort)frameLen);
-        BinaryPrimitives.WriteInt16LittleEndian(s.Slice(18, 2), ax);
-        BinaryPrimitives.WriteInt16LittleEndian(s.Slice(20, 2), 0);
-        BinaryPrimitives.WriteInt16LittleEndian(s.Slice(22, 2), 0);
-        BinaryPrimitives.WriteInt16LittleEndian(s.Slice(24, 2), 0);
-        BinaryPrimitives.WriteInt16LittleEndian(s.Slice(26, 2), 0);
-        BinaryPrimitives.WriteInt16LittleEndian(s.Slice(28, 2), 0);
-        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(30, 4), 0);
+        s[2] = WireConstants.BundleFrameType;
+        BinaryPrimitives.WriteUInt16LittleEndian(s[3..5], (ushort)frameLen);
+
+        // Bundle header.
+        Span<byte> hdr = s.Slice(WireConstants.BundleEnvelopeSize, WireConstants.BundleHeaderSize);
+        BinaryPrimitives.WriteUInt16LittleEndian(hdr[0..2], seq);
+        BinaryPrimitives.WriteUInt32LittleEndian(hdr[2..6], 0u); // tick_ts_us
+        BinaryPrimitives.WriteUInt16LittleEndian(hdr[6..8], imuSectionLen);
+        hdr[8] = imuSampleCount;
+        hdr[9] = WireConstants.TlvCount;
+        BinaryPrimitives.WriteUInt16LittleEndian(hdr[10..12], 833);
+        hdr[12] = 8;          // accel FSR g
+        BinaryPrimitives.WriteUInt16LittleEndian(hdr[13..15], 2000);
+        hdr[15] = WireConstants.FlagImuOn;
+
+        // IMU sample.
+        Span<byte> sample = s.Slice(
+            WireConstants.BundleEnvelopeSize + WireConstants.BundleHeaderSize,
+            WireConstants.ImuSampleSize);
+        BinaryPrimitives.WriteInt16LittleEndian(sample[0..2], ax);
+        BinaryPrimitives.WriteInt16LittleEndian(sample[2..4], 0);
+        BinaryPrimitives.WriteInt16LittleEndian(sample[4..6], 0);
+        BinaryPrimitives.WriteInt16LittleEndian(sample[6..8], 0);
+        BinaryPrimitives.WriteInt16LittleEndian(sample[8..10], 0);
+        BinaryPrimitives.WriteInt16LittleEndian(sample[10..12], 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(sample[12..16], 0u);
+
+        // 6 unbound TLVs (header only, no payload).
+        int tlvOff = WireConstants.BundleEnvelopeSize +
+                     WireConstants.BundleHeaderSize +
+                     imuSectionLen;
+        for (int i = 0; i < WireConstants.TlvCount; i++)
+        {
+            Span<byte> tlv = s.Slice(tlvOff, WireConstants.TlvHeaderSize);
+            tlv[0] = (byte)i;          // class_id
+            tlv[1] = 0xFF;             // port_id (unbound)
+            tlv[2] = 0;                // mode_id
+            tlv[3] = 0;                // data_type
+            tlv[4] = 0;                // num_values
+            tlv[5] = 0;                // payload_len
+            tlv[6] = 0;                // flags
+            tlv[7] = 0xFF;             // age_10ms saturated
+            BinaryPrimitives.WriteUInt16LittleEndian(tlv[8..10], 0); // seq
+            tlvOff += WireConstants.TlvHeaderSize;
+        }
+
         return buf;
     }
 
     [Fact]
-    public async Task Reads_a_single_frame_followed_by_an_OK_reply()
+    public async Task Reads_a_single_bundle_followed_by_an_OK_reply()
     {
         FakeDuplexStream pipe = new();
         BtsensorSession session = new(pipe);
 
-        List<ImuFrame> frames = [];
+        List<BundleFrame> frames = [];
         List<string> lines = [];
-        session.FrameReceived += f => frames.Add(f);
+        session.BundleReceived += f => frames.Add(f);
         session.ReplyLineReceived += s => lines.Add(s);
         session.Start();
 
-        await pipe.InjectAsync(BuildOneSampleFrame(seq: 1, ax: 4096));
+        await pipe.InjectAsync(BuildOneSampleBundle(seq: 1, ax: 4096));
         await pipe.InjectAsync(Encoding.ASCII.GetBytes("OK\n"));
         await WaitUntil(() => frames.Count >= 1 && lines.Count >= 1);
 
         frames.Should().HaveCount(1);
         frames[0].Header.Seq.Should().Be(1);
-        frames[0].Samples[0].RawAx.Should().Be(4096);
+        frames[0].ImuSamples[0].RawAx.Should().Be(4096);
+        frames[0].Header.ImuSampleCount.Should().Be(1);
+        frames[0].Tlvs.Length.Should().Be(WireConstants.TlvCount);
         lines.Should().Equal("OK");
 
         await session.DisposeAsync();
     }
 
     [Fact]
-    public async Task Demuxes_reply_line_interleaved_between_two_frames()
+    public async Task Demuxes_reply_line_interleaved_between_two_bundles()
     {
         FakeDuplexStream pipe = new();
         BtsensorSession session = new(pipe);
 
         List<ushort> seqs = [];
         List<string> lines = [];
-        session.FrameReceived += f => { lock (seqs) seqs.Add(f.Header.Seq); };
+        session.BundleReceived += f => { lock (seqs) seqs.Add(f.Header.Seq); };
         session.ReplyLineReceived += s => { lock (lines) lines.Add(s); };
         session.Start();
 
-        await pipe.InjectAsync(BuildOneSampleFrame(seq: 1));
+        await pipe.InjectAsync(BuildOneSampleBundle(seq: 1));
         await pipe.InjectAsync(Encoding.ASCII.GetBytes("ERR busy\n"));
-        await pipe.InjectAsync(BuildOneSampleFrame(seq: 2));
+        await pipe.InjectAsync(BuildOneSampleBundle(seq: 2));
 
         await WaitUntil(() => seqs.Count >= 2 && lines.Count >= 1);
         seqs.Should().Equal((ushort)1, (ushort)2);
@@ -81,22 +127,22 @@ public class BtsensorSessionTests
     }
 
     [Fact]
-    public async Task Reassembles_frame_when_bytes_arrive_one_at_a_time()
+    public async Task Reassembles_bundle_when_bytes_arrive_one_at_a_time()
     {
         FakeDuplexStream pipe = new();
         BtsensorSession session = new(pipe);
 
-        TaskCompletionSource<ImuFrame> got = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        session.FrameReceived += f => got.TrySetResult(f);
+        TaskCompletionSource<BundleFrame> got = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        session.BundleReceived += f => got.TrySetResult(f);
         session.Start();
 
-        byte[] frame = BuildOneSampleFrame(seq: 99);
+        byte[] frame = BuildOneSampleBundle(seq: 99);
         for (int i = 0; i < frame.Length; i++)
         {
             await pipe.InjectAsync([frame[i]]);
         }
 
-        ImuFrame f = await got.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        BundleFrame f = await got.Task.WaitAsync(TimeSpan.FromSeconds(2));
         f.Header.Seq.Should().Be(99);
 
         await session.DisposeAsync();

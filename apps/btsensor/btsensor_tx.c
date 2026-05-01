@@ -45,6 +45,12 @@
 #  define CONFIG_APP_BTSENSOR_RING_DEPTH    8
 #endif
 
+/* Compile-time guard so the BUNDLE worst-case frame always fits a slot. */
+
+#include "btsensor_wire.h"
+_Static_assert(BTSENSOR_BUNDLE_FRAME_MAX <= BTSENSOR_TX_FRAME_MAX_SIZE,
+               "BTSENSOR_TX_FRAME_MAX_SIZE too small for BUNDLE frame");
+
 #define BTSENSOR_TX_RING_DEPTH              CONFIG_APP_BTSENSOR_RING_DEPTH
 
 /* Response queue depth.  4 is enough to absorb back-to-back command
@@ -85,7 +91,8 @@ static uint16_t g_rfcomm_cid;
 static bool     g_can_send_pending;
 
 static uint32_t g_frames_sent;
-static uint32_t g_frames_dropped;
+static uint32_t g_frames_dropped_oldest;
+static uint32_t g_frames_dropped_full;
 
 /****************************************************************************
  * Private Functions
@@ -149,9 +156,10 @@ int btsensor_tx_init(void)
   g_resp_head        = 0;
   g_resp_tail        = 0;
   g_rfcomm_cid       = 0;
-  g_can_send_pending = false;
-  g_frames_sent      = 0;
-  g_frames_dropped   = 0;
+  g_can_send_pending     = false;
+  g_frames_sent          = 0;
+  g_frames_dropped_oldest = 0;
+  g_frames_dropped_full   = 0;
   return 0;
 }
 
@@ -227,7 +235,7 @@ int btsensor_tx_try_enqueue_frame(const uint8_t *buf, size_t len)
       /* Drop oldest to favour newer telemetry. */
 
       g_ring_tail = (g_ring_tail + 1) % BTSENSOR_TX_RING_DEPTH;
-      g_frames_dropped++;
+      g_frames_dropped_oldest++;
       rc = -ENOSPC;
     }
 
@@ -278,15 +286,22 @@ bool btsensor_tx_has_consumer(void)
   return g_rfcomm_cid != 0;
 }
 
-void btsensor_tx_get_stats(uint32_t *frames_sent, uint32_t *frames_dropped)
+void btsensor_tx_get_stats(uint32_t *frames_sent,
+                           uint32_t *frames_dropped_oldest,
+                           uint32_t *frames_dropped_full)
 {
   if (frames_sent != NULL)
     {
       *frames_sent = g_frames_sent;
     }
 
-  if (frames_dropped != NULL)
+  if (frames_dropped_oldest != NULL)
     {
-      *frames_dropped = g_frames_dropped;
+      *frames_dropped_oldest = g_frames_dropped_oldest;
+    }
+
+  if (frames_dropped_full != NULL)
+    {
+      *frames_dropped_full = g_frames_dropped_full;
     }
 }

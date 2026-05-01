@@ -61,7 +61,9 @@
 #include "btsensor_led.h"
 #include "btsensor_spp.h"
 #include "btsensor_tx.h"
+#include "bundle_emitter.h"
 #include "imu_sampler.h"
+#include "sensor_sampler.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -228,6 +230,14 @@ static void teardown_sampler_off(void)
   g_ts_state = TS_SAMPLER_DEINIT;
   btsensor_button_deinit();
   btsensor_led_deinit();
+
+  /* Strict order: stop the BUNDLE timer first so no tick can race the
+   * sampler / CLAIM teardown that follows.  Then drop SENSOR (CLAIM
+   * release lives here in Issue C) before closing IMU / TX state.
+   */
+
+  bundle_emitter_deinit();
+  sensor_sampler_deinit();
   imu_sampler_deinit();
   btsensor_tx_deinit();
   syslog(LOG_INFO, "btsensor: teardown HCI off\n");
@@ -614,9 +624,10 @@ static int btsensor_daemon(int argc, char **argv)
 
   spp_server_init();
 
-  /* 6. TX arbiter + IMU sampler.  imu_sampler_init() opens
-   * /dev/uorb/sensor_imu0 and registers it as a btstack data source;
-   * frames flow into btsensor_tx whenever a sample lands.
+  /* 6. TX arbiter + samplers + bundle emitter.  Order matters: the
+   * emitter expects the samplers to be initialised before it is.  All
+   * three start in OFF state — `IMU ON` / `SENSOR ON` (NSH or RFCOMM)
+   * arms the 100 Hz timer.
    */
 
   btsensor_tx_init();
@@ -626,6 +637,17 @@ static int btsensor_daemon(int argc, char **argv)
     {
       syslog(LOG_ERR, "btsensor: imu sampler init failed, "
                       "streaming disabled\n");
+    }
+
+  if (sensor_sampler_init() != 0)
+    {
+      syslog(LOG_ERR, "btsensor: sensor sampler init failed, "
+                      "LEGO streaming disabled\n");
+    }
+
+  if (bundle_emitter_init() != 0)
+    {
+      syslog(LOG_ERR, "btsensor: bundle emitter init failed\n");
     }
 
   /* 7. BT button + LED.  Wire callbacks before init so the IRQ does
@@ -749,8 +771,9 @@ enum btsensor_action_kind
   ACTION_BT_OFF,
   ACTION_IMU_ON,
   ACTION_IMU_OFF,
+  ACTION_SENSOR_ON,
+  ACTION_SENSOR_OFF,
   ACTION_SET_ODR,
-  ACTION_SET_BATCH,
   ACTION_SET_ACCEL_FSR,
   ACTION_SET_GYRO_FSR,
   ACTION_UNPAIR_ALL,
@@ -796,16 +819,19 @@ static void action_runner(void *ctx)
         a->rc = bt_visibility_request(false);
         break;
       case ACTION_IMU_ON:
-        a->rc = imu_sampler_set_enabled(true);
+        a->rc = bundle_emitter_set_imu_enabled(true);
         break;
       case ACTION_IMU_OFF:
-        a->rc = imu_sampler_set_enabled(false);
+        a->rc = bundle_emitter_set_imu_enabled(false);
+        break;
+      case ACTION_SENSOR_ON:
+        a->rc = bundle_emitter_set_sensor_enabled(true);
+        break;
+      case ACTION_SENSOR_OFF:
+        a->rc = bundle_emitter_set_sensor_enabled(false);
         break;
       case ACTION_SET_ODR:
         a->rc = imu_sampler_set_odr_hz(a->arg);
-        break;
-      case ACTION_SET_BATCH:
-        a->rc = imu_sampler_set_batch((uint8_t)a->arg);
         break;
       case ACTION_SET_ACCEL_FSR:
         a->rc = imu_sampler_set_accel_fsr(a->arg);
@@ -996,8 +1022,9 @@ static int cmd_status(void)
 
   uint16_t cid = g_rfcomm_cid;
   uint32_t sent;
-  uint32_t dropped;
-  btsensor_tx_get_stats(&sent, &dropped);
+  uint32_t dropped_oldest;
+  uint32_t dropped_full;
+  btsensor_tx_get_stats(&sent, &dropped_oldest, &dropped_full);
 
   printf("running:    %s%s\n", running ? "yes" : "no",
          running && ts != TS_RUNNING ? " (stopping)" : "");
@@ -1006,17 +1033,19 @@ static int cmd_status(void)
       printf("pid:        %d\n", pid);
       printf("bt:         %s\n", bt_state_name(g_bt_state));
       printf("imu:        %s\n",
-             imu_sampler_is_enabled() ? "on" : "off");
-      printf("config:     odr=%uHz batch=%u accel_fsr=%ug gyro_fsr=%udps\n",
+             bundle_emitter_is_imu_enabled() ? "on" : "off");
+      printf("sensor:     %s\n",
+             bundle_emitter_is_sensor_enabled() ? "on" : "off");
+      printf("config:     odr=%uHz accel_fsr=%ug gyro_fsr=%udps\n",
              (unsigned)imu_sampler_get_odr_hz(),
-             (unsigned)imu_sampler_get_batch(),
              (unsigned)imu_sampler_get_accel_fsr_g(),
              (unsigned)imu_sampler_get_gyro_fsr_dps());
     }
 
   printf("rfcomm cid: %u\n", (unsigned)cid);
-  printf("frames:     sent=%u dropped=%u\n",
-         (unsigned)sent, (unsigned)dropped);
+  printf("frames:     sent=%u dropped_oldest=%u dropped_full=%u\n",
+         (unsigned)sent, (unsigned)dropped_oldest,
+         (unsigned)dropped_full);
   return 0;
 }
 
@@ -1067,6 +1096,34 @@ static int cmd_imu(int argc, char **argv)
   else
     {
       printf("btsensor: invalid imu arg '%s' (expected on|off)\n",
+             argv[2]);
+      return 1;
+    }
+
+  print_action_result(dispatch_action(kind, 0));
+  return 0;
+}
+
+static int cmd_sensor(int argc, char **argv)
+{
+  if (argc < 3)
+    {
+      printf("Usage: btsensor sensor <on|off>\n");
+      return 1;
+    }
+
+  enum btsensor_action_kind kind;
+  if (strcmp(argv[2], "on") == 0)
+    {
+      kind = ACTION_SENSOR_ON;
+    }
+  else if (strcmp(argv[2], "off") == 0)
+    {
+      kind = ACTION_SENSOR_OFF;
+    }
+  else
+    {
+      printf("btsensor: invalid sensor arg '%s' (expected on|off)\n",
              argv[2]);
       return 1;
     }
@@ -1166,7 +1223,7 @@ static int cmd_set(int argc, char **argv)
 {
   if (argc < 4)
     {
-      printf("Usage: btsensor set <odr|batch|accel_fsr|gyro_fsr> <value>\n");
+      printf("Usage: btsensor set <odr|accel_fsr|gyro_fsr> <value>\n");
       return 1;
     }
 
@@ -1174,10 +1231,6 @@ static int cmd_set(int argc, char **argv)
   if (strcmp(argv[2], "odr") == 0)
     {
       kind = ACTION_SET_ODR;
-    }
-  else if (strcmp(argv[2], "batch") == 0)
-    {
-      kind = ACTION_SET_BATCH;
     }
   else if (strcmp(argv[2], "accel_fsr") == 0)
     {
@@ -1208,21 +1261,21 @@ static void print_usage(void)
 {
   printf("Usage: btsensor <command>\n");
   printf("Commands:\n");
-  printf("  start                       launch daemon (BT/IMU both off)\n");
+  printf("  start                       launch daemon (BT/IMU/SENSOR all off)\n");
   printf("  stop                        request teardown\n");
   printf("  status                      print full state + current config\n");
-  printf("  bt    <on|off>              start/stop BT advertising (default off)\n");
-  printf("  imu   <on|off>              start/stop IMU sampling (default off)\n");
+  printf("  bt     <on|off>             start/stop BT advertising (default off)\n");
+  printf("  imu    <on|off>             start/stop IMU streaming (default off)\n");
+  printf("  sensor <on|off>             start/stop LEGO sensor streaming (default off)\n");
   printf("  unpair                      forget all stored Bluetooth pairings\n");
   printf("  dump  [ms]                  dump raw IMU samples for ms (default 1000)\n");
-  printf("  set   odr        <hz>       ODR  13|26|52|104|208|416|833|1660|3330|6660 (default 833)\n");
-  printf("  set   batch      <n>        samples/frame 1..%d (default %d)\n",
-         80, CONFIG_APP_BTSENSOR_BATCH);
+  printf("  set   odr        <hz>       ODR  13|26|52|104|208|416|833 (default 833, capped)\n");
   printf("  set   accel_fsr  <g>        accel FSR 2|4|8|16 (default 8)\n");
   printf("  set   gyro_fsr   <dps>      gyro FSR  125|250|500|1000|2000 (default 2000)\n");
-  printf("Note: bt/imu/dump/set require `start` first (except dump can\n");
+  printf("Note: bt/imu/sensor/dump/set require `start` first (dump can\n");
   printf("      auto-activate the driver standalone).  set * are\n");
   printf("      rejected with `ERR busy` while imu is on.\n");
+  printf("      ODR > 833 is rejected to keep the BUNDLE 100 Hz tick in budget.\n");
 }
 
 /****************************************************************************
@@ -1260,6 +1313,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "imu") == 0)
     {
       return cmd_imu(argc, argv);
+    }
+
+  if (strcmp(argv[1], "sensor") == 0)
+    {
+      return cmd_sensor(argc, argv);
     }
 
   if (strcmp(argv[1], "set") == 0)

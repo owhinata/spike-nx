@@ -9,6 +9,7 @@ using ImuViewer.Core.Aggregation;
 using ImuViewer.Core.Btsensor;
 using ImuViewer.Core.Filters;
 using ImuViewer.Core.Transport;
+using ImuViewer.Core.Wire;
 
 namespace ImuViewer.App.ViewModels;
 
@@ -50,7 +51,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _aggregator = aggregator;
         _filter = filter;
         _biasTracker = biasTracker;
-        _orchestrator.FrameReceived += _ => _fps.Mark();
+        _orchestrator.BundleReceived += _ => _fps.Mark();
     }
 
     [ObservableProperty]
@@ -89,10 +90,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     [ObservableProperty]
     private double _measuredFps;
 
-    /// <summary>LSM6DSL-supported output data rates, in Hz. Hub rejects any
-    /// other value with -EINVAL so the GUI must restrict the user to these.</summary>
+    /// <summary>
+    /// LSM6DSL-supported output data rates that btsensor accepts.  >833 Hz
+    /// is rejected by the firmware (Issue #88) since the BUNDLE 100 Hz tick
+    /// caps imu_sample_count at 8 and would otherwise drop most samples.
+    /// </summary>
     public static int[] OdrOptions { get; } =
-        new[] { 13, 26, 52, 104, 208, 416, 833, 1660, 3330, 6660 };
+        new[] { 13, 26, 52, 104, 208, 416, 833 };
 
     /// <summary>LSM6DSL-supported accelerometer full-scale ranges, in g.</summary>
     public static int[] AccelFsrOptions { get; } = new[] { 2, 4, 8, 16 };
@@ -102,9 +106,6 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     [ObservableProperty]
     private int _odrHz = 833;
-
-    [ObservableProperty]
-    private int _batch = 13;
 
     [ObservableProperty]
     private int _accelFsrG = 8;
@@ -144,8 +145,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public bool CanDisconnect => IsConnected;
     public bool CanToggleImu => IsConnected;
 
-    /// <summary>True when the IMU configuration inputs (ODR, BATCH, FSRs) are
-    /// editable. The Hub firmware only accepts SET ODR/BATCH/ACCEL_FSR/GYRO_FSR
+    /// <summary>True when the IMU configuration inputs (ODR, FSRs) are
+    /// editable. The Hub firmware only accepts SET ODR/ACCEL_FSR/GYRO_FSR
     /// while IMU is OFF, so the inputs are locked exactly while IMU is streaming.
     /// Edits made while connected and IMU OFF are pushed to the Hub by
     /// <see cref="ImuOnAsync"/> just before starting the stream.</summary>
@@ -320,7 +321,6 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             await _orchestrator.ConnectAsync(SelectedPort.BdAddr, channel: 1, ct);
             await EnsureReplyAsync(_orchestrator.ImuOffAsync(ct), "IMU OFF");
             await EnsureReplyAsync(_orchestrator.SetOdrAsync(OdrHz, ct), $"SET ODR {OdrHz}");
-            await EnsureReplyAsync(_orchestrator.SetBatchAsync(Batch, ct), $"SET BATCH {Batch}");
             await EnsureReplyAsync(_orchestrator.SetAccelFsrAsync(AccelFsrG, ct), $"SET ACCEL_FSR {AccelFsrG}");
             await EnsureReplyAsync(_orchestrator.SetGyroFsrAsync(GyroFsrDps, ct), $"SET GYRO_FSR {GyroFsrDps}");
             IsConnected = true;
@@ -354,11 +354,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         try
         {
-            // Resync the four config knobs before starting the stream — the
+            // Resync the three config knobs before starting the stream — the
             // user may have edited them while connected & IMU OFF, and the
             // firmware only accepts SET while IMU is OFF.
             await EnsureReplyAsync(_orchestrator.SetOdrAsync(OdrHz, ct), $"SET ODR {OdrHz}");
-            await EnsureReplyAsync(_orchestrator.SetBatchAsync(Batch, ct), $"SET BATCH {Batch}");
             await EnsureReplyAsync(_orchestrator.SetAccelFsrAsync(AccelFsrG, ct), $"SET ACCEL_FSR {AccelFsrG}");
             await EnsureReplyAsync(_orchestrator.SetGyroFsrAsync(GyroFsrDps, ct), $"SET GYRO_FSR {GyroFsrDps}");
 

@@ -236,7 +236,8 @@ def test_bt_pc_pair_and_stream(p):
                 bt_state = re.search(r"bt:\s*(\S+)", status).group(1)
                 cid = int(re.search(r"rfcomm cid:\s*(\d+)", status).group(1))
                 m = re.search(
-                    r"frames:\s*sent=(\d+)\s+dropped=(\d+)", status
+                    r"frames:\s*sent=(\d+)\s+dropped_oldest=(\d+)\s+dropped_full=(\d+)",
+                    status,
                 )
                 sent1 = int(m.group(1))
                 dropped1 = int(m.group(2))
@@ -265,19 +266,19 @@ def test_bt_pc_pair_and_stream(p):
                 buf += chunk
 
             assert len(buf) > 0, "no RFCOMM bytes received in 3 s"
-            # Issue #56 Commit E moved the frame magic from 0xA55A
-            # to 0xB66B (BTSENSOR_FRAME_MAGIC); little-endian on the
-            # wire so the byte pattern is 6b b6.
-            assert b"\x6b\xb6" in buf, (
-                f"magic 0xB66B not found in {len(buf)} received bytes"
+            # Issue #88 BUNDLE wire format: magic 0xB66B + type byte 0x02.
+            # Little-endian on the wire so the marker pattern is 6b b6 02.
+            assert b"\x6b\xb6\x02" in buf, (
+                f"BUNDLE marker (6b b6 02) not in {len(buf)} received bytes"
             )
 
             # Hub-side: frames-sent counter must have advanced.  At
-            # ODR 833 Hz / batch 8 (~104 fps) we expect ~312 frames in
-            # 3 s; require ≥100 to absorb stack and host jitter.
+            # the 100 Hz BUNDLE tick we expect ~300 frames in 3 s;
+            # require ≥100 to absorb stack and host jitter.
             status2 = p.sendCommand("btsensor status", timeout=5)
             m = re.search(
-                r"frames:\s*sent=(\d+)\s+dropped=(\d+)", status2
+                r"frames:\s*sent=(\d+)\s+dropped_oldest=(\d+)\s+dropped_full=(\d+)",
+                status2,
             )
             sent2 = int(m.group(1))
             dropped2 = int(m.group(2))
@@ -296,9 +297,9 @@ def test_bt_pc_pair_and_stream(p):
             # PC actually received.  Allow generous slack relative to
             # delta_sent because RFCOMM-level fragmentation may leave
             # a partial frame at the trailing edge.
-            magic_count = buf.count(b"\x6b\xb6")
-            assert magic_count >= 50, (
-                f"PC received only {magic_count} magic markers in "
+            marker_count = buf.count(b"\x6b\xb6\x02")
+            assert marker_count >= 50, (
+                f"PC received only {marker_count} BUNDLE markers in "
                 f"{len(buf)} bytes — stream is not flowing"
             )
         finally:
@@ -412,10 +413,12 @@ def test_bt_rfcomm_command_suite(p):
     the full PC→Hub ASCII command surface and the IMU stream end to
     end.
 
-    The Hub-side ``btsensor_cmd.c`` parser accepts ``IMU ON|OFF`` and
-    ``SET ODR|BATCH|ACCEL_FSR|GYRO_FSR <value>`` (Issue #56 Commit D).
-    All mutators return ``-EBUSY`` while sampling is active, so the
-    SET cases run with IMU off and the BUSY case runs after IMU on.
+    The Hub-side ``btsensor_cmd.c`` parser accepts ``IMU ON|OFF`` /
+    ``SENSOR ON|OFF`` and ``SET ODR|ACCEL_FSR|GYRO_FSR <value>`` (Issue
+    #88).  All mutators return ``-EBUSY`` while sampling is active, so
+    the SET cases run with IMU off and the BUSY case runs after IMU on.
+    ``SET BATCH`` is removed and ``SET ODR > 833`` returns
+    ``ERR invalid_odr``.
 
     Requires CAP_NET_RAW (rerun pytest with sudo if the AF_BLUETOOTH
     socket cannot be created).  Skipped automatically in that case.
@@ -457,26 +460,33 @@ def test_bt_rfcomm_command_suite(p):
 
             # Phase 1: IMU is off → SET commands all succeed.
             assert _rfcomm_send_command(sock, "SET ODR 416") == "OK"
-            assert _rfcomm_send_command(sock, "SET BATCH 16") == "OK"
             assert _rfcomm_send_command(sock, "SET ACCEL_FSR 4") == "OK"
             assert _rfcomm_send_command(sock, "SET GYRO_FSR 1000") == "OK"
 
             status = p.sendCommand("btsensor status", timeout=5)
             assert "odr=416Hz" in status, status
-            assert "batch=16" in status, status
             assert "accel_fsr=4g" in status, status
             assert "gyro_fsr=1000dps" in status, status
 
             # Phase 2: invalid arguments produce ERR.
-            r = _rfcomm_send_command(sock, "SET BATCH 200")  # > 80
+            r = _rfcomm_send_command(sock, "SET ODR 1660")  # > 833 cap
             assert r is not None and r.startswith("ERR"), r
             r = _rfcomm_send_command(sock, "SET FOO 1")
             assert r is not None and r.startswith("ERR"), r
             r = _rfcomm_send_command(sock, "BAD")
             assert r is not None and r.startswith("ERR"), r
+            # SET BATCH is removed in Issue #88.
+            r = _rfcomm_send_command(sock, "SET BATCH 16")
+            assert r is not None and r.startswith("ERR"), r
 
-            # Phase 3: IMU ON, then verify frames flow on the wire and
-            # carry the parameters we just set.
+            # Phase 3: SENSOR ON/OFF round-trip (LEGO TLV streaming).
+            assert _rfcomm_send_command(sock, "SENSOR ON") == "OK"
+            status = p.sendCommand("btsensor status", timeout=5)
+            assert re.search(r"sensor:\s+on", status), status
+            assert _rfcomm_send_command(sock, "SENSOR OFF") == "OK"
+
+            # Phase 4: IMU ON, then verify BUNDLE frames flow on the
+            # wire and carry the parameters we just set.
             assert _rfcomm_send_command(sock, "IMU ON") == "OK"
             status = p.sendCommand("btsensor status", timeout=5)
             assert re.search(r"imu:\s+on", status), status
@@ -496,37 +506,47 @@ def test_bt_rfcomm_command_suite(p):
                 buf += chunk
 
             assert len(buf) > 0, "no RFCOMM bytes received with IMU on"
-            assert b"\x6b\xb6" in buf, (
-                f"magic 0xB66B not in {len(buf)} bytes"
+            assert b"\x6b\xb6\x02" in buf, (
+                f"BUNDLE marker (6b b6 02) not in {len(buf)} bytes"
             )
 
-            # Parse the first complete frame and verify the SET fields
-            # are echoed back in the header (Commit E layout, all LE):
-            #   [0:2]   magic   = 0xB66B
-            #   [2]     type    = 0x01
-            #   [3]     count   = 16  (we set BATCH 16)
-            #   [4:6]   rate    = 416 (we set ODR 416)
-            #   [6:8]   accel   = 4   (we set ACCEL_FSR 4)
-            #   [8:10]  gyro    = 1000 (we set GYRO_FSR 1000)
-            idx = buf.find(b"\x6b\xb6")
-            assert idx >= 0 and len(buf) >= idx + 18, (
-                f"truncated frame at idx={idx}, total={len(buf)}"
+            # Parse the first complete BUNDLE and verify the SET fields
+            # are echoed back in the bundle header.  Issue #88 layout:
+            #   [0:2]    magic  = 0xB66B
+            #   [2]      type   = 0x02 (BUNDLE)
+            #   [3:5]    frame_len
+            #   bundle hdr at offset 5..20:
+            #     +5  seq               (u16)
+            #     +7  tick_ts_us        (u32)
+            #     +11 imu_section_len   (u16)
+            #     +13 imu_sample_count  (u8)
+            #     +14 tlv_count         (u8 = 6)
+            #     +15 imu_sample_rate_hz(u16) = 416
+            #     +17 imu_accel_fsr_g   (u8)  = 4
+            #     +18 imu_gyro_fsr_dps  (u16) = 1000
+            #     +20 flags             (u8)
+            idx = buf.find(b"\x6b\xb6\x02")
+            assert idx >= 0 and len(buf) >= idx + 21, (
+                f"truncated bundle at idx={idx}, total={len(buf)}"
             )
-            hdr = buf[idx:idx + 18]
-            assert hdr[2] == 0x01, f"frame type {hdr[2]:#x} != 0x01"
-            assert hdr[3] == 16, f"sample_count {hdr[3]} != 16"
-            rate = int.from_bytes(hdr[4:6], "little")
-            accel_fsr = int.from_bytes(hdr[6:8], "little")
-            gyro_fsr = int.from_bytes(hdr[8:10], "little")
+            envelope_and_hdr = buf[idx:idx + 21]
+            assert envelope_and_hdr[2] == 0x02, (
+                f"frame type {envelope_and_hdr[2]:#x} != 0x02"
+            )
+            tlv_count = envelope_and_hdr[5 + 9]
+            assert tlv_count == 6, f"tlv_count {tlv_count} != 6"
+            rate = int.from_bytes(envelope_and_hdr[5 + 10:5 + 12], "little")
+            accel_fsr = envelope_and_hdr[5 + 12]
+            gyro_fsr = int.from_bytes(envelope_and_hdr[5 + 13:5 + 15], "little")
             assert rate == 416, f"sample_rate_hz {rate} != 416"
             assert accel_fsr == 4, f"accel_fsr_g {accel_fsr} != 4"
             assert gyro_fsr == 1000, f"gyro_fsr_dps {gyro_fsr} != 1000"
 
-            # Phase 4: SET while IMU is on returns ERR busy.
+            # Phase 5: SET while IMU is on returns ERR busy.
             r = _rfcomm_send_command(sock, "SET ODR 833")
             assert r is not None and "busy" in r.lower(), r
 
-            # Phase 5: IMU OFF cleanly stops the stream.
+            # Phase 6: IMU OFF cleanly stops the stream.
             assert _rfcomm_send_command(sock, "IMU OFF") == "OK"
             status = p.sendCommand("btsensor status", timeout=5)
             assert re.search(r"imu:\s+off", status), status
@@ -534,6 +554,7 @@ def test_bt_rfcomm_command_suite(p):
             sock.close()
     finally:
         p.sendCommand("btsensor imu off", timeout=5)
+        p.sendCommand("btsensor sensor off", timeout=5)
         p.sendCommand("btsensor bt off", timeout=5)
         p.sendCommand("btsensor stop", timeout=5)
         time.sleep(1)

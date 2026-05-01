@@ -1,14 +1,21 @@
 /****************************************************************************
  * apps/btsensor/btsensor_cmd.c
  *
- * PC -> Hub ASCII command parser for btsensor (Issue #56 Commit D).
+ * PC -> Hub ASCII command parser for btsensor.
  *
- * The command set is intentionally tiny — toggle IMU sampling and
- * adjust ODR / FSR / batch — so the parser is just a 64-byte line
- * buffer fed character at a time, then strtok_r dispatch.  All
- * mutations route through imu_sampler_set_*() so the cache and the
- * driver stay in sync, and replies are queued via the btsensor_tx
- * arbiter so they have priority over IMU telemetry.
+ * Tiny line-based protocol (64-byte buffer, '\n' delimited, '\r'
+ * ignored).  Mutations route through bundle_emitter / imu_sampler so
+ * the BUNDLE wire flags and the underlying driver stay in sync, and
+ * replies are queued via btsensor_tx so they have priority over
+ * telemetry.
+ *
+ *   IMU ON | OFF             toggle IMU streaming
+ *   SENSOR ON | OFF          toggle LEGO sensor streaming (Issue B fills
+ *                            in TLV publish tracking; Issue A just
+ *                            records the flag)
+ *   SET ODR <hz>             ODR (only while IMU OFF, must be <=833)
+ *   SET ACCEL_FSR <g>        accel FSR (only while IMU OFF)
+ *   SET GYRO_FSR <dps>       gyro FSR (only while IMU OFF)
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -23,6 +30,7 @@
 
 #include "btsensor_cmd.h"
 #include "btsensor_tx.h"
+#include "bundle_emitter.h"
 #include "imu_sampler.h"
 
 /****************************************************************************
@@ -78,18 +86,48 @@ static void cmd_imu(char *arg)
 
   if (strcmp(arg, "ON") == 0)
     {
-      reply_rc(imu_sampler_set_enabled(true), "IMU ON");
+      reply_rc(bundle_emitter_set_imu_enabled(true), "IMU ON");
       return;
     }
 
   if (strcmp(arg, "OFF") == 0)
     {
-      reply_rc(imu_sampler_set_enabled(false), "IMU OFF");
+      reply_rc(bundle_emitter_set_imu_enabled(false), "IMU OFF");
       return;
     }
 
   char buf[BTSENSOR_CMD_MAX_LINE];
   snprintf(buf, sizeof(buf), "ERR invalid %s\n", arg);
+  reply(buf);
+}
+
+static void cmd_sensor(char *arg)
+{
+  if (arg == NULL)
+    {
+      reply("ERR invalid SENSOR\n");
+      return;
+    }
+
+  if (strcmp(arg, "ON") == 0)
+    {
+      reply_rc(bundle_emitter_set_sensor_enabled(true), "SENSOR ON");
+      return;
+    }
+
+  if (strcmp(arg, "OFF") == 0)
+    {
+      reply_rc(bundle_emitter_set_sensor_enabled(false), "SENSOR OFF");
+      return;
+    }
+
+  /* MODE / SEND / PWM tokens are reserved for Issue C; surface a
+   * distinct error so the host UI can hide the corresponding controls
+   * until that lands.
+   */
+
+  char buf[BTSENSOR_CMD_MAX_LINE];
+  snprintf(buf, sizeof(buf), "ERR not_supported %s\n", arg);
   reply(buf);
 }
 
@@ -111,12 +149,6 @@ static void cmd_set(char *what, char *value_str)
   if (strcmp(what, "ODR") == 0)
     {
       reply_rc(imu_sampler_set_odr_hz((uint32_t)v), "ODR");
-      return;
-    }
-
-  if (strcmp(what, "BATCH") == 0)
-    {
-      reply_rc(imu_sampler_set_batch((uint8_t)v), "BATCH");
       return;
     }
 
@@ -151,6 +183,12 @@ static void process_line(char *line)
   if (strcmp(cmd, "IMU") == 0)
     {
       cmd_imu(strtok_r(NULL, " ", &save));
+      return;
+    }
+
+  if (strcmp(cmd, "SENSOR") == 0)
+    {
+      cmd_sensor(strtok_r(NULL, " ", &save));
       return;
     }
 
@@ -211,10 +249,6 @@ void btsensor_cmd_feed(const uint8_t *data, uint16_t len)
         }
       else
         {
-          /* Latch overflow until the next '\n' so we don't echo a
-           * stream of ERRs while a long line is still arriving.
-           */
-
           g_overflowed = true;
         }
     }

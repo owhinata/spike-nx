@@ -47,22 +47,19 @@
         </Grid>
 
         <TextBlock Classes="header" Text="IMU control" />
-        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto">
+        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto">
           <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="ODR (Hz)" VerticalAlignment="Center" />
           <ComboBox Grid.Row="0" Grid.Column="1" HorizontalAlignment="Stretch"
                     ItemsSource="{x:Static vm:MainViewModel.OdrOptions}"
                     SelectedItem="{Binding OdrHz}"
                     IsEnabled="{Binding CanEditImuConfig}" />
-          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="BATCH" VerticalAlignment="Center" />
-          <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="1" Maximum="80" Value="{Binding Batch}"
-                         IsEnabled="{Binding CanEditImuConfig}" />
-          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Accel FSR (g)" VerticalAlignment="Center" />
-          <ComboBox Grid.Row="2" Grid.Column="1" HorizontalAlignment="Stretch"
+          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Accel FSR (g)" VerticalAlignment="Center" />
+          <ComboBox Grid.Row="1" Grid.Column="1" HorizontalAlignment="Stretch"
                     ItemsSource="{x:Static vm:MainViewModel.AccelFsrOptions}"
                     SelectedItem="{Binding AccelFsrG}"
                     IsEnabled="{Binding CanEditImuConfig}" />
-          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="Gyro FSR (dps)" VerticalAlignment="Center" />
-          <ComboBox Grid.Row="3" Grid.Column="1" HorizontalAlignment="Stretch"
+          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Gyro FSR (dps)" VerticalAlignment="Center" />
+          <ComboBox Grid.Row="2" Grid.Column="1" HorizontalAlignment="Stretch"
                     ItemsSource="{x:Static vm:MainViewModel.GyroFsrOptions}"
                     SelectedItem="{Binding GyroFsrDps}"
                     IsEnabled="{Binding CanEditImuConfig}" />

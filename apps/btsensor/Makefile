@@ -12,8 +12,14 @@ MAINSRC = btsensor_main.c
 # below, which we pull in for the spp_create_sdp_record helper.
 CSRCS  += btsensor_spp.c
 
-# IMU sampler / RFCOMM streamer — Issue #52 Step E.
+# IMU drain helper — Issue #52 Step E (framing剥離 in Issue #88).
 CSRCS  += imu_sampler.c
+
+# LEGO sensor uORB snapshot helper — Issue #88 (Issue B for full impl).
+CSRCS  += sensor_sampler.c
+
+# 100 Hz BUNDLE frame emitter — Issue #88.
+CSRCS  += bundle_emitter.c
 
 # Single RFCOMM send arbiter (response queue + frame ring) — Issue #56 B.
 CSRCS  += btsensor_tx.c
