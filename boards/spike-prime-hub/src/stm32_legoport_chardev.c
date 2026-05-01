@@ -46,6 +46,14 @@ struct legoport_chardev_s
 {
   uint8_t            port;             /* 0..5 */
   bool               open;
+  bool               drove;            /* true once this open session has
+                                        * issued SET_DUTY / COAST / BRAKE
+                                        * via this chardev — gates close-
+                                        * time auto-COAST so that read-
+                                        * only consumers (e.g. `port pwm
+                                        * <P> status`) do not coast a
+                                        * motor driven by another path
+                                        * (e.g. `sensor motor_* pwm`) */
   uint32_t           last_seen_event;  /* per-fd snapshot for WAIT_* */
   mutex_t            lock;             /* serializes open/close vs. poll */
   FAR struct pollfd *fds[LEGOPORT_MAX_POLLWAITERS];
@@ -131,6 +139,7 @@ static int legoport_cdev_open(FAR struct file *filep)
     }
 
   priv->open            = true;
+  priv->drove           = false;
   priv->last_seen_event = 0;
 
   nxmutex_unlock(&priv->lock);
@@ -143,14 +152,22 @@ static int legoport_cdev_close(FAR struct file *filep)
 
   nxmutex_lock(&priv->lock);
 
-  /* Runaway-motor cleanup: coast only if the port was actively driven
-   * (state == PWM).  Stable stop states (explicit BRAKE / COAST) and
-   * LUMP-pinned SUPPLY rails survive close().
+  /* Runaway-motor cleanup: coast only if **this fd** has actually
+   * driven the port via SET_DUTY / COAST / BRAKE during its open
+   * session.  Read-only consumers (e.g. `port pwm <P> status`) leave
+   * the port state untouched — they used to clobber motors that had
+   * been driven by another path such as `sensor motor_* pwm`.  Stable
+   * stop states and LUMP-pinned SUPPLY rails are always preserved by
+   * `stm32_legoport_pwm_close_cleanup` itself.
    */
 
-  stm32_legoport_pwm_close_cleanup(priv->port);
+  if (priv->drove)
+    {
+      stm32_legoport_pwm_close_cleanup(priv->port);
+    }
 
-  priv->open = false;
+  priv->open  = false;
+  priv->drove = false;
   nxmutex_unlock(&priv->lock);
   return OK;
 }
@@ -397,13 +414,34 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
 #endif
 
       case LEGOPORT_PWM_SET_DUTY:
-        return stm32_legoport_pwm_set_duty(priv->port, (int16_t)arg);
+        {
+          int rc = stm32_legoport_pwm_set_duty(priv->port, (int16_t)arg);
+          if (rc == OK)
+            {
+              priv->drove = true;
+            }
+          return rc;
+        }
 
       case LEGOPORT_PWM_COAST:
-        return stm32_legoport_pwm_coast(priv->port);
+        {
+          int rc = stm32_legoport_pwm_coast(priv->port);
+          if (rc == OK)
+            {
+              priv->drove = true;
+            }
+          return rc;
+        }
 
       case LEGOPORT_PWM_BRAKE:
-        return stm32_legoport_pwm_brake(priv->port);
+        {
+          int rc = stm32_legoport_pwm_brake(priv->port);
+          if (rc == OK)
+            {
+              priv->drove = true;
+            }
+          return rc;
+        }
 
       case LEGOPORT_PWM_GET_STATUS:
         {
