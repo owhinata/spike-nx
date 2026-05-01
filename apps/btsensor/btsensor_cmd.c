@@ -193,10 +193,13 @@ static int parse_hex_bytes(char **save, uint8_t *out, size_t cap)
   return total > 0 ? (int)total : -EINVAL;
 }
 
-/* Parse 1..4 signed integers in -100..+100 from successive strtok
- * tokens, scaling each ×100 to match the LUMP int16 channel space
- * (-10000..+10000 for motor duty, 0..10000 for color/ultrasonic LED
- * brightness).  Returns the count parsed, or a negated errno.
+/* Parse 1..4 signed integers in -10000..+10000 from successive
+ * strtok tokens.  Values pass through verbatim into `int16_t` channel
+ * slots — no scaling — matching `LEGOSENSOR_SET_PWM channels[]` and
+ * `port pwm <P> set <duty>` directly.  COLOR / ULTRASONIC are
+ * -ENOTSUP from SET_PWM (Issue #92) and use SEND mode=LIGHT instead;
+ * MOTOR_* uses the full -10000..+10000 range; FORCE has no actuator.
+ * Returns the count parsed, or a negated errno.
  */
 
 static int parse_pwm_channels(char **save, int16_t *out, size_t cap)
@@ -213,12 +216,19 @@ static int parse_pwm_channels(char **save, int16_t *out, size_t cap)
 
       char *end;
       long v = strtol(tok, &end, 10);
-      if (*end != '\0' || v < -100 || v > 100)
+      if (*end != '\0' || v < -10000 || v > 10000)
         {
           return -EINVAL;
         }
 
-      out[n++] = (int16_t)(v * 100);
+      /* BT-side PWM units are now raw kernel duty (-10000..10000,
+       * .01 % units), matching `LEGOSENSOR_SET_PWM channels[]` and
+       * `port pwm <P> set <duty>` directly.  The previous mapping
+       * (-100..100 percent → ×100 scale here) was confusing across
+       * the CLI / BT / kernel boundary; #92 unifies on raw units.
+       */
+
+      out[n++] = (int16_t)v;
     }
 
   return n > 0 ? (int)n : -EINVAL;

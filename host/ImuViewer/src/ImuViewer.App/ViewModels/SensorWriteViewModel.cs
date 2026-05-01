@@ -22,8 +22,9 @@ namespace ImuViewer.App.ViewModels;
 ///         "PWM" isn't the right semantic — see sensor.md §4.5</item>
 ///   <item>ULTRASONIC — eye-LED LIGHT mode via SET_PWM (current
 ///         backend, may also migrate to SEND later)</item>
-///   <item>MOTOR_* — H-bridge duty (-100..+100) via SET_PWM
-///         (returns -ENOTSUP until Issue #80 lands)</item>
+///   <item>MOTOR_* — H-bridge duty (-10000..+10000, raw kernel
+///         .01 % units, matching `port pwm <P> set <duty>`) via
+///         SET_PWM, wired to the H-bridge driver from Issue #80</item>
 ///   <item>FORCE — no actuator, slider hidden</item>
 /// </list>
 /// </summary>
@@ -150,9 +151,13 @@ public sealed partial class SensorWriteViewModel : ObservableObject
             case LegoClassId.MotorM:
             case LegoClassId.MotorR:
             case LegoClassId.MotorL:
-                WriteSliderMin = -100;
-                WriteSliderMax = 100;
-                WriteSliderHeader = "Motor PWM  (-100..+100 %, signed duty)";
+                // Kernel SET_PWM channel unit is .01 % (raw duty),
+                // matching `port pwm <P> set <duty>` in NSH.  Slider
+                // exposes the same units so the value visible in the
+                // Viewer == the value reported by `port pwm A status`.
+                WriteSliderMin = -10000;
+                WriteSliderMax = 10000;
+                WriteSliderHeader = "Motor PWM  (-10000..+10000, signed duty / .01 %)";
                 WriteSliderApplyLabel = "Apply PWM";
                 break;
             default:
