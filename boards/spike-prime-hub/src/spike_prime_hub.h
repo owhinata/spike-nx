@@ -191,6 +191,10 @@ int stm32_battery_charger_initialize(void);
 void stm32_cpuload_initialize(void);
 #endif
 
+#ifdef CONFIG_SCHED_HPWORK
+int stm32_hpwork_softdog_initialize(void);
+#endif
+
 int stm32_sound_initialize(void);
 int stm32_tone_register(void);
 int stm32_pcm_register(void);

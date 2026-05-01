@@ -281,6 +281,16 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_SCHED_HPWORK
+  ret = stm32_hpwork_softdog_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "ERROR: stm32_hpwork_softdog_initialize() failed: %d\n",
+             ret);
+    }
+#endif
+
   ret = stm32_sound_initialize();
   if (ret < 0)
     {
