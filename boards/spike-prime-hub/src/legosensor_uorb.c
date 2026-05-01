@@ -1002,14 +1002,20 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
               return -EINVAL;
             }
 
-          /* Per-class shape & range. */
+          /* Per-class shape & range.
+           *
+           * SET_PWM is reserved for **actual H-bridge PWM** (the
+           * MOTOR_* classes below).  COLOR's "LIGHT" mode and FORCE's
+           * absence of any actuator are not PWM in the H-bridge sense,
+           * so they return -ENOTSUP — callers should issue SEND
+           * mode=LIGHT explicitly via `LEGOSENSOR_SEND` instead (Issue
+           * #92).  ULTRASONIC's eye-LED LIGHT mode is left wired here
+           * for now; will be re-evaluated when ULTRASONIC sees the
+           * same write-API rationalisation.
+           */
 
           switch (cdev->class_id)
             {
-              case LEGOSENSOR_CLASS_COLOR:
-                expected = 3;
-                lo       = 0;
-                break;
               case LEGOSENSOR_CLASS_ULTRASONIC:
                 expected = 4;
                 lo       = 0;
@@ -1021,11 +1027,15 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
                 lo       = -10000;
                 is_motor = true;
                 break;
+              case LEGOSENSOR_CLASS_COLOR:
               case LEGOSENSOR_CLASS_FORCE:
               default:
-                /* Force has no actuator and no per-class fallback for
-                 * unrecognised slot indices.  Validate CLAIM so the
-                 * caller's stale-claim diagnostic is still surfaced.
+                /* Color has no actual PWM (mode 3 LIGHT is firmware-
+                 * gated per SELECT mode and only takes effect while
+                 * mode 3 is active — see docs/.../sensor.md §4.5).
+                 * Force has no actuator at all.  Both validate CLAIM
+                 * so the caller's stale-claim diagnostic still shows,
+                 * then return -ENOTSUP.
                  */
 
                 ret = legosensor_check_write_claim(cs, filep, &port_to_use);
