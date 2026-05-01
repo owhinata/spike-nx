@@ -89,6 +89,9 @@ public sealed partial class SensorWriteViewModel : ObservableObject
     private string _writeSliderApplyLabel = "Apply";
 
     [ObservableProperty]
+    private bool _brakeIsSupported;
+
+    [ObservableProperty]
     private bool _writeEnabled;
 
     [ObservableProperty]
@@ -115,6 +118,7 @@ public sealed partial class SensorWriteViewModel : ObservableObject
             WriteSliderVisible = false;
             PwmChannelCount = 0;
             PwmCh0Visible = PwmCh1Visible = PwmCh2Visible = PwmCh3Visible = false;
+            BrakeIsSupported = false;
             return;
         }
 
@@ -126,6 +130,7 @@ public sealed partial class SensorWriteViewModel : ObservableObject
         PwmCh1Visible = PwmChannelCount >= 2;
         PwmCh2Visible = PwmChannelCount >= 3;
         PwmCh3Visible = PwmChannelCount >= 4;
+        BrakeIsSupported = IsMotor(value.Id);
 
         // Class-specific slider range / labelling.
         switch (value.Id)
@@ -244,6 +249,32 @@ public sealed partial class SensorWriteViewModel : ObservableObject
             classId, mode, payload, CancellationToken.None);
     }
 
+    /// <summary>
+    /// MOTOR_* dedicated BRAKE button.  Sends `SENSOR PWM <class> 0`,
+    /// which the kernel `stm32_legoport_pwm_set_duty(idx, 0)` interprets
+    /// as BRAKE (pybricks-compatible semantics: duty=0 short-circuits
+    /// the H-bridge to brake instead of coast).  Also snaps the slider
+    /// back to 0 so the UI matches the new state.
+    /// </summary>
+    [RelayCommand]
+    public async Task BrakeAsync()
+    {
+        if (SelectedClass is null || !IsMotor(SelectedClass.Id)) return;
+
+        PwmCh0 = 0;
+
+        try
+        {
+            BtsensorReply r = await _orchestrator.SensorPwmAsync(
+                SelectedClass.Id, new[] { 0 }, CancellationToken.None);
+            StatusText = r.IsOk ? "BRAKE (pwm=0)" : "BRAKE: " + r;
+        }
+        catch (Exception ex)
+        {
+            StatusText = "BRAKE: " + ex.Message;
+        }
+    }
+
     private static string FormatApplyOk(LegoClassId classId, byte? sendMode, int[] vals)
     {
         string joined = string.Join(',', vals);
@@ -251,6 +282,11 @@ public sealed partial class SensorWriteViewModel : ObservableObject
             ? $"SEND mode={sendMode.Value} → [{joined}]"
             : $"PWM → [{joined}]";
     }
+
+    private static bool IsMotor(LegoClassId classId) =>
+        classId == LegoClassId.MotorM ||
+        classId == LegoClassId.MotorR ||
+        classId == LegoClassId.MotorL;
 
     private static ImmutableArray<ModeOption> BuildModes(LegoClassId classId)
     {

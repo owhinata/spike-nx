@@ -135,6 +135,12 @@
             <Button HorizontalAlignment="Stretch"
                     Content="{Binding WriteSliderApplyLabel}"
                     Command="{Binding ApplyPwmCommand}" />
+            <Button HorizontalAlignment="Stretch"
+                    IsVisible="{Binding BrakeIsSupported}"
+                    Background="#7A2A2A"
+                    Foreground="#FFFFFF"
+                    Content="BRAKE (pwm=0)"
+                    Command="{Binding BrakeCommand}" />
           </StackPanel>
 
           <TextBlock Classes="label" FontSize="11"
