@@ -1005,21 +1005,17 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
           /* Per-class shape & range.
            *
            * SET_PWM is reserved for **actual H-bridge PWM** (the
-           * MOTOR_* classes below).  COLOR's "LIGHT" mode and FORCE's
-           * absence of any actuator are not PWM in the H-bridge sense,
-           * so they return -ENOTSUP — callers should issue SEND
-           * mode=LIGHT explicitly via `LEGOSENSOR_SEND` instead (Issue
-           * #92).  ULTRASONIC's eye-LED LIGHT mode is left wired here
-           * for now; will be re-evaluated when ULTRASONIC sees the
-           * same write-API rationalisation.
+           * MOTOR_* classes below).  COLOR / ULTRASONIC LIGHT modes
+           * and FORCE's absence of any actuator are not PWM in the
+           * H-bridge sense, so they return -ENOTSUP — callers should
+           * issue SEND mode=LIGHT explicitly via `LEGOSENSOR_SEND`
+           * (Issue #92).  Routing LED brightness through SEND keeps
+           * the SELECT-then-WRITE sequence visible and matches the
+           * underlying LUMP semantics.
            */
 
           switch (cdev->class_id)
             {
-              case LEGOSENSOR_CLASS_ULTRASONIC:
-                expected = 4;
-                lo       = 0;
-                break;
               case LEGOSENSOR_CLASS_MOTOR_M:
               case LEGOSENSOR_CLASS_MOTOR_R:
               case LEGOSENSOR_CLASS_MOTOR_L:
@@ -1028,14 +1024,17 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
                 is_motor = true;
                 break;
               case LEGOSENSOR_CLASS_COLOR:
+              case LEGOSENSOR_CLASS_ULTRASONIC:
               case LEGOSENSOR_CLASS_FORCE:
               default:
-                /* Color has no actual PWM (mode 3 LIGHT is firmware-
-                 * gated per SELECT mode and only takes effect while
-                 * mode 3 is active — see docs/.../sensor.md §4.5).
-                 * Force has no actuator at all.  Both validate CLAIM
-                 * so the caller's stale-claim diagnostic still shows,
-                 * then return -ENOTSUP.
+                /* COLOR mode 3 LIGHT and ULTRASONIC mode 5 LIGHT are
+                 * firmware-gated per SELECT mode (see sensor.md §4.5
+                 * for the COLOR analysis; ULTRASONIC behaves the same
+                 * way per pybricks reference).  FORCE has no actuator
+                 * at all.  Validate CLAIM so the caller's stale-claim
+                 * diagnostic still surfaces, then return -ENOTSUP.
+                 * Use `LEGOSENSOR_SEND` (mode=LIGHT) to drive the LEDs
+                 * explicitly.
                  */
 
                 ret = legosensor_check_write_claim(cs, filep, &port_to_use);

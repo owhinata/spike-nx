@@ -139,8 +139,8 @@ public sealed partial class SensorWriteViewModel : ObservableObject
             case LegoClassId.Ultrasonic:
                 WriteSliderMin = 0;
                 WriteSliderMax = 100;
-                WriteSliderHeader = "Eye LEDs  (LIGHT, 0..100 % per LED)";
-                WriteSliderApplyLabel = "Apply PWM";
+                WriteSliderHeader = "Eye LEDs  (mode 5, 0..100 % per LED)";
+                WriteSliderApplyLabel = "Apply LIGHT (SEND mode 5)";
                 break;
             case LegoClassId.MotorM:
             case LegoClassId.MotorR:
@@ -188,29 +188,49 @@ public sealed partial class SensorWriteViewModel : ObservableObject
             _ => Array.Empty<int>(),
         };
         if (vals.Length == 0) return;
+
+        byte? sendMode = LightSendModeFor(SelectedClass.Id);
+        bool useSend = sendMode.HasValue;
+        string verb  = useSend ? "SEND" : "PWM";
+
         try
         {
-            BtsensorReply r = SelectedClass.Id == LegoClassId.Color
-                ? await ApplyColorLightAsync(vals)
+            BtsensorReply r = useSend
+                ? await ApplyLightSendAsync(SelectedClass.Id, sendMode!.Value, vals)
                 : await _orchestrator.SensorPwmAsync(
                     SelectedClass.Id, vals, CancellationToken.None);
 
             StatusText = r.IsOk
-                ? FormatApplyOk(SelectedClass.Id, vals)
-                : (SelectedClass.Id == LegoClassId.Color ? "SEND: " : "PWM: ") + r;
+                ? FormatApplyOk(SelectedClass.Id, sendMode, vals)
+                : verb + ": " + r;
         }
         catch (Exception ex)
         {
-            StatusText = (SelectedClass.Id == LegoClassId.Color ? "SEND: " : "PWM: ")
-                         + ex.Message;
+            StatusText = verb + ": " + ex.Message;
         }
     }
 
-    private async Task<BtsensorReply> ApplyColorLightAsync(int[] vals)
+    /// <summary>
+    /// Returns the LUMP LIGHT-mode index for classes whose "PWM" sliders
+    /// have been re-routed through `SENSOR SEND` (Issue #92).  Returns
+    /// `null` for classes that still use `SENSOR PWM` (motors via the
+    /// H-bridge, once #80 lands).
+    /// </summary>
+    private static byte? LightSendModeFor(LegoClassId classId) => classId switch
     {
-        // COLOR LIGHT: mode 3, 3 × INT8 PCT (0..100).  Clamp to byte and
-        // route via SENSOR SEND (the equivalent SET_PWM ioctl returns
-        // -ENOTSUP for COLOR — Issue #92).
+        LegoClassId.Color      => (byte)3,   // COLOR mode 3 LIGHT (3×INT8 PCT)
+        LegoClassId.Ultrasonic => (byte)5,   // ULTRASONIC mode 5 LIGHT (4×INT8 PCT)
+        _ => null,
+    };
+
+    private async Task<BtsensorReply> ApplyLightSendAsync(
+        LegoClassId classId, byte mode, int[] vals)
+    {
+        // LIGHT-mode payload is INT8 PCT (0..100) per channel.
+        // Clamp before serialising — kernel rejects out-of-range
+        // values.  Routing through SENSOR SEND because the kernel
+        // SET_PWM ioctl now returns -ENOTSUP for LIGHT-bearing
+        // classes (Issue #92).
         byte[] payload = new byte[vals.Length];
         for (int i = 0; i < vals.Length; i++)
         {
@@ -221,14 +241,14 @@ public sealed partial class SensorWriteViewModel : ObservableObject
         }
 
         return await _orchestrator.SensorSendAsync(
-            LegoClassId.Color, mode: 3, payload, CancellationToken.None);
+            classId, mode, payload, CancellationToken.None);
     }
 
-    private static string FormatApplyOk(LegoClassId classId, int[] vals)
+    private static string FormatApplyOk(LegoClassId classId, byte? sendMode, int[] vals)
     {
         string joined = string.Join(',', vals);
-        return classId == LegoClassId.Color
-            ? $"SEND mode=3 → [{joined}]"
+        return sendMode.HasValue
+            ? $"SEND mode={sendMode.Value} → [{joined}]"
             : $"PWM → [{joined}]";
     }
 
