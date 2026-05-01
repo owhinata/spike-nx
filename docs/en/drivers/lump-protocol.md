@@ -159,12 +159,14 @@ Note that `on_error` fires on **every session-ending transition**, including pur
 
 ```
 port lump status              - per-port engine state table
-port lump info <N>            - dump full lump_device_info_s
-port lump set-mode <N> <m>    - request CMD SELECT
-port lump send <N> <m> <hex>...   - DATA TX (writable mode, 1..32 hex pairs)
-port lump watch <N> <ms>      - dump DATA frames for `ms` ms (10 ms poll)
+port lump <P> info            - dump full lump_device_info_s
+port lump <P> select <m>      - request CMD SELECT
+port lump <P> send <m> <hex>...   - DATA TX (writable mode, 1..32 hex pairs)
+port lump <P> watch <ms>      - dump DATA frames for `ms` ms (10 ms poll)
 port lump-hw dump             - RCC/USART/NVIC dump (diag build only)
 ```
+
+`<P>` is the port letter `A`..`F` (the CLI also accepts the numeric `0`..`5` form via `parse_port()` in `apps/port/port_main.c`).
 
 ## 8. Handoff contract (with DCM, Issue #42)
 

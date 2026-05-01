@@ -7,10 +7,13 @@
  * Usage:
  *   port             - same as `port list`
  *   port list        - dump all 6 ports' detected type + flags
- *   port info <N>    - verbose single-port view (N = 0..5)
- *   port wait <N> [timeout_ms]
+ *   port info <P>    - verbose single-port view (P = A..F or 0..5)
+ *   port wait <P> [timeout_ms]
  *                    - block on connect (timeout_ms=0: infinite)
  *   port stats       - HPWORK cadence stats (max step / max interval)
+ *   port pwm <P> {set <duty>[-k] | coast | brake | status}
+ *   port lump status
+ *   port lump <P> {info | select <m> | send <m> <hex>... | watch <ms>}
  *   port lump-hw dump
  *                    - dump RCC / USART / NVIC state for the 6 LUMP
  *                      UARTs (CONFIG_LEGO_LUMP_DIAG=y only)
@@ -456,7 +459,7 @@ static int do_lump_status(void)
   return 0;
 }
 
-static int do_lump_set_mode(int port, int mode)
+static int do_lump_select(int port, int mode)
 {
   if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
     {
@@ -774,7 +777,7 @@ static void usage(void)
   printf("  port lump status     - per-port engine state table\n");
   printf("  port lump <P> info\n"
          "                   - dump LUMP device info (post-SYNC)\n");
-  printf("  port lump <P> set-mode <m>\n"
+  printf("  port lump <P> select <m>\n"
          "                   - request mode switch (CMD SELECT)\n");
   printf("  port lump <P> send <m> <hex>...\n"
          "                   - send DATA frame (writable mode)\n");
@@ -913,14 +916,14 @@ int main(int argc, FAR char *argv[])
         {
           return do_lump_info(port);
         }
-      if (strcmp(verb, "set-mode") == 0)
+      if (strcmp(verb, "select") == 0)
         {
           if (argc < 5)
             {
               usage();
               return 1;
             }
-          return do_lump_set_mode(port, atoi(argv[4]));
+          return do_lump_select(port, atoi(argv[4]));
         }
       if (strcmp(verb, "send") == 0)
         {

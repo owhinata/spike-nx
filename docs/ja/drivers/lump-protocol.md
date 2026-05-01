@@ -155,12 +155,14 @@ int lump_get_status_full(int port, struct lump_status_full_s *out);
 
 ```
 port lump status              - per-port engine state テーブル
-port lump info <N>            - 完全 device_info dump
-port lump set-mode <N> <m>    - CMD SELECT 要求
-port lump send <N> <m> <hex>...  - DATA TX (writable mode、1..32 byte hex pair)
-port lump watch <N> <ms>      - DATA frame を ms ミリ秒間 dump (10 ms poll)
+port lump <P> info            - 完全 device_info dump
+port lump <P> select <m>      - CMD SELECT 要求
+port lump <P> send <m> <hex>...  - DATA TX (writable mode、1..32 byte hex pair)
+port lump <P> watch <ms>      - DATA frame を ms ミリ秒間 dump (10 ms poll)
 port lump-hw dump             - RCC/USART/NVIC dump (DIAG ビルドのみ)
 ```
+
+`<P>` はポート文字 `A`..`F` (apps/port/port_main.c の `parse_port()` が `0`..`5` の数値も受け付ける)。
 
 ## 8. ハンドオフ契約
 

@@ -8,7 +8,7 @@ config APP_PORT
 		    list / info <P> / wait <P> / stats   (Issue #42 DCM)
 		    pwm <P> set/coast/brake/status       (Issue #80 H-bridge)
 		    lump status                          (Issue #43 LUMP, global)
-		    lump <P> info/set-mode/send/watch    (Issue #43 LUMP, per-port)
+		    lump <P> info/select/send/watch      (Issue #43 LUMP, per-port)
 		    lump-hw dump                         (CONFIG_LEGO_LUMP_DIAG)
 
 		Port arguments accept A..F / a..f / 0..5.
