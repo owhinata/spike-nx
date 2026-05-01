@@ -329,7 +329,7 @@ def test_bt_button_short_press(p):
         p.sendCommand("dmesg", timeout=10)
 
         p.waitUser(
-            "Hub の BT ボタンを 1 回短押し (1 秒未満で離す) してから ENTER"
+            "Hub の BT ボタンを 1 回短押し (0.5 秒以下で離す) してから ENTER"
         )
 
         out = _wait_status_field(p, r"bt:\s+advertising", timeout=3.0)
@@ -359,7 +359,7 @@ def test_bt_button_long_press(p):
         p.sendCommand("dmesg", timeout=10)
 
         p.waitUser(
-            "Hub の BT ボタンを 1 秒以上長押ししてから離して ENTER"
+            "Hub の BT ボタンを 2 秒以上長押ししてから離して ENTER"
         )
 
         _wait_status_field(p, r"bt:\s+off", timeout=3.0)
