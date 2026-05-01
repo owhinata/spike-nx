@@ -274,12 +274,51 @@ LIGHT-mode resolution and payload conversion:
 > automatically on SYNC and the brightness commanded here will
 > also light the LEDs.
 
-### 4.5 kernel ↔ userspace responsibility split
+### 4.5 SPIKE Color Sensor firmware-autonomous LED policy (empirical)
+
+> Not in any LEGO-published spec.  The pybricks reference
+> implementation has always been built on top of this assumption, and
+> we **re-verified it on hardware on 2026-05-01** (Hub firmware =
+> `main`, sensor 45605).
+
+The SPIKE Color Sensor (type_id=61) drives its three on-board LEDs
+**autonomously based on the SELECTed LUMP mode**.  Neither
+`stm32_legoport_lump.c` nor `legosensor_uorb.c` carries any mode → LED
+table; we just forward the `CMD SELECT` and the sensor firmware
+decides what to do with the LEDs.
+
+| mode | name | observed LED default | physical meaning |
+|---|---|---|---|
+| 0 | COLOR | ON  | colour decision from reflected light → needs LEDs |
+| 1 | REFLT | ON  | reflected-light intensity |
+| 2 | AMBI  | OFF | ambient light — LEDs would corrupt the reading |
+| 3 | LIGHT | OFF (writable can override) | dedicated LED-control mode, parked off until userspace writes |
+| 4 | RREFL | ON  | raw reflected pair |
+| 5 | RGB I | ON  | RGB + clear/IR — needs LEDs |
+| 6 | HSV   | ON  | HSV under LED illumination (pybricks `surface=True`) |
+| 7 | SHSV  | OFF | HSV under ambient light (pybricks `surface=False`) |
+
+**Brightness written via LIGHT (mode 3) is local to mode 3 only**
+(hypothesis A, confirmed empirically):
+
+- While SELECT == 3, writes to LIGHT (`LEGOSENSOR_SET_PWM` /
+  `LUMP_SEND`) drive the LEDs immediately
+- As soon as SELECT moves to a different mode (e.g. mode 5 RGB_I), the
+  firmware overwrites the LED state with **its own default brightness
+  for that measurement mode** — the user-supplied value is discarded
+- Going back to mode 3 leaves the LEDs OFF until you write again
+
+So SET_PWM is useful for "drive the sensor as a controllable LED
+array" but **not** for "dim the measurement-mode LEDs of mode 5/6/etc"
+— firmware always wins for those modes.
+
+### 4.6 kernel ↔ userspace responsibility split
 
 | Layer | Responsibility | Example |
 |---|---|---|
-| **kernel driver (this code)** | Mechanism only.  Forwards SELECT / SEND / SET_PWM verbatim.  No mode-aware LED policy | SELECT(0) issues a CMD SELECT and never touches LED state |
-| **userspace helper library (Issue #78)** | Policy.  e.g. `legolib_color_set_mode(fd, mode)` issues SELECT + SET_PWM atomically so COLOR/REFLT mode lights the LEDs and AMBI mode turns them off | mode → LED tables live in #78, firmware-spec changes are localised |
+| **sensor firmware (LEGO)** | Owns per-mode LED ON/OFF policy autonomously; not reachable from the Hub | SELECT(5) → LED auto-ON, SELECT(7) → LED auto-OFF (table in 4.5) |
+| **kernel driver (this code)** | Mechanism only.  Forwards SELECT / SEND / SET_PWM verbatim.  No mode-aware LED policy of its own | SELECT(0) issues a CMD SELECT and never touches LED state — the actual ON/OFF happens inside the sensor firmware |
+| **userspace helper library (Issue #78)** | Optional override layer for callers that want to **defy** the firmware default.  Examples: "keep LEDs off in mode 0", "pin LIGHT to 50 % whenever in mode 3" | The firmware default is already correct for most use cases, so #78 is only needed when an app wants to subvert it |
 
 Standard NuttX "mechanism in kernel, policy in userspace".
 Subscribers may still call SELECT / SET_PWM directly if they want

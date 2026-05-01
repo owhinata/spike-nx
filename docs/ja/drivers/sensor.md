@@ -196,12 +196,38 @@ LIGHT mode 解決と payload 変換:
 >
 > SPIKE Color Sensor (`NEEDS_SUPPLY_PIN1`) と Ultrasonic Sensor (`NEEDS_SUPPLY_PIN1`) は SYNC 完了後に H-bridge を `-MAX_DUTY` で駆動して LED に電源を供給する必要がある (pybricks 参考実装: `pbio/drv/legodev/legodev_pup_uart.c:894-900`、capability map: `legodev_spec.c:201-208`)。本リリース (#79) では H-bridge driver が未実装のため、`LEGOSENSOR_SET_PWM` は LUMP LIGHT frame を wire 上に送出する (`tx_bytes` で確認可能) が **物理 LED は電源供給がないため点灯しない**。Issue #80 の H-bridge driver が landed すると、SYNC 後に該当 port の supply pin が自動駆動され、本 ioctl の brightness 設定が物理的にも反映される想定。
 
-### 4.5 kernel ↔ userspace の責務分離
+### 4.5 SPIKE Color Sensor の自動 LED 制御 (実機観測)
+
+> LEGO 公開仕様には記述なし。pybricks の暗黙の前提として実装されており、本プロジェクトでも **2026-05-01 に実機 (Hub firmware = main, sensor 45605) で再現確認済**。
+
+SPIKE Color Sensor (type_id=61) は SELECT を受け取るたびに firmware 側で **mode ごとに LED 3 灯を自律的に ON/OFF** する。Hub 側のドライバ (`stm32_legoport_lump.c` / `legosensor_uorb.c`) には mode → LED の対応表は **存在せず**、SELECT を CMD として転送しているだけ。
+
+| mode | 名称 | 観測される LED 既定動作 | 物理的意味 |
+|---|---|---|---|
+| 0 | COLOR | ON | 反射光から色を当てる → LED 必須 |
+| 1 | REFLT | ON | 反射率測定 |
+| 2 | AMBI  | OFF | 環境光測定。LED が点くと測れない |
+| 3 | LIGHT | OFF (writable で上書き可) | LED 制御 mode。ユーザの SET_PWM/WRITE で点ける |
+| 4 | RREFL | ON | raw 反射 |
+| 5 | RGB I | ON | RGB+I (反射光のスペクトル分解) |
+| 6 | HSV   | ON | LED ON 状態の HSV (pybricks の `surface=True` 経路) |
+| 7 | SHSV  | OFF | 周囲光下の HSV (pybricks の `surface=False`、ambient 相当) |
+
+**LIGHT mode (3) で書き込んだ brightness は mode 3 に滞在中だけ有効** (実機検証で確定した仮説 A):
+
+- mode 3 SELECT 中に `LEGOSENSOR_SET_PWM` / `LUMP_SEND` で書いた値 → LED に即反映
+- そこから `port lump <P> select 5` 等で他モードへ抜けると → firmware が「反射計測用デフォ輝度」で LED を上書きする (ユーザ値は捨てられる)
+- 戻って `select 3` しても、再度 WRITE しない限り LED は OFF (mode 3 既定)
+
+つまり SET_PWM は「カラーセンサーを純粋な LED アレイとして使う」用途では使えるが、「RGB_I 測定中の LED 輝度を絞る」用途には使えない (ファームに上書きされる)。
+
+### 4.6 kernel ↔ userspace の責務分離
 
 | 層 | 責務 | 例 |
 |---|---|---|
-| **kernel driver (本実装)** | mechanism のみ。SELECT / SEND / SET_PWM をそのまま装置に渡す。**mode に応じた LED 自動制御等の policy は持たない** | SELECT(0) を呼んだら LUMP CMD SELECT を発行するだけ、LED 状態には触れない |
-| **userspace ヘルパライブラリ (#78、別 Issue)** | policy を持つ。例: COLOR/REFLT mode で LED ON、AMBI mode で LED OFF を `legolib_color_set_mode(fd, mode)` の中で SELECT + SET_PWM を atomic に発行 | mode → LED 対応表は #78 内のテーブルで管理、firmware 仕様変更時もここ 1 箇所修正 |
+| **sensor firmware (LEGO 製)** | per-mode の LED ON/OFF は firmware が自律的に持つ。Hub 側からは触れない | mode 5 SELECT で LED 自動 ON、mode 7 SELECT で自動 OFF (4.5 表) |
+| **kernel driver (本実装)** | mechanism のみ。SELECT / SEND / SET_PWM を CMD として装置に渡す。**mode → LED policy は持たない** | SELECT(0) は LUMP CMD SELECT を 1 発出すだけで LED 状態には触れない (実際の ON/OFF は firmware 側で起きる) |
+| **userspace ヘルパライブラリ (#78、別 Issue)** | firmware の既定 policy を**上書き**したい場合の被せ層。例: 「mode 0 でも LED を消したい」「mode 3 で常時 50% で点けっぱなしにする」等を `legolib_color_*` 系 API でカプセル化 | firmware が既に "正しい" LED 制御をしているので、#78 はあくまで override 用途。デフォで十分なら #78 を経由しなくて良い |
 
 NuttX 流の "mechanism in kernel, policy in userspace" を踏襲。subscriber が直接 SELECT / SET_PWM を叩くのも引き続き OK (ライブラリは convenience で、enforce ではない)。
 
