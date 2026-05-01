@@ -772,13 +772,13 @@ static void usage(void)
   printf("  legoport pwm <P> status - duty + state + pinned flag\n");
 #ifdef CONFIG_LEGO_LUMP
   printf("  legoport lump status     - per-port engine state table\n");
-  printf("  legoport lump info <P>\n"
+  printf("  legoport lump <P> info\n"
          "                       - dump LUMP device info (post-SYNC)\n");
-  printf("  legoport lump set-mode <P> <m>\n"
+  printf("  legoport lump <P> set-mode <m>\n"
          "                       - request mode switch (CMD SELECT)\n");
-  printf("  legoport lump send <P> <m> <hex>...\n"
+  printf("  legoport lump <P> send <m> <hex>...\n"
          "                       - send DATA frame (writable mode)\n");
-  printf("  legoport lump watch <P> <ms>\n"
+  printf("  legoport lump <P> watch <ms>\n"
          "                       - dump DATA frames for `ms` ms\n");
 #endif
 #ifdef CONFIG_LEGO_LUMP_DIAG
@@ -883,71 +883,66 @@ int main(int argc, FAR char *argv[])
 #ifdef CONFIG_LEGO_LUMP
   if (strcmp(argv[1], "lump") == 0)
     {
+      /* "lump status" — global per-port table, no port arg. */
+
       if (argc >= 3 && strcmp(argv[2], "status") == 0)
         {
           return do_lump_status();
         }
-      if (argc >= 3 && strcmp(argv[2], "info") == 0)
+
+      /* All other "lump" subcommands take a port first to mirror
+       * "legoport pwm <P> <verb>".  argv[2] = port, argv[3] = verb.
+       */
+
+      if (argc < 4)
         {
-          if (argc < 4)
-            {
-              usage();
-              return 1;
-            }
-          int port = parse_port(argv[3]);
-          if (port < 0)
-            {
-              printf("bad port '%s'\n", argv[3]);
-              return 1;
-            }
+          usage();
+          return 1;
+        }
+
+      int port = parse_port(argv[2]);
+      if (port < 0)
+        {
+          printf("bad port '%s' — expected A..F or 0..5\n", argv[2]);
+          return 1;
+        }
+
+      const char *verb = argv[3];
+
+      if (strcmp(verb, "info") == 0)
+        {
           return do_lump_info(port);
         }
-      if (argc >= 3 && strcmp(argv[2], "set-mode") == 0)
+      if (strcmp(verb, "set-mode") == 0)
         {
           if (argc < 5)
             {
               usage();
               return 1;
             }
-          int port = parse_port(argv[3]);
-          if (port < 0)
-            {
-              printf("bad port '%s'\n", argv[3]);
-              return 1;
-            }
           return do_lump_set_mode(port, atoi(argv[4]));
         }
-      if (argc >= 3 && strcmp(argv[2], "send") == 0)
+      if (strcmp(verb, "send") == 0)
         {
           if (argc < 6)
             {
               usage();
               return 1;
             }
-          int port = parse_port(argv[3]);
-          if (port < 0)
-            {
-              printf("bad port '%s'\n", argv[3]);
-              return 1;
-            }
           return do_lump_send(port, atoi(argv[4]),
                               argc - 5, &argv[5]);
         }
-      if (argc >= 3 && strcmp(argv[2], "watch") == 0)
+      if (strcmp(verb, "watch") == 0)
         {
           if (argc < 5)
             {
               usage();
               return 1;
             }
-          int port = parse_port(argv[3]);
-          if (port < 0)
-            {
-              printf("bad port '%s'\n", argv[3]);
-              return 1;
-            }
           return do_lump_watch(port, atoi(argv[4]));
         }
+
+      printf("unknown lump verb '%s'\n", verb);
       usage();
       return 1;
     }
