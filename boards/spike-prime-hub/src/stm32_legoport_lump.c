@@ -298,6 +298,15 @@ static int  lump_data_loop(struct lump_engine_s *e);
 static void lump_reset_session_state(struct lump_engine_s *e);
 static uint8_t lump_msg_payload_size(uint8_t header);
 
+/* H-bridge HAL (boards/spike-prime-hub/src/stm32_legoport_pwm.c) — used
+ * by the supply-rail auto-drive on SYNC and by the reset path on
+ * disconnect / ERR.  See pybricks `legodev_pup_uart.c:894-900` /
+ * `:690-694` for the equivalent calls.
+ */
+
+int stm32_legoport_pwm_pin_supply(int idx, int sign);
+int stm32_legoport_pwm_unpin(int idx);
+
 /****************************************************************************
  * Helpers
  ****************************************************************************/
@@ -354,6 +363,17 @@ static void lump_reset_session_state(struct lump_engine_s *e)
   e->new_baud_rate   = LUMP_BAUD_INITIAL;
   e->err_count       = 0;
   e->rx_msg_size     = 0;
+
+  /* Drop any SUPPLY rail this port may have been holding for an
+   * active sensor (Color / Ultrasonic) — pybricks
+   * `legodev_pup_uart.c:690-694` calls `pbdrv_motor_driver_coast()`
+   * from `pbdrv_legodev_pup_uart_reset` for the same reason.
+   * Calling unconditionally is safe: the HAL clears the pinned flag
+   * and coasts; if the port was not pinned, this is just an extra
+   * coast on an already-coasted port.
+   */
+
+  stm32_legoport_pwm_unpin(e->port);
 
   nxmutex_lock(&e->info_lock);
   memset(&e->info, 0, sizeof(e->info));
@@ -1220,11 +1240,32 @@ static int lump_sync(struct lump_engine_s *e)
   nxmutex_lock(&e->info_lock);
   e->info.flags |= LUMP_FLAG_SYNCED;
   e->info.baud   = e->new_baud_rate;
-  uint8_t default_mode = e->info.current_mode;
-  uint8_t num_modes    = e->info.num_modes;
+  uint8_t default_mode  = e->info.current_mode;
+  uint8_t num_modes     = e->info.num_modes;
+  uint8_t cap_flags     = e->info.capability_flags;
   nxmutex_unlock(&e->info_lock);
 
   e->state = LUMP_ST_DATA;
+
+  /* Supply rail auto-drive — mirrors pybricks
+   * `legodev_pup_uart.c:894-900`.  Devices that announced
+   * NEEDS_SUPPLY_PIN1 (Color / Ultrasonic) need pin1 held HIGH so the
+   * H-bridge bus rail powers their LEDs / IR / photodiode circuitry;
+   * the H-bridge layer translates that into "REV at MAX_DUTY".
+   * NEEDS_SUPPLY_PIN2 is the mirror image (Technic Color Light Matrix).
+   * Stays pinned (rejecting userspace SET_DUTY / BRAKE) until the
+   * session ends — see `lump_reset_session_state()` for the unpin
+   * path.
+   */
+
+  if (cap_flags & LUMP_CAP_NEEDS_SUPPLY_PIN1)
+    {
+      stm32_legoport_pwm_pin_supply(e->port, -1);
+    }
+  else if (cap_flags & LUMP_CAP_NEEDS_SUPPLY_PIN2)
+    {
+      stm32_legoport_pwm_pin_supply(e->port, +1);
+    }
 
   syslog(LOG_INFO,
          "lump: port %c: SYNCED type=%u modes=%u baud=%lu\n",

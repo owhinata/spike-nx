@@ -118,6 +118,8 @@ struct legoport_pwm_dev_s
   int16_t   duty;             /* current duty (-10000..10000) */
   uint8_t   state;            /* legoport_pwm_state_e */
   bool      initialized;
+  bool      pinned;           /* held by LUMP supply rail (true while
+                               * NEEDS_SUPPLY_PIN1/PIN2 device is SYNCED) */
   mutex_t   lock;
 };
 
@@ -590,6 +592,19 @@ int stm32_legoport_pwm_set_duty(int idx, int16_t duty)
       return ret;
     }
 
+  /* While LUMP holds the H-bridge as a SUPPLY rail (Color / Ultrasonic
+   * sensor that announces NEEDS_SUPPLY_PIN1/PIN2), userspace must not
+   * disturb the duty.  Mirrors how pybricks user-level motor APIs
+   * cannot reach a non-motor LUMP device through the type category
+   * gate in `legodev_spec_device_category_match()`.
+   */
+
+  if (g_devs[idx].pinned)
+    {
+      nxmutex_unlock(&g_devs[idx].lock);
+      return -EBUSY;
+    }
+
   hbridge_set_duty_internal(idx, duty);
   nxmutex_unlock(&g_devs[idx].lock);
   return OK;
@@ -613,6 +628,17 @@ int stm32_legoport_pwm_coast(int idx)
   if (ret < 0)
     {
       return ret;
+    }
+
+  /* close()-time auto-COAST also reaches us — stay silent (no -EBUSY)
+   * for the pinned case so userspace closing a fd does not see an
+   * error code, but do not actually drop the supply rail.
+   */
+
+  if (g_devs[idx].pinned)
+    {
+      nxmutex_unlock(&g_devs[idx].lock);
+      return OK;
     }
 
   hbridge_apply_coast(idx);
@@ -640,7 +666,92 @@ int stm32_legoport_pwm_brake(int idx)
       return ret;
     }
 
+  if (g_devs[idx].pinned)
+    {
+      nxmutex_unlock(&g_devs[idx].lock);
+      return -EBUSY;
+    }
+
   hbridge_apply_brake(idx);
+  nxmutex_unlock(&g_devs[idx].lock);
+  return OK;
+}
+
+/* LUMP-internal API: pin a port as a SUPPLY rail.  Called from the
+ * LUMP engine (`stm32_legoport_lump.c`) right after SYNC reaches
+ * SYNCED on a device that announced NEEDS_SUPPLY_PIN1/PIN2.  Mirrors
+ * the pybricks `legodev_pup_uart.c:894-897` step that calls
+ * `pbdrv_motor_driver_set_duty_cycle(driver, ±MAX_DUTY)` straight
+ * after the baud-rate switch.
+ *
+ *   sign > 0 -> NEEDS_SUPPLY_PIN2 (FWD full drive, pin2=PWM-LOW)
+ *   sign < 0 -> NEEDS_SUPPLY_PIN1 (REV full drive, pin1=PWM-LOW)
+ *   sign = 0 -> coast (-EINVAL, since pinning to coast is meaningless)
+ */
+
+int stm32_legoport_pwm_pin_supply(int idx, int sign)
+{
+  int ret;
+
+  if (idx < 0 || idx >= BOARD_LEGOPORT_COUNT || sign == 0)
+    {
+      return -EINVAL;
+    }
+
+  if (!g_devs[idx].initialized)
+    {
+      return -ENODEV;
+    }
+
+  ret = nxmutex_lock(&g_devs[idx].lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  /* Drive the H-bridge to ±MAX_DUTY before flipping the pinned flag —
+   * after pinned=true, set_duty_internal cannot reach this idx so the
+   * configuration must be in place first.
+   */
+
+  hbridge_set_duty_internal(idx,
+                            sign > 0 ? LEGOPORT_PWM_DUTY_MAX
+                                     : LEGOPORT_PWM_DUTY_MIN);
+  g_devs[idx].pinned = true;
+
+  nxmutex_unlock(&g_devs[idx].lock);
+  return OK;
+}
+
+/* LUMP-internal API: drop the supply pin and coast.  Called from
+ * the LUMP engine reset path (disconnect / ERR / re-init) and from
+ * `stm32_legoport_pwm_initialize()` semantics if a re-init ever
+ * happens at runtime.
+ */
+
+int stm32_legoport_pwm_unpin(int idx)
+{
+  int ret;
+
+  if (idx < 0 || idx >= BOARD_LEGOPORT_COUNT)
+    {
+      return -EINVAL;
+    }
+
+  if (!g_devs[idx].initialized)
+    {
+      return -ENODEV;
+    }
+
+  ret = nxmutex_lock(&g_devs[idx].lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  g_devs[idx].pinned = false;
+  hbridge_apply_coast(idx);
+
   nxmutex_unlock(&g_devs[idx].lock);
   return OK;
 }
@@ -674,6 +785,10 @@ int stm32_legoport_pwm_get_status(int idx,
   memset(out, 0, sizeof(*out));
   out->duty  = g_devs[idx].duty;
   out->state = g_devs[idx].state;
+  if (g_devs[idx].pinned)
+    {
+      out->flags |= LEGOPORT_PWM_FLAG_PINNED;
+    }
 
   nxmutex_unlock(&g_devs[idx].lock);
   return OK;
