@@ -2,9 +2,19 @@ config APP_LEGOPORT
 	tristate "LEGO Powered Up I/O port utility"
 	default n
 	---help---
-		CLI for inspecting and waiting on /dev/legoport0..5
-		(Issue #42).  Subcommands: list, info, wait, stats.
+		CLI for the LEGO Powered Up I/O port driver
+		(/dev/legoport0..5).  Subcommands:
 
-		With CONFIG_LEGO_LUMP_DIAG=y, also exposes the
-		`lump-hw dump` subcommand that triggers a kernel-side
-		register dump for the 6 LUMP UARTs (Issue #43 Phase 1).
+		    list / info / wait / stats         (Issue #42 DCM)
+		    pwm <P> set/coast/brake/status     (Issue #80 H-bridge)
+		    lump status/info/set-mode/send/watch (Issue #43 LUMP)
+		    lump-hw dump                       (CONFIG_LEGO_LUMP_DIAG)
+
+		Port arguments accept A..F / a..f / 0..5.
+
+		WARNING (until #78 legolib gating): driving PWM into a
+		non-motor LUMP device (SPIKE Color sensor type 61,
+		Ultrasonic type 62, Force type 63, etc.) can damage it.
+		Motors are safe — both passive (M-motor 45303, Train
+		motor 88011) and active SPIKE motors (M=48, L=49, S=65)
+		are driven by the same H-bridge that pybricks uses.

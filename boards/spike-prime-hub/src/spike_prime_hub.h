@@ -311,5 +311,16 @@ int stm32_legoport_lump_register(void);
 int legosensor_uorb_register(void);
 #endif
 
+#ifdef CONFIG_LEGO_PORT
+/* H-bridge PWM port HAL (Issue #80, integrated into LEGO_PORT).
+ * Initializes TIM1 / TIM3 / TIM4 and pre-COASTs every port so the
+ * legoport chardev (`/dev/legoport[N]`) can route LEGOPORT_PWM_*
+ * ioctls into it.  No standalone chardev — see board_legoport.h for
+ * the public ABI.
+ */
+
+int stm32_legoport_pwm_initialize(void);
+#endif
+
 #endif /* __ASSEMBLY__ */
 #endif /* __BOARDS_SPIKE_PRIME_HUB_SRC_SPIKE_PRIME_HUB_H */

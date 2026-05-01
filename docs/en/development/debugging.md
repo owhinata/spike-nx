@@ -2,6 +2,15 @@
 
 Debugging techniques for the SPIKE Prime Hub. Since the SWD pins (PA13/PA14) are repurposed for power control, SWD debugging is not used.
 
+!!! warning "Limitation when LEGO Powered Up port is enabled (Issue #80)"
+    `CONFIG_LEGO_PORT=y` (default in defconfig) occupies Port E (PC6/PC7) for TIM3 PWM, so USART6 must be disabled. This **completely loses**:
+
+    - Low-level boot output via `up_lowputc()` (panic messages on NuttX boot failure)
+    - Pre-USB stack debug (early init before NSH)
+    - Post-mortem dump fallback when USB has stopped after HardFault / panic
+
+    Since SWD is also unavailable on the SPIKE Prime Hub, there is **no physical path** for emergency / early / panic debug. Day-to-day debugging is sufficient with USB CDC + RAMLOG + coredump, but if you need to analyze a boot failure, rebuild with `CONFIG_LEGO_PORT=n` to temporarily re-enable USART6.
+
 ## Debugging Methods
 
 | Priority | Method | Use Case |
@@ -9,7 +18,7 @@ Debugging techniques for the SPIKE Prime Hub. Since the SWD pins (PA13/PA14) are
 | Primary | USB CDC/ACM NSH + syslog + `dmesg` | Day-to-day development |
 | Secondary | NuttX coredump | Post-crash analysis |
 | Diagnostic | NSH commands (`ps`, `free`, `top`, `/proc`) | Runtime monitoring |
-| Last resort | Temporarily use an I/O port UART for debug output | When USB is non-functional |
+| Last resort | USART6 (only when LEGO_PORT is disabled) — temporarily use an I/O port UART for debug output | When USB is non-functional |
 
 ## RAMLOG and dmesg
 

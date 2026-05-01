@@ -50,7 +50,10 @@ gpio1/gpio2 are used for resistor-based passive detection. Pull-up/pull-down mus
 | E | PC6 | TIM3 CH1 | PC7 | TIM3 CH2 | AF2 |
 | F | PC8 | TIM3 CH3 | PB1 | TIM3 CH4 | AF2 |
 
-PWM frequency: 12 kHz (prescaler=8, period=1000). Inverted PWM configuration. M1/M2 dynamically switch between GPIO/AF modes to achieve Coast/Brake/Forward/Reverse.
+PWM frequency: 12 kHz (prescaler=8, period=1000). Inverted PWM (CCxP=1) configuration. M1/M2 dynamically switch between GPIO/AF modes to achieve Coast/Brake/Forward/Reverse. Implemented by Issue #80 (`/dev/legoport_pwm[0..5]`).
+
+!!! warning "Port E (PC6/PC7) is mutually exclusive with USART6"
+    Port E shares physical pins with USART6. When `CONFIG_BOARD_LEGOPORT_PWM=y` is set, USART6 must be disabled (enforced via Kconfig), which removes the only physical path for emergency / early / panic debug (SPIKE Prime Hub also has SWD repurposed for power control). See `drivers/legoport-pwm.md` for details.
 
 ---
 

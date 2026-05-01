@@ -38,11 +38,41 @@
 #define LUMP_MAX_UNITS_LEN       4
 #define LUMP_MAX_PAYLOAD         32    /* LUMP frame payload cap */
 
-/* `lump_device_info_s::flags` */
+/* `lump_device_info_s::flags` — engine state */
 
 #define LUMP_FLAG_SYNCED         (1u << 0)  /* SYNC complete; modes valid */
 #define LUMP_FLAG_DATA_OK        (1u << 1)  /* Last DATA < keepalive ago */
 #define LUMP_FLAG_ERROR          (1u << 2)  /* Engine in ERR state */
+
+/* `lump_mode_info_s::mode_flags` — extracted from the INFO_NAME byte 8
+ * (LUMP `lump_mode_flags_t::flags0`).  Devices that send a "short name"
+ * (≤ 5 chars + NUL) within a long INFO_NAME frame include 6 capability
+ * bytes in bytes 8..13 — only byte 8 (FLAGS0) is interpreted today.
+ *
+ * Bit layout matches pybricks `lib/lego/lego_uart.h:534-561` so a wire-
+ * level FLAGS0 byte can be stored directly here.
+ */
+#define LUMP_MODE_FLAG_MOTOR_SPEED       (1u << 0)
+#define LUMP_MODE_FLAG_MOTOR_ABS_POS     (1u << 1)
+#define LUMP_MODE_FLAG_MOTOR_REL_POS     (1u << 2)
+#define LUMP_MODE_FLAG_MOTOR_POWER       (1u << 4)
+#define LUMP_MODE_FLAG_MOTOR             (1u << 5)
+#define LUMP_MODE_FLAG_NEEDS_SUPPLY_PIN1 (1u << 6)
+#define LUMP_MODE_FLAG_NEEDS_SUPPLY_PIN2 (1u << 7)
+
+/* `lump_device_info_s::capability_flags` — union of mode_flags across
+ * every mode the device announced.  Per pybricks `legodev_pup_uart.c:472`
+ * comment "Although capabilities are sent per mode, we apply them to
+ * the whole device".  Same bit layout as LUMP_MODE_FLAG_* so the
+ * macros can be used for either field.
+ */
+#define LUMP_CAP_MOTOR_SPEED        LUMP_MODE_FLAG_MOTOR_SPEED
+#define LUMP_CAP_MOTOR_ABS_POS      LUMP_MODE_FLAG_MOTOR_ABS_POS
+#define LUMP_CAP_MOTOR_REL_POS      LUMP_MODE_FLAG_MOTOR_REL_POS
+#define LUMP_CAP_MOTOR_POWER        LUMP_MODE_FLAG_MOTOR_POWER
+#define LUMP_CAP_MOTOR              LUMP_MODE_FLAG_MOTOR
+#define LUMP_CAP_NEEDS_SUPPLY_PIN1  LUMP_MODE_FLAG_NEEDS_SUPPLY_PIN1
+#define LUMP_CAP_NEEDS_SUPPLY_PIN2  LUMP_MODE_FLAG_NEEDS_SUPPLY_PIN2
 
 /****************************************************************************
  * Public Types
@@ -62,7 +92,7 @@ struct lump_mode_info_s
   uint8_t  num_values;                  /* INFO_FORMAT [2] */
   uint8_t  data_type;                   /* enum lump_data_type_e */
   uint8_t  writable;                    /* INFO_MAPPING bit set */
-  uint8_t  reserved;
+  uint8_t  mode_flags;                  /* LUMP_MODE_FLAG_* (FLAGS0) */
   float    raw_min, raw_max;
   float    pct_min, pct_max;
   float    si_min,  si_max;
@@ -74,7 +104,9 @@ struct lump_device_info_s
   uint8_t  type_id;             /* LPF2 type once LUMP IDs the device */
   uint8_t  num_modes;
   uint8_t  current_mode;
-  uint8_t  flags;               /* LUMP_FLAG_* */
+  uint8_t  flags;               /* LUMP_FLAG_* (engine state) */
+  uint8_t  capability_flags;    /* LUMP_CAP_* (OR of mode_flags) */
+  uint8_t  reserved[3];         /* keep `baud` 4-byte aligned */
   uint32_t baud;                /* current line rate */
   uint32_t fw_version;
   uint32_t hw_version;

@@ -81,6 +81,22 @@ static int build_devpath(int port, char *out, size_t outlen)
   return 0;
 }
 
+/* Accept "A".."F" / "a".."f" / "0".."5".  Returns -1 on error. */
+
+static int parse_port(const char *s)
+{
+  if (s == NULL || s[0] == '\0' || s[1] != '\0')
+    {
+      return -1;
+    }
+
+  char c = s[0];
+  if (c >= 'A' && c <= 'F') return c - 'A';
+  if (c >= 'a' && c <= 'f') return c - 'a';
+  if (c >= '0' && c <= '5') return c - '0';
+  return -1;
+}
+
 static void print_flags(uint8_t flags)
 {
   printf("[");
@@ -326,6 +342,15 @@ static int do_lump_info(int port)
          (info.flags & LUMP_FLAG_SYNCED) ? "[SYNCED]" : "",
          (info.flags & LUMP_FLAG_DATA_OK) ? "[DATA_OK]" : "",
          (info.flags & LUMP_FLAG_ERROR) ? "[ERROR]" : "");
+  printf("  capability:   0x%02x", info.capability_flags);
+  if (info.capability_flags & LUMP_CAP_MOTOR)              printf(" MOTOR");
+  if (info.capability_flags & LUMP_CAP_MOTOR_POWER)        printf(" MOTOR_POWER");
+  if (info.capability_flags & LUMP_CAP_MOTOR_SPEED)        printf(" MOTOR_SPEED");
+  if (info.capability_flags & LUMP_CAP_MOTOR_ABS_POS)      printf(" MOTOR_ABS_POS");
+  if (info.capability_flags & LUMP_CAP_MOTOR_REL_POS)      printf(" MOTOR_REL_POS");
+  if (info.capability_flags & LUMP_CAP_NEEDS_SUPPLY_PIN1)  printf(" NEEDS_SUPPLY_PIN1");
+  if (info.capability_flags & LUMP_CAP_NEEDS_SUPPLY_PIN2)  printf(" NEEDS_SUPPLY_PIN2");
+  printf("\n");
   printf("  baud:         %lu\n", (unsigned long)info.baud);
   if (info.fw_version || info.hw_version)
     {
@@ -350,6 +375,17 @@ static int do_lump_info(int port)
         {
           printf("  raw=%g..%g",
                  (double)mi->raw_min, (double)mi->raw_max);
+        }
+      if (mi->mode_flags)
+        {
+          printf("  flags=0x%02x", mi->mode_flags);
+          if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR)              printf(" MOTOR");
+          if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR_POWER)        printf(" PWR");
+          if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR_SPEED)        printf(" SPD");
+          if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR_ABS_POS)      printf(" ABS");
+          if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR_REL_POS)      printf(" REL");
+          if (mi->mode_flags & LUMP_MODE_FLAG_NEEDS_SUPPLY_PIN1)  printf(" SUP1");
+          if (mi->mode_flags & LUMP_MODE_FLAG_NEEDS_SUPPLY_PIN2)  printf(" SUP2");
         }
       printf("\n");
     }
@@ -615,31 +651,141 @@ static int do_lump_hw_dump(void)
 }
 #endif
 
+static const char *pwm_state_name(uint8_t s)
+{
+  switch (s)
+    {
+      case LEGOPORT_PWM_STATE_COAST: return "COAST";
+      case LEGOPORT_PWM_STATE_BRAKE: return "BRAKE";
+      case LEGOPORT_PWM_STATE_PWM:   return "PWM";
+      default:                       return "?";
+    }
+}
+
+static int do_pwm_set(int port, int duty, bool keep)
+{
+  char path[24];
+  if (build_devpath(port, path, sizeof(path)) < 0)
+    {
+      printf("invalid port: %d\n", port);
+      return 1;
+    }
+
+  int fd = open(path, O_RDWR);
+  if (fd < 0)
+    {
+      printf("cannot open %s: %d\n", path, errno);
+      return 1;
+    }
+
+  if (ioctl(fd, LEGOPORT_PWM_SET_DUTY, (unsigned long)duty) < 0)
+    {
+      printf("SET_DUTY %d failed: %d\n", duty, errno);
+      close(fd);
+      return 1;
+    }
+
+  printf("port %c set duty=%d\n", 'A' + port, duty);
+
+  if (keep)
+    {
+      printf("(holding — press Enter to stop)\n");
+      getchar();
+    }
+  close(fd);
+  return 0;
+}
+
+static int do_pwm_simple(int port, int cmd, const char *label)
+{
+  char path[24];
+  if (build_devpath(port, path, sizeof(path)) < 0)
+    {
+      printf("invalid port: %d\n", port);
+      return 1;
+    }
+
+  int fd = open(path, O_RDWR);
+  if (fd < 0)
+    {
+      printf("cannot open %s: %d\n", path, errno);
+      return 1;
+    }
+
+  if (ioctl(fd, cmd, 0) < 0)
+    {
+      printf("%s failed: %d\n", label, errno);
+      close(fd);
+      return 1;
+    }
+  printf("port %c %s\n", 'A' + port, label);
+  close(fd);
+  return 0;
+}
+
+static int do_pwm_status(int port)
+{
+  char path[24];
+  if (build_devpath(port, path, sizeof(path)) < 0)
+    {
+      printf("invalid port: %d\n", port);
+      return 1;
+    }
+
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    {
+      printf("cannot open %s: %d\n", path, errno);
+      return 1;
+    }
+
+  struct legoport_pwm_status_s st;
+  memset(&st, 0, sizeof(st));
+  if (ioctl(fd, LEGOPORT_PWM_GET_STATUS, (unsigned long)&st) < 0)
+    {
+      printf("GET_STATUS failed: %d\n", errno);
+      close(fd);
+      return 1;
+    }
+  close(fd);
+
+  printf("port %c  state=%-5s  duty=%d  flags=0x%02x%s\n",
+         'A' + port, pwm_state_name(st.state), st.duty, st.flags,
+         (st.flags & LEGOPORT_PWM_FLAG_PINNED) ? " PINNED" : "");
+  return 0;
+}
+
 static void usage(void)
 {
   printf("Usage:\n");
   printf("  legoport             - alias of `legoport list`\n");
   printf("  legoport list        - dump all 6 ports\n");
-  printf("  legoport info <N>    - single-port info (N = 0..5)\n");
-  printf("  legoport wait <N> [timeout_ms]\n"
+  printf("  legoport info <P>    - single-port info (P = A..F or 0..5)\n");
+  printf("  legoport wait <P> [timeout_ms]\n"
          "                       - block on connect edge\n");
   printf("  legoport stats       - HPWORK cadence stats\n");
   printf("  legoport stats reset - clear max_step_us / max_interval_us\n");
+  printf("  legoport pwm <P> set <duty> [-k]\n"
+         "                       - set H-bridge duty (-10000..10000), -k holds fd\n");
+  printf("  legoport pwm <P> coast  - free-wheel\n");
+  printf("  legoport pwm <P> brake  - short windings\n");
+  printf("  legoport pwm <P> status - duty + state + pinned flag\n");
 #ifdef CONFIG_LEGO_LUMP
   printf("  legoport lump status     - per-port engine state table\n");
-  printf("  legoport lump info <N>\n"
+  printf("  legoport lump info <P>\n"
          "                       - dump LUMP device info (post-SYNC)\n");
-  printf("  legoport lump set-mode <N> <m>\n"
+  printf("  legoport lump set-mode <P> <m>\n"
          "                       - request mode switch (CMD SELECT)\n");
-  printf("  legoport lump send <N> <m> <hex>...\n"
+  printf("  legoport lump send <P> <m> <hex>...\n"
          "                       - send DATA frame (writable mode)\n");
-  printf("  legoport lump watch <N> <ms>\n"
+  printf("  legoport lump watch <P> <ms>\n"
          "                       - dump DATA frames for `ms` ms\n");
 #endif
 #ifdef CONFIG_LEGO_LUMP_DIAG
   printf("  legoport lump-hw dump\n"
          "                       - dump RCC/USART/NVIC for 6 LUMP UARTs\n");
 #endif
+  printf("\n  Ports accept letters (A..F / a..f) or digits (0..5).\n");
 }
 
 /****************************************************************************
@@ -660,7 +806,13 @@ int main(int argc, FAR char *argv[])
           usage();
           return 1;
         }
-      return do_info(atoi(argv[2]));
+      int port = parse_port(argv[2]);
+      if (port < 0)
+        {
+          printf("bad port '%s' — expected A..F or 0..5\n", argv[2]);
+          return 1;
+        }
+      return do_info(port);
     }
 
   if (strcmp(argv[1], "wait") == 0)
@@ -670,14 +822,62 @@ int main(int argc, FAR char *argv[])
           usage();
           return 1;
         }
+      int port = parse_port(argv[2]);
+      if (port < 0)
+        {
+          printf("bad port '%s' — expected A..F or 0..5\n", argv[2]);
+          return 1;
+        }
       uint32_t timeout = (argc >= 4) ? (uint32_t)atoi(argv[3]) : 0;
-      return do_wait(atoi(argv[2]), timeout);
+      return do_wait(port, timeout);
     }
 
   if (strcmp(argv[1], "stats") == 0)
     {
       bool reset = (argc >= 3 && strcmp(argv[2], "reset") == 0);
       return do_stats(reset);
+    }
+
+  if (strcmp(argv[1], "pwm") == 0)
+    {
+      if (argc < 4)
+        {
+          usage();
+          return 1;
+        }
+      int port = parse_port(argv[2]);
+      if (port < 0)
+        {
+          printf("bad port '%s' — expected A..F or 0..5\n", argv[2]);
+          return 1;
+        }
+      const char *verb = argv[3];
+      if (strcmp(verb, "set") == 0)
+        {
+          if (argc < 5)
+            {
+              usage();
+              return 1;
+            }
+          int duty = atoi(argv[4]);
+          bool keep = (argc >= 6 && strcmp(argv[5], "-k") == 0);
+          return do_pwm_set(port, duty, keep);
+        }
+      if (strcmp(verb, "coast") == 0)
+        {
+          return do_pwm_simple(port, LEGOPORT_PWM_COAST, "COAST");
+        }
+      if (strcmp(verb, "brake") == 0)
+        {
+          return do_pwm_simple(port, LEGOPORT_PWM_BRAKE, "BRAKE");
+        }
+      if (strcmp(verb, "status") == 0)
+        {
+          return do_pwm_status(port);
+        }
+      printf("unknown pwm verb '%s'\n", verb);
+      usage();
+      return 1;
     }
 
 #ifdef CONFIG_LEGO_LUMP
@@ -694,7 +894,13 @@ int main(int argc, FAR char *argv[])
               usage();
               return 1;
             }
-          return do_lump_info(atoi(argv[3]));
+          int port = parse_port(argv[3]);
+          if (port < 0)
+            {
+              printf("bad port '%s'\n", argv[3]);
+              return 1;
+            }
+          return do_lump_info(port);
         }
       if (argc >= 3 && strcmp(argv[2], "set-mode") == 0)
         {
@@ -703,7 +909,13 @@ int main(int argc, FAR char *argv[])
               usage();
               return 1;
             }
-          return do_lump_set_mode(atoi(argv[3]), atoi(argv[4]));
+          int port = parse_port(argv[3]);
+          if (port < 0)
+            {
+              printf("bad port '%s'\n", argv[3]);
+              return 1;
+            }
+          return do_lump_set_mode(port, atoi(argv[4]));
         }
       if (argc >= 3 && strcmp(argv[2], "send") == 0)
         {
@@ -712,7 +924,13 @@ int main(int argc, FAR char *argv[])
               usage();
               return 1;
             }
-          return do_lump_send(atoi(argv[3]), atoi(argv[4]),
+          int port = parse_port(argv[3]);
+          if (port < 0)
+            {
+              printf("bad port '%s'\n", argv[3]);
+              return 1;
+            }
+          return do_lump_send(port, atoi(argv[4]),
                               argc - 5, &argv[5]);
         }
       if (argc >= 3 && strcmp(argv[2], "watch") == 0)
@@ -722,7 +940,13 @@ int main(int argc, FAR char *argv[])
               usage();
               return 1;
             }
-          return do_lump_watch(atoi(argv[3]), atoi(argv[4]));
+          int port = parse_port(argv[3]);
+          if (port < 0)
+            {
+              printf("bad port '%s'\n", argv[3]);
+              return 1;
+            }
+          return do_lump_watch(port, atoi(argv[4]));
         }
       usage();
       return 1;

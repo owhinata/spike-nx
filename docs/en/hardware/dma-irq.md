@@ -193,10 +193,10 @@ Separate from NVIC priority, this controls arbitration within a single DMA contr
 
 | Timer | Purpose | Status | pybricks Usage |
 |---|---|---|---|
-| TIM1 | Motor PWM (Port A/B) | Not implemented | 12 kHz PWM, PSC=8, ARR=1000 |
+| TIM1 | Motor PWM (Port A/B) | ✅ Implemented (#80) | 12 kHz PWM, PSC=8, ARR=1000 |
 | TIM2 | ADC trigger (TRGO 1 kHz) | ✅ Implemented | Same |
-| TIM3 | Motor PWM (Port E/F) | Not implemented | 12 kHz PWM |
-| TIM4 | Motor PWM (Port C/D) | Not implemented | 12 kHz PWM |
+| TIM3 | Motor PWM (Port E/F) | ✅ Implemented (#80) | 12 kHz PWM |
+| TIM4 | Motor PWM (Port C/D) | ✅ Implemented (#80) | 12 kHz PWM |
 | TIM5 | Charger ISET PWM | In defconfig, not implemented | 96 kHz, CH1 |
 | TIM6 | DAC sample rate (TRGO) | ✅ Implemented | Same |
 | TIM8 | BT 32.768 kHz slow clock (CC2564C) | Scheduled (Issue #47) | CH4 PWM (PSC=0, ARR=2929, CCR4=1465, 32.764 kHz) |

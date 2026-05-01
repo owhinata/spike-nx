@@ -61,7 +61,7 @@ CSRCS += stm32_btuart.c stm32_btuart_chardev.c stm32_bluetooth.c
 endif
 
 ifeq ($(CONFIG_LEGO_PORT),y)
-CSRCS += stm32_legoport.c stm32_legoport_chardev.c
+CSRCS += stm32_legoport.c stm32_legoport_chardev.c stm32_legoport_pwm.c
 endif
 
 ifeq ($(CONFIG_LEGO_LUMP),y)

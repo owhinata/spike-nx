@@ -309,6 +309,17 @@ int stm32_bringup(void)
 #endif
 
 #ifdef CONFIG_LEGO_PORT
+  /* Bring the H-bridge HAL up first so the legoport chardev can call
+   * its API (open/close auto-COAST) immediately after registration.
+   */
+
+  ret = stm32_legoport_pwm_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: stm32_legoport_pwm_initialize() failed: %d\n",
+             ret);
+    }
+
   ret = stm32_legoport_chardev_register();
   if (ret < 0)
     {

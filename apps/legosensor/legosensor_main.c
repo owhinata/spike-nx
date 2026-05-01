@@ -339,16 +339,37 @@ static int do_info(const struct class_entry_s *c)
          (info->flags & LUMP_FLAG_SYNCED)  ? " SYNCED"  : "",
          (info->flags & LUMP_FLAG_DATA_OK) ? " DATA_OK" : "",
          (info->flags & LUMP_FLAG_ERROR)   ? " ERROR"   : "");
+  printf("capability  : 0x%02x", info->capability_flags);
+  if (info->capability_flags & LUMP_CAP_MOTOR)              printf(" MOTOR");
+  if (info->capability_flags & LUMP_CAP_MOTOR_POWER)        printf(" MOTOR_POWER");
+  if (info->capability_flags & LUMP_CAP_MOTOR_SPEED)        printf(" MOTOR_SPEED");
+  if (info->capability_flags & LUMP_CAP_MOTOR_ABS_POS)      printf(" MOTOR_ABS_POS");
+  if (info->capability_flags & LUMP_CAP_MOTOR_REL_POS)      printf(" MOTOR_REL_POS");
+  if (info->capability_flags & LUMP_CAP_NEEDS_SUPPLY_PIN1)  printf(" NEEDS_SUPPLY_PIN1");
+  if (info->capability_flags & LUMP_CAP_NEEDS_SUPPLY_PIN2)  printf(" NEEDS_SUPPLY_PIN2");
+  printf("\n");
 
   for (int m = 0; m < info->num_modes && m < LUMP_MAX_MODES; m++)
     {
       const struct lump_mode_info_s *mi = &info->modes[m];
-      printf("mode[%d] %-12s  %ux%s  raw[%g..%g] pct[%g..%g] si[%g..%g] %s%s\n",
+      printf("mode[%d] %-12s  %ux%s  raw[%g..%g] pct[%g..%g] si[%g..%g] %s%s",
              m, mi->name, mi->num_values, dtype_name(mi->data_type),
              (double)mi->raw_min, (double)mi->raw_max,
              (double)mi->pct_min, (double)mi->pct_max,
              (double)mi->si_min,  (double)mi->si_max,
              mi->units, mi->writable ? " writable" : "");
+      if (mi->mode_flags)
+        {
+          printf(" flags=0x%02x", mi->mode_flags);
+          if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR)              printf(" MOTOR");
+          if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR_POWER)        printf(" PWR");
+          if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR_SPEED)        printf(" SPD");
+          if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR_ABS_POS)      printf(" ABS");
+          if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR_REL_POS)      printf(" REL");
+          if (mi->mode_flags & LUMP_MODE_FLAG_NEEDS_SUPPLY_PIN1)  printf(" SUP1");
+          if (mi->mode_flags & LUMP_MODE_FLAG_NEEDS_SUPPLY_PIN2)  printf(" SUP2");
+        }
+      printf("\n");
     }
 
   return 0;

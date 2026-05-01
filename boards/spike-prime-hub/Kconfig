@@ -13,19 +13,37 @@ config SPIKE_SOUND_PCM_BUFSAMPLES
 		rather than an entire track.
 
 config LEGO_PORT
-	bool "LEGO Powered Up I/O port DCM (/dev/legoport[0-5])"
+	bool "LEGO Powered Up I/O port (/dev/legoport[0-5])"
 	default n
 	depends on SCHED_HPWORK
+	depends on ARCH_CHIP_STM32F413VG || ARCH_CHIP_STM32F413ZH
+	depends on !STM32_USART6
+	select STM32_TIM1
+	select STM32_TIM3
+	select STM32_TIM4
 	---help---
-		Enable the device-connection-manager (DCM) for the 6 external
-		I/O ports (A-F) on the SPIKE Prime Hub.  Registers six char
-		devices /dev/legoport0../dev/legoport5 backed by a 2 ms HPWORK
-		state machine ported from pybricks (Issue #42).
+		Enable the LEGO Powered Up I/O port driver for the 6 external
+		ports (A-F) on the SPIKE Prime Hub.  Registers six char
+		devices /dev/legoport0../dev/legoport5 that expose:
 
-		For UART devices, the DCM latches the port at type
-		UNKNOWN_UART (14) and waits for the LUMP engine (Issue #43)
-		to register a handoff callback.  Without #43, UART devices
-		are detected but no LUMP traffic flows.
+		 - Device connection manager (DCM, Issue #42): a 2 ms HPWORK
+		   state machine ported from pybricks that detects passive
+		   resistor-divider devices and latches UART devices at type
+		   UNKNOWN_UART (14) for the LUMP engine.
+		 - LUMP UART protocol engine (Issue #43, gated by
+		   CONFIG_LEGO_LUMP): per-port kernel thread that runs the
+		   SYNC / mode-info / DATA loop for active sensors and motors.
+		 - H-bridge PWM (Issue #80): direct duty-cycle control over
+		   TIM1 / TIM3 / TIM4, used to drive passive Powered Up
+		   motors and to hold the supply rail for sensors that
+		   announce NEEDS_SUPPLY_PIN1/PIN2 in their LUMP MODE flags.
+
+		Port E (PC6/PC7) shares its physical pins with USART6.  The
+		hub also has SWD repurposed for power control (PA13/PA14),
+		so disabling USART6 removes the only emergency / early-boot
+		debug path — see docs/development/debugging.md.  This
+		Kconfig hard-disables itself if STM32_USART6 is enabled —
+		pick one or the other.
 
 config LEGO_PORT_DCM_NOOP
 	bool "Diagnostic: skip DCM GPIO work (keep HPWORK monitor)"
@@ -79,3 +97,4 @@ config LEGO_SENSOR
 		control, Ultrasonic LED control) are exposed through custom
 		ioctls (`LEGOSENSOR_SELECT` / `LEGOSENSOR_SEND`) gated by
 		per-port `LEGOSENSOR_CLAIM` arbitration.
+

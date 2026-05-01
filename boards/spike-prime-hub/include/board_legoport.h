@@ -152,6 +152,48 @@ struct legoport_lump_send_arg_s
 
 #define LEGOPORT_LUMP_GET_STATUS_EX _LEGOPORTIOC(0x000C)
 
+/* H-bridge PWM port driver (Issue #80, integrated into the legoport
+ * chardev because LUMP SYNC drives the H-bridge for sensors that
+ * advertise NEEDS_SUPPLY_PIN1/PIN2).
+ *
+ *   - The LEGO Powered Up I/O port drives "passive" H-bridge devices
+ *     (M-motor 45303, Train motor 88011, simple DC outputs) directly,
+ *     and is also the supply pin for active sensors (SPIKE Color /
+ *     Ultrasonic) — pybricks `legodev_pup_uart.c:894-900`.
+ *   - LUMP can pin a port as supply (auto-driven on SYNC).  While
+ *     pinned, SET_DUTY / COAST / BRAKE return -EBUSY so userspace
+ *     cannot disturb the supply rail; GET_PWM_STATUS still works for
+ *     observation.
+ *   - When unpinned (no LUMP supply requirement), userspace owns the
+ *     duty cycle — pybricks-equivalent of `pbio_dcmotor_set_voltage()`.
+ *   - close(fd) auto-COASTs the port if it isn't pinned.
+ */
+
+#define LEGOPORT_PWM_DUTY_MAX     (10000)
+#define LEGOPORT_PWM_DUTY_MIN     (-10000)
+
+enum legoport_pwm_state_e
+{
+  LEGOPORT_PWM_STATE_COAST = 0,  /* H-bridge floating, motor coasts */
+  LEGOPORT_PWM_STATE_BRAKE = 1,  /* both pins HIGH, windings shorted */
+  LEGOPORT_PWM_STATE_PWM   = 2,  /* drive at the cached duty */
+};
+
+#define LEGOPORT_PWM_FLAG_PINNED  (1u << 0)  /* LUMP holds the H-bridge */
+
+struct legoport_pwm_status_s
+{
+  int16_t  duty;                 /* -10000..10000 (sign = direction) */
+  uint8_t  state;                /* enum legoport_pwm_state_e */
+  uint8_t  flags;                /* LEGOPORT_PWM_FLAG_* */
+  uint8_t  reserved[4];
+};
+
+#define LEGOPORT_PWM_SET_DUTY     _LEGOPORTIOC(0x0010) /* arg: int16_t duty (-10000..10000) */
+#define LEGOPORT_PWM_COAST        _LEGOPORTIOC(0x0011) /* arg: ignored */
+#define LEGOPORT_PWM_BRAKE        _LEGOPORTIOC(0x0012) /* arg: ignored */
+#define LEGOPORT_PWM_GET_STATUS   _LEGOPORTIOC(0x0013) /* arg: struct legoport_pwm_status_s * */
+
 /* Pre-computed GPIO descriptors for one I/O port.  All entries except
  * `*_af` are NuttX `stm32_configgpio()` arguments — packed uint32_t with
  * mode/pull/speed/output/port/pin baked in.  `uart_tx_af` / `uart_rx_af`

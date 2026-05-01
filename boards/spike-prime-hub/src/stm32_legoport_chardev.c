@@ -71,6 +71,16 @@ void     stm32_legoport_reset_stats(void);
 void     stm32_legoport_get_stats(FAR struct legoport_stats_s *out);
 
 /****************************************************************************
+ * Forward Declarations from stm32_legoport_pwm.c
+ ****************************************************************************/
+
+int stm32_legoport_pwm_set_duty(int idx, int16_t duty);
+int stm32_legoport_pwm_coast(int idx);
+int stm32_legoport_pwm_brake(int idx);
+int stm32_legoport_pwm_get_status(int idx,
+                                  FAR struct legoport_pwm_status_s *out);
+
+/****************************************************************************
  * File Operations
  ****************************************************************************/
 
@@ -131,6 +141,15 @@ static int legoport_cdev_close(FAR struct file *filep)
   FAR struct legoport_chardev_s *priv = filep->f_inode->i_private;
 
   nxmutex_lock(&priv->lock);
+
+  /* Auto-COAST the H-bridge so a crashed controller daemon does not
+   * leave a motor running.  Phase B (forthcoming) adds a "pinned by
+   * LUMP supply" guard inside the HAL so this call becomes a no-op for
+   * Color / Ultrasonic sensor ports that LUMP needs to keep powered.
+   */
+
+  stm32_legoport_pwm_coast(priv->port);
+
   priv->open = false;
   nxmutex_unlock(&priv->lock);
   return OK;
@@ -376,6 +395,35 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
           return OK;
         }
 #endif
+
+      case LEGOPORT_PWM_SET_DUTY:
+        return stm32_legoport_pwm_set_duty(priv->port, (int16_t)arg);
+
+      case LEGOPORT_PWM_COAST:
+        return stm32_legoport_pwm_coast(priv->port);
+
+      case LEGOPORT_PWM_BRAKE:
+        return stm32_legoport_pwm_brake(priv->port);
+
+      case LEGOPORT_PWM_GET_STATUS:
+        {
+          FAR struct legoport_pwm_status_s *user =
+              (FAR struct legoport_pwm_status_s *)arg;
+          struct legoport_pwm_status_s status;
+
+          if (user == NULL)
+            {
+              return -EINVAL;
+            }
+
+          int rc = stm32_legoport_pwm_get_status(priv->port, &status);
+          if (rc < 0)
+            {
+              return rc;
+            }
+          memcpy(user, &status, sizeof(status));
+          return OK;
+        }
 
       default:
         return -ENOTTY;

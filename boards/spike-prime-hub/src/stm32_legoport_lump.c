@@ -751,9 +751,46 @@ static int lump_parse_msg(struct lump_engine_s *e)
                 e->info_flags |= LUMP_IF_INFO_NAME;
                 e->new_mode    = mode;
 
+                /* Mode capability flags (FLAGS0 byte).
+                 *
+                 * Per pybricks `legodev_pup_uart.c:460-465` and the LUMP
+                 * spec at `lego_uart.h:323-327`: when the mode name is a
+                 * "short name" (≤ 5 chars + NUL padding so it fits in
+                 * bytes 2..7) AND the frame is large enough to include
+                 * the 6-byte capability tail (bytes 8..13), byte 8 holds
+                 * the per-mode FLAGS0 byte.  Older devices that don't
+                 * announce capabilities send the same INFO_NAME frame
+                 * but stop after the name — those carry no FLAGS0 and
+                 * the field stays 0.
+                 *
+                 * `LUMP_MAX_SHORT_NAME_LEN`= 5 here matches pybricks
+                 * `LUMP_MAX_SHORT_NAME_SIZE` (the spec value).  The size
+                 * threshold `> 11` matches pybricks
+                 * `> LUMP_MAX_NAME_SIZE` (the wire LUMP_MAX_NAME_SIZE,
+                 * NOT spike-nx's struct-buffer LUMP_MAX_NAME_LEN).
+                 */
+                #define LUMP_MAX_SHORT_NAME_LEN  5
+                #define LUMP_NAME_FRAME_WITH_FLAGS_MIN_SIZE  (11 + 1)
+
+                size_t name_len = strlen(name);
+                uint8_t mode_flags = 0;
+                if (name_len <= LUMP_MAX_SHORT_NAME_LEN &&
+                    e->rx_msg_size > LUMP_NAME_FRAME_WITH_FLAGS_MIN_SIZE)
+                  {
+                    mode_flags = e->rx_msg[8];
+                  }
+
                 nxmutex_lock(&e->info_lock);
                 strncpy(e->info.modes[mode].name, name, LUMP_MAX_NAME_LEN);
                 e->info.modes[mode].name[LUMP_MAX_NAME_LEN] = 0;
+                e->info.modes[mode].mode_flags = mode_flags;
+
+                /* Per pybricks `legodev_pup_uart.c:472`:
+                 * "Although capabilities are sent per mode, we apply
+                 * them to the whole device".  OR every mode's FLAGS0
+                 * into the device-level capability_flags.
+                 */
+                e->info.capability_flags |= mode_flags;
                 nxmutex_unlock(&e->info_lock);
                 break;
               }
