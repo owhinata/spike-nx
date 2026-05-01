@@ -159,6 +159,7 @@ port lump <P> info            - 完全 device_info dump
 port lump <P> select <m>      - CMD SELECT 要求
 port lump <P> send <m> <hex>...  - DATA TX (writable mode、1..32 byte hex pair)
 port lump <P> watch <ms>      - DATA frame を ms ミリ秒間 dump (10 ms poll)
+port lump <P> fps <ms>        - rate のみカウント (1 ms poll、frame 表示なし)
 port lump-hw dump             - RCC/USART/NVIC dump (DIAG ビルドのみ)
 ```
 

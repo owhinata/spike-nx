@@ -163,6 +163,7 @@ port lump <P> info            - dump full lump_device_info_s
 port lump <P> select <m>      - request CMD SELECT
 port lump <P> send <m> <hex>...   - DATA TX (writable mode, 1..32 hex pairs)
 port lump <P> watch <ms>      - dump DATA frames for `ms` ms (10 ms poll)
+port lump <P> fps <ms>        - rate-only count (1 ms poll, no frame print)
 port lump-hw dump             - RCC/USART/NVIC dump (diag build only)
 ```
 

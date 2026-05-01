@@ -240,6 +240,7 @@ sensor <class>                         1 class topic の status
 sensor <class> info                    bound port + per-mode schema
 sensor <class> status                  engine + traffic counters
 sensor <class> watch [ms]              poll → read decoded samples (default 1000)
+sensor <class> fps [ms]                rate-only count, no per-sample print
 sensor <class> select <mode>           open → CLAIM → SELECT → close (auto-RELEASE)
 sensor <class> send <mode> <hex>...    open → CLAIM → SEND → close
 sensor <class> pwm <ch0> [ch1 ch2 ch3] open → CLAIM → SET_PWM → close

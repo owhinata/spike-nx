@@ -13,7 +13,7 @@
  *   port stats       - HPWORK cadence stats (max step / max interval)
  *   port pwm <P> {set <duty>[-k] | coast | brake | status}
  *   port lump status
- *   port lump <P> {info | select <m> | send <m> <hex>... | watch <ms>}
+ *   port lump <P> {info | select <m> | send <m> <hex>... | watch <ms> | fps <ms>}
  *   port lump-hw dump
  *                    - dump RCC / USART / NVIC state for the 6 LUMP
  *                      UARTs (CONFIG_LEGO_LUMP_DIAG=y only)
@@ -627,6 +627,91 @@ static int do_lump_watch(int port, int duration_ms)
   return 0;
 }
 
+/* Quiet rate-only counterpart of `do_lump_watch`.  Tighter poll loop
+ * (1 ms instead of 10 ms) and no per-frame `printf`, so the engine's
+ * DATA ring is drained as fast as possible.  Useful when measuring
+ * the firmware's per-mode reporting rate without USB-CDC overhead.
+ */
+
+static int do_lump_fps(int port, int duration_ms)
+{
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
+    {
+      printf("invalid port: %d\n", port);
+      return 1;
+    }
+  if (duration_ms <= 0 || duration_ms > 60000)
+    {
+      printf("duration must be 1..60000 ms\n");
+      return 1;
+    }
+
+  char path[24];
+  build_devpath(port, path, sizeof(path));
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    {
+      printf("cannot open %s: %d\n", path, errno);
+      return 1;
+    }
+
+  struct timespec start;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+
+  uint32_t frames    = 0;
+  uint8_t  last_mode = 0xff;
+
+  for (;;)
+    {
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000L +
+                        (now.tv_nsec - start.tv_nsec) / 1000000L;
+      if (elapsed_ms >= duration_ms)
+        {
+          break;
+        }
+
+      struct lump_data_frame_s frame;
+      int rc = ioctl(fd, LEGOPORT_LUMP_POLL_DATA, (unsigned long)&frame);
+      if (rc == 0)
+        {
+          frames++;
+          last_mode = frame.mode;
+        }
+      else if (errno != EAGAIN)
+        {
+          printf("ioctl LUMP_POLL_DATA failed: %d\n", errno);
+          close(fd);
+          return 1;
+        }
+
+      usleep(1000);     /* 1 ms — drain ring fast */
+    }
+
+  struct timespec end;
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  long actual_ms = (end.tv_sec - start.tv_sec) * 1000L +
+                   (end.tv_nsec - start.tv_nsec) / 1000000L;
+
+  close(fd);
+
+  double fps = actual_ms > 0
+                   ? (double)frames * 1000.0 / (double)actual_ms
+                   : 0.0;
+  if (last_mode != 0xff)
+    {
+      printf("Port %c: %lu frames in %ld ms (= %.1f fps), mode=%u\n",
+             'A' + port, (unsigned long)frames, actual_ms, fps, last_mode);
+    }
+  else
+    {
+      printf("Port %c: %lu frames in %ld ms (= %.1f fps)\n",
+             'A' + port, (unsigned long)frames, actual_ms, fps);
+    }
+  return 0;
+}
+
 #ifdef CONFIG_LEGO_LUMP_DIAG
 static int do_lump_hw_dump(void)
 {
@@ -783,6 +868,8 @@ static void usage(void)
          "                   - send DATA frame (writable mode)\n");
   printf("  port lump <P> watch <ms>\n"
          "                   - dump DATA frames for `ms` ms\n");
+  printf("  port lump <P> fps <ms>\n"
+         "                   - rate-only count, no per-frame print\n");
 #endif
 #ifdef CONFIG_LEGO_LUMP_DIAG
   printf("  port lump-hw dump\n"
@@ -943,6 +1030,15 @@ int main(int argc, FAR char *argv[])
               return 1;
             }
           return do_lump_watch(port, atoi(argv[4]));
+        }
+      if (strcmp(verb, "fps") == 0)
+        {
+          if (argc < 5)
+            {
+              usage();
+              return 1;
+            }
+          return do_lump_fps(port, atoi(argv[4]));
         }
 
       printf("unknown lump verb '%s'\n", verb);

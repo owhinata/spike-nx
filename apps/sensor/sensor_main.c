@@ -428,6 +428,97 @@ static int do_watch(const struct class_entry_s *c, int duration_ms)
   return 0;
 }
 
+/* Quiet rate-only counterpart of `do_watch`.  Drops the per-sample
+ * `printf` so the USB-CDC write path does not throttle the read loop;
+ * useful when the question is purely "how many samples per second is
+ * the uORB stream delivering for this class?".  Sentinel samples
+ * (sync/disconnect, len==0) are counted separately so they do not
+ * skew the data-rate.
+ */
+
+static int do_fps(const struct class_entry_s *c, int duration_ms)
+{
+  int fd = open(c->path, O_RDONLY | O_NONBLOCK);
+  if (fd < 0)
+    {
+      fprintf(stderr, "open(%s): %s\n", c->path, strerror(errno));
+      return -errno;
+    }
+
+  struct timespec t0;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+
+  struct pollfd pfd = { .fd = fd, .events = POLLIN };
+  int  remaining = duration_ms;
+  int  count     = 0;
+  int  sentinels = 0;
+  uint8_t last_mode = 0xff;
+
+  while (remaining > 0)
+    {
+      int pr = poll(&pfd, 1, remaining);
+      if (pr < 0)
+        {
+          if (errno == EINTR)
+            {
+              continue;
+            }
+          break;
+        }
+
+      if (pr == 0)
+        {
+          break;        /* timeout */
+        }
+
+      struct lump_sample_s s;
+      ssize_t n = read(fd, &s, sizeof(s));
+      if (n == sizeof(s))
+        {
+          if (s.len == 0)
+            {
+              sentinels++;
+            }
+          else
+            {
+              count++;
+              last_mode = s.mode_id;
+            }
+        }
+
+      struct timespec t1;
+      clock_gettime(CLOCK_MONOTONIC, &t1);
+      long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+                        (t1.tv_nsec - t0.tv_nsec) / 1000000;
+      remaining = duration_ms - (int)elapsed_ms;
+    }
+
+  struct timespec t1;
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  long actual_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
+                   (t1.tv_nsec - t0.tv_nsec) / 1000000;
+
+  close(fd);
+
+  double fps = actual_ms > 0 ? (double)count * 1000.0 / (double)actual_ms : 0.0;
+  if (last_mode != 0xff)
+    {
+      printf("%s: %d samples in %ld ms (= %.1f fps), mode=%u",
+             c->name, count, actual_ms, fps, last_mode);
+    }
+  else
+    {
+      printf("%s: %d samples in %ld ms (= %.1f fps)",
+             c->name, count, actual_ms, fps);
+    }
+  if (sentinels > 0)
+    {
+      printf(", %d sentinel(s)", sentinels);
+    }
+  printf("\n");
+  return 0;
+}
+
 static int do_select(const struct class_entry_s *c, uint8_t mode)
 {
   int fd = open(c->path, O_RDONLY | O_NONBLOCK);
@@ -626,6 +717,7 @@ static void usage(void)
           "  sensor <class> info                    device info / mode schema\n"
           "  sensor <class> status                  engine + traffic counters\n"
           "  sensor <class> watch [ms]              decode samples (default 1000)\n"
+          "  sensor <class> fps [ms]                rate-only count, no per-sample print\n"
           "  sensor <class> select <mode>           SELECT mode\n"
           "  sensor <class> send <mode> <hex>...    SEND writable-mode payload\n"
           "  sensor <class> pwm <ch0> [ch1 ch2 ch3] LED brightness / motor duty\n"
@@ -677,6 +769,20 @@ int main(int argc, FAR char *argv[])
             }
         }
       return do_watch(c, ms) < 0 ? 1 : 0;
+    }
+
+  if (strcmp(verb, "fps") == 0)
+    {
+      int ms = WATCH_DEFAULT_MS;
+      if (argc >= 4)
+        {
+          ms = atoi(argv[3]);
+          if (ms <= 0)
+            {
+              ms = WATCH_DEFAULT_MS;
+            }
+        }
+      return do_fps(c, ms) < 0 ? 1 : 0;
     }
 
   if (strcmp(verb, "select") == 0)
