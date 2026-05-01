@@ -4,6 +4,7 @@ using ImuViewer.App.Services;
 using ImuViewer.App.ViewModels;
 using ImuViewer.Core.Aggregation;
 using ImuViewer.Core.Filters;
+using ImuViewer.Core.LegoSensor;
 using ImuViewer.Core.Transport.Linux;
 
 namespace ImuViewer.App.Views;
@@ -18,12 +19,14 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         SensorAggregator aggregator = new();
+        LegoSampleAggregator legoAggregator = new();
         MadgwickFilter filter = new();
         GyroBiasTracker biasTracker = new();
         LinuxRfcommTransport transport = new();
-        SessionOrchestrator orchestrator = new(transport, aggregator);
+        SessionOrchestrator orchestrator = new(transport, aggregator, legoAggregator);
         LinuxPortEnumerator enumerator = new();
-        _viewModel = new MainViewModel(enumerator, orchestrator, aggregator, filter, biasTracker);
+        _viewModel = new MainViewModel(enumerator, orchestrator, aggregator,
+                                        legoAggregator, filter, biasTracker);
         DataContext = _viewModel;
 
         _tick = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000.0 / 60.0) };

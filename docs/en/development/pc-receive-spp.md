@@ -254,6 +254,34 @@ A TLV with `FRESH=0` still carries a header — the host keeps the
 last-known payload from the most recent FRESH tick.  Hot-plug events
 are observed via the `BOUND` flag.
 
+### TLV payload decoding examples
+
+Combine `data_type` and `num_values` to decode the payload.  Common
+class × mode pairs:
+
+| class       | mode | label  | data_type | num_values | unit / scale |
+|-------------|---:|--------|-----------|---:|-----|
+| color       |  0 | COLOR  | INT8      | 1 | colour index |
+| color       |  1 | REFLT  | INT8      | 1 | reflected light % |
+| color       |  2 | AMBI   | INT8      | 1 | ambient light % |
+| color       |  5 | RGB I  | INT16     | 4 | R, G, B, IR (raw 0..1024) |
+| color       |  6 | HSV    | INT16     | 3 | H°, S, V |
+| ultrasonic  |  0 | DISTL  | INT16     | 1 | distance mm |
+| ultrasonic  |  1 | DISTS  | INT16     | 1 | distance mm (short range) |
+| force       |  0 | FORCE  | INT8      | 1 | force % |
+| force       |  1 | TOUCH  | INT8      | 1 | touched (0/1) |
+| motor_m/r/l |  1 | SPEED  | INT8      | 1 | speed -100..+100 % |
+| motor_m/r/l |  2 | POS    | INT32     | 1 | angle ° (relative) |
+| motor_m/r/l |  3 | APOS   | INT16     | 1 | angle ° (0..359) |
+
+Example: a color sensor TLV with mode 6 (HSV) and
+`payload = "B4 00 32 00 4B 00"` decodes (INT16 LE) to
+`H=180°, S=50, V=75`.
+
+The host implementation lives in
+`host/ImuViewer/src/ImuViewer.Core/LegoSensor/ScaleTables.cs` (hard-
+coded table).  Modes outside the table fall back to raw integer values.
+
 ### Resync after byte loss
 
 1. Find the next `0xB66B` magic.

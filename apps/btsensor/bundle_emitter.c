@@ -276,7 +276,26 @@ static void tick_handler(btstack_timer_source_t *ts)
       return;
     }
 
-  (void)emit_bundle();
+  /* Only emit when a PC is actively listening — otherwise the TX ring
+   * fills up immediately and drops every frame, inflating drop counters
+   * for no good reason.  We still drain the IMU side ring so it does
+   * not overflow silently while waiting for a consumer; sensor_sampler
+   * is event-driven via btstack data sources, so its cache stays fresh
+   * on its own.
+   */
+
+  if (btsensor_tx_has_consumer())
+    {
+      (void)emit_bundle();
+    }
+  else if (g_imu_on)
+    {
+      struct sensor_imu drop_buf[BTSENSOR_IMU_SAMPLES_MAX];
+      while (imu_sampler_drain(drop_buf, BTSENSOR_IMU_SAMPLES_MAX) > 0)
+        {
+          /* discard while no PC is connected */
+        }
+    }
 
   /* Re-arm for the next tick. */
 

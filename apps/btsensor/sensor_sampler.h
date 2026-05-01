@@ -2,14 +2,14 @@
  * apps/btsensor/sensor_sampler.h
  *
  * LEGO Powered Up sensor (uORB legosensor) snapshot helper for the
- * BUNDLE emitter (Issue #88).
+ * BUNDLE emitter.
  *
- * Issue A scope: provide the 6-class snapshot interface so bundle_emitter
- * can fill its TLV section with stub entries (all BOUND=false /
- * payload_len=0 / age=saturated).  Real publish-tracking + write APIs
- * land in Issues #89 (B) and #90 (C); the function signatures are
- * declared up front to keep the firmware ABI stable across the three
- * incremental commits.
+ * Issue B (this commit): full read-side implementation — opens the six
+ * /dev/uorb/sensor_* class topics on `set_enabled(true)`, registers each
+ * fd as a btstack data source, and tracks the latest publish per class.
+ * `snapshot()` returns BOUND/FRESH/age/payload that bundle_emitter
+ * serialises into the TLV section.  Write APIs (SELECT / SEND / SET_PWM)
+ * are deferred to Issue C.
  ****************************************************************************/
 
 #ifndef __APPS_BTSENSOR_SENSOR_SAMPLER_H
@@ -43,29 +43,34 @@ struct sensor_class_state_s
   uint8_t  payload[BTSENSOR_TLV_PAYLOAD_MAX];
 };
 
-/* Initialise the module.  Issue A: no fd opens.  Returns 0. */
+/* Initialise the module.  Returns 0.  fds are NOT opened here — that
+ * happens in `set_enabled(true)`.
+ */
 
 int  sensor_sampler_init(void);
 
-/* Module shutdown.  Implicitly disables sampling first so any held
- * resource (CLAIM, fd) is released.  Safe from the BTstack main thread.
+/* Module shutdown.  Implicitly disables sampling first so any open fd
+ * is released.  Safe from the BTstack main thread.
  */
 
 void sensor_sampler_deinit(void);
 
-/* Toggle SENSOR streaming.  Issue A: just records the flag; Issue B
- * will open the 6 uORB topics and Issue C will hold LEGOSENSOR_CLAIM
- * across the on=true window.  Must run on the BTstack main thread.
+/* Toggle SENSOR streaming.  on=true opens the 6 /dev/uorb/sensor_*
+ * topics and registers them as btstack data sources; on=false closes
+ * them.  Must run on the BTstack main thread.  No `LEGOSENSOR_CLAIM`
+ * is taken here — write APIs (Issue C) take CLAIM transiently around
+ * each ioctl.
  */
 
 int  sensor_sampler_set_enabled(bool on);
 bool sensor_sampler_is_enabled(void);
 
 /* Fill `out` with one entry per uORB sensor class in fixed order
- * (BTSENSOR_LEGO_CLASS_*).  After the call every FRESH flag the sampler
+ * (LEGOSENSOR_CLASS_*).  After the call every FRESH flag the sampler
  * was tracking is cleared, so a subsequent snapshot only reports
- * publishes that occurred between the two snapshots.  Issue A always
- * returns BOUND=false / payload_len=0 / age=saturated.
+ * publishes that occurred between the two snapshots.  When SENSOR is
+ * disabled, every entry is reported BOUND=false / payload_len=0 /
+ * age=saturated regardless of cached state.
  *
  * Must run on the BTstack main thread.
  */

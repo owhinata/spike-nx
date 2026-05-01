@@ -2,10 +2,11 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:ImuViewer.App.ViewModels"
         xmlns:ctrl="using:ImuViewer.App.Controls"
+        xmlns:views="using:ImuViewer.App.Views"
         x:Class="ImuViewer.App.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Title="ImuViewer"
-        Width="1024" Height="640"
+        Width="1280" Height="720"
         Background="#1A1A1A">
   <Window.Styles>
     <Style Selector="TextBlock.label">
@@ -72,6 +73,14 @@
                   Command="{Binding ImuOffCommand}" IsEnabled="{Binding CanToggleImu}" />
         </Grid>
 
+        <TextBlock Classes="header" Text="LEGO Sensor" />
+        <Grid ColumnDefinitions="*,*">
+          <Button Grid.Column="0" Content="SENSOR ON" HorizontalAlignment="Stretch"
+                  Command="{Binding SensorOnCommand}" IsEnabled="{Binding CanToggleSensor}" />
+          <Button Grid.Column="1" Content="SENSOR OFF" HorizontalAlignment="Stretch"
+                  Command="{Binding SensorOffCommand}" IsEnabled="{Binding CanToggleSensor}" />
+        </Grid>
+
         <TextBlock Classes="header" Text="Madgwick" />
         <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto">
           <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="β (gain)" VerticalAlignment="Center" />
@@ -114,9 +123,29 @@
       </StackPanel>
     </ScrollViewer>
 
-    <Border Grid.Column="1" Background="#202225">
-      <ctrl:OpenGlSceneControl x:Name="Scene"
-                               Orientation="{Binding Orientation}" />
-    </Border>
+    <Grid Grid.Column="1" RowDefinitions="3*,2*" Background="#202225">
+      <Border Grid.Row="0" Background="#202225">
+        <ctrl:OpenGlSceneControl x:Name="Scene"
+                                 Orientation="{Binding Orientation}" />
+      </Border>
+
+      <ItemsControl Grid.Row="1"
+                    ItemsSource="{Binding SensorPanels}"
+                    Background="#1A1A1A"
+                    Padding="4">
+        <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate>
+            <UniformGrid Columns="3" Rows="2" />
+          </ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+          <DataTemplate>
+            <Border BorderBrush="#2A2A2A" BorderThickness="1" Margin="2">
+              <views:SensorPanelView />
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+    </Grid>
   </Grid>
 </Window>

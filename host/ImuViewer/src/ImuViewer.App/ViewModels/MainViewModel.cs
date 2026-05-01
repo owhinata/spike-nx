@@ -8,6 +8,7 @@ using ImuViewer.App.Services;
 using ImuViewer.Core.Aggregation;
 using ImuViewer.Core.Btsensor;
 using ImuViewer.Core.Filters;
+using ImuViewer.Core.LegoSensor;
 using ImuViewer.Core.Transport;
 using ImuViewer.Core.Wire;
 
@@ -30,9 +31,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private readonly IBluetoothPortEnumerator _portEnumerator;
     private readonly SessionOrchestrator _orchestrator;
     private readonly SensorAggregator _aggregator;
+    private readonly LegoSampleAggregator _legoAggregator;
     private readonly MadgwickFilter _filter;
     private readonly GyroBiasTracker _biasTracker;
     private readonly FpsCounter _fps = new();
+
+    private readonly Dictionary<LegoClassId, SensorPanelViewModel> _panelByClass;
 
     private Vector3 _calibrationSum = Vector3.Zero;
     private int _calibrationSamplesRemaining;
@@ -43,16 +47,63 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         IBluetoothPortEnumerator portEnumerator,
         SessionOrchestrator orchestrator,
         SensorAggregator aggregator,
+        LegoSampleAggregator legoAggregator,
         MadgwickFilter filter,
         GyroBiasTracker biasTracker)
     {
         _portEnumerator = portEnumerator;
         _orchestrator = orchestrator;
         _aggregator = aggregator;
+        _legoAggregator = legoAggregator;
         _filter = filter;
         _biasTracker = biasTracker;
         _orchestrator.BundleReceived += _ => _fps.Mark();
+
+        // Pre-populate the six sensor panels in fixed enum order so the
+        // UI is stable across attach/detach.
+        SensorPanelViewModel[] panels = new SensorPanelViewModel[]
+        {
+            new(LegoClassId.Color),
+            new(LegoClassId.Ultrasonic),
+            new(LegoClassId.Force),
+            new(LegoClassId.MotorM),
+            new(LegoClassId.MotorR),
+            new(LegoClassId.MotorL),
+        };
+        SensorPanels = panels;
+        _panelByClass = panels.ToDictionary(p => p.ClassId);
+
+        _legoAggregator.StatusChanged += OnLegoStatusChanged;
+        _legoAggregator.SampleReceived += OnLegoSampleReceived;
+        _legoAggregator.PortChanged += OnLegoPortChanged;
     }
+
+    private void OnLegoStatusChanged(LegoClassId classId, LegoSampleAggregator.ClassState state)
+    {
+        if (_panelByClass.TryGetValue(classId, out SensorPanelViewModel? panel))
+        {
+            panel.ApplyStatus(state);
+        }
+    }
+
+    private void OnLegoSampleReceived(LegoClassId classId, LegoSamplePoint sample)
+    {
+        if (_panelByClass.TryGetValue(classId, out SensorPanelViewModel? panel))
+        {
+            panel.AppendSample(sample);
+        }
+    }
+
+    private void OnLegoPortChanged(LegoClassId classId, LegoSampleAggregator.ClassState state)
+    {
+        if (_panelByClass.TryGetValue(classId, out SensorPanelViewModel? panel))
+        {
+            panel.ResetPlot();
+        }
+    }
+
+    /// <summary>Six fixed panels (Color/Ultrasonic/Force/MotorM/MotorR/MotorL).</summary>
+    public IReadOnlyList<SensorPanelViewModel> SensorPanels { get; }
 
     [ObservableProperty]
     private ObservableCollection<BluetoothPort> _ports = new();
@@ -65,12 +116,19 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     [NotifyPropertyChangedFor(nameof(CanConnect))]
     [NotifyPropertyChangedFor(nameof(CanDisconnect))]
     [NotifyPropertyChangedFor(nameof(CanToggleImu))]
+    [NotifyPropertyChangedFor(nameof(CanToggleSensor))]
     private bool _isConnected;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanToggleImu))]
     [NotifyPropertyChangedFor(nameof(CanEditImuConfig))]
     private bool _isImuOn;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanToggleSensor))]
+    private bool _isSensorOn;
+
+    public bool CanToggleSensor => IsConnected;
 
     [ObservableProperty]
     private string _statusText = "ready";
@@ -325,6 +383,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             await EnsureReplyAsync(_orchestrator.SetGyroFsrAsync(GyroFsrDps, ct), $"SET GYRO_FSR {GyroFsrDps}");
             IsConnected = true;
             IsImuOn = false;
+            IsSensorOn = false;
             StatusText = "connected";
         }
         catch (Exception ex)
@@ -342,6 +401,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         await _orchestrator.DisconnectAsync();
         IsConnected = false;
         IsImuOn = false;
+        IsSensorOn = false;
         IsStationary = false;
         _fps.Reset();
         _biasTracker.Detector.Reset();
@@ -390,6 +450,43 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         catch (Exception ex)
         {
             StatusText = "IMU OFF failed: " + ex.Message;
+        }
+    }
+
+    [RelayCommand]
+    public async Task SensorOnAsync(CancellationToken ct)
+    {
+        try
+        {
+            BtsensorReply r = await _orchestrator.SensorOnAsync(ct);
+            if (r.IsOk)
+            {
+                IsSensorOn = true;
+                StatusText = "SENSOR streaming";
+            }
+            else
+            {
+                StatusText = "SENSOR ON: " + r;
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = "SENSOR ON failed: " + ex.Message;
+        }
+    }
+
+    [RelayCommand]
+    public async Task SensorOffAsync(CancellationToken ct)
+    {
+        try
+        {
+            BtsensorReply r = await _orchestrator.SensorOffAsync(ct);
+            IsSensorOn = false;
+            StatusText = r.IsOk ? "SENSOR stopped" : "SENSOR OFF: " + r;
+        }
+        catch (Exception ex)
+        {
+            StatusText = "SENSOR OFF failed: " + ex.Message;
         }
     }
 
