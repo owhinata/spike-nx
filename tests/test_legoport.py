@@ -55,15 +55,19 @@ def test_legoport_list_smoke(p):
     assert len(rows) == 6, f"expected 6 port rows, got {len(rows)}:\n{output}"
 
 
+@pytest.mark.interactive
 def test_legoport_no_device_returns_none(legoport_idle):
     """With no devices plugged in, every port reports NONE.
 
     Already enforced by the ``legoport_idle`` fixture; this test exists
     so the assertion appears as a named regression.
+
+    Operator must unplug all six I/O ports before running.
     """
     assert True
 
 
+@pytest.mark.interactive
 def test_legoport_step_time_under_1ms(legoport_idle):
     """Worker execution time stays under 1 ms after a soak.
 
@@ -86,6 +90,7 @@ def test_legoport_step_time_under_1ms(legoport_idle):
     )
 
 
+@pytest.mark.interactive
 def test_legoport_interval_under_4ms(legoport_idle):
     """HPWORK rescheduling interval stays under 4 ms (target 2 ms + slack).
 
