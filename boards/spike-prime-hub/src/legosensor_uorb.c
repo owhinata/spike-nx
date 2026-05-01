@@ -56,6 +56,13 @@
 #include <arch/board/board_legosensor.h>
 #include <arch/board/board_lump.h>
 
+/* Forward declaration from stm32_legoport_pwm.c — motor SET_PWM
+ * (LEGOSENSOR_CLASS_MOTOR_*) is plumbed straight through to the
+ * H-bridge driver shipped in Issue #80.
+ */
+
+int stm32_legoport_pwm_set_duty(int idx, int16_t duty);
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -988,30 +995,21 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
         {
           FAR const struct legosensor_pwm_arg_s *pwm =
               (FAR const struct legosensor_pwm_arg_s *)(uintptr_t)arg;
-          FAR struct legosensor_port_s *p;
-          uint8_t  expected;
-          bool     is_motor = false;
-          int16_t  lo;
-          int      port_to_use = -1;
-          int      light_mode_idx;
-          uint8_t  payload[4];
-          int      i;
+          int port_to_use = -1;
 
           if (pwm == NULL)
             {
               return -EINVAL;
             }
 
-          /* Per-class shape & range.
-           *
-           * SET_PWM is reserved for **actual H-bridge PWM** (the
-           * MOTOR_* classes below).  COLOR / ULTRASONIC LIGHT modes
-           * and FORCE's absence of any actuator are not PWM in the
-           * H-bridge sense, so they return -ENOTSUP — callers should
-           * issue SEND mode=LIGHT explicitly via `LEGOSENSOR_SEND`
-           * (Issue #92).  Routing LED brightness through SEND keeps
-           * the SELECT-then-WRITE sequence visible and matches the
-           * underlying LUMP semantics.
+          /* SET_PWM is reserved for **H-bridge physical PWM**, i.e. the
+           * MOTOR_* classes routed through `stm32_legoport_pwm_set_duty`
+           * (Issue #80).  COLOR / ULTRASONIC LIGHT modes and FORCE's
+           * absence of any actuator are not PWM in the H-bridge sense,
+           * so they return -ENOTSUP — callers must use `LEGOSENSOR_SEND
+           * mode=LIGHT` directly (Issue #92).  Routing LED brightness
+           * through SEND keeps the SELECT-then-WRITE sequence visible
+           * and matches the underlying LUMP semantics.
            */
 
           switch (cdev->class_id)
@@ -1019,19 +1017,44 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
               case LEGOSENSOR_CLASS_MOTOR_M:
               case LEGOSENSOR_CLASS_MOTOR_R:
               case LEGOSENSOR_CLASS_MOTOR_L:
-                expected = 1;
-                lo       = -10000;
-                is_motor = true;
-                break;
+                /* num_channels must be 1; channels[0] = signed duty in
+                 * -10000..10000 (.01 % units), exactly the
+                 * `stm32_legoport_pwm_set_duty(idx, int16_t)` ABI.
+                 */
+
+                if (pwm->num_channels != 1)
+                  {
+                    return -EINVAL;
+                  }
+                if (pwm->channels[0] < -10000 || pwm->channels[0] > 10000)
+                  {
+                    return -EINVAL;
+                  }
+
+                ret = legosensor_check_write_claim(cs, filep, &port_to_use);
+                if (ret < 0)
+                  {
+                    return ret;
+                  }
+
+                /* -EBUSY surfaces if LUMP has the port pinned as a
+                 * SUPPLY rail (only happens for COLOR / ULTRASONIC,
+                 * which never reach this branch).  Motors do not
+                 * announce NEEDS_SUPPLY_PIN, so this should pass.
+                 */
+
+                return stm32_legoport_pwm_set_duty(port_to_use,
+                                                   pwm->channels[0]);
+
               case LEGOSENSOR_CLASS_COLOR:
               case LEGOSENSOR_CLASS_ULTRASONIC:
               case LEGOSENSOR_CLASS_FORCE:
               default:
                 /* COLOR mode 3 LIGHT and ULTRASONIC mode 5 LIGHT are
                  * firmware-gated per SELECT mode (see sensor.md §4.5
-                 * for the COLOR analysis; ULTRASONIC behaves the same
-                 * way per pybricks reference).  FORCE has no actuator
-                 * at all.  Validate CLAIM so the caller's stale-claim
+                 * for COLOR; ULTRASONIC behaves the same way per
+                 * pybricks reference).  FORCE has no actuator at all.
+                 * Validate CLAIM so the caller's stale-claim
                  * diagnostic still surfaces, then return -ENOTSUP.
                  * Use `LEGOSENSOR_SEND` (mode=LIGHT) to drive the LEDs
                  * explicitly.
@@ -1044,61 +1067,6 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
                   }
                 return -ENOTSUP;
             }
-
-          if (pwm->num_channels != expected)
-            {
-              return -EINVAL;
-            }
-
-          for (i = 0; i < (int)expected; i++)
-            {
-              if (pwm->channels[i] < lo || pwm->channels[i] > 10000)
-                {
-                  return -EINVAL;
-                }
-            }
-
-          ret = legosensor_check_write_claim(cs, filep, &port_to_use);
-          if (ret < 0)
-            {
-              return ret;
-            }
-
-          if (is_motor)
-            {
-              /* H-bridge PWM ships with #80; until then, decline. */
-
-              return -ENOTSUP;
-            }
-
-          /* Color / ultrasonic — route through the LUMP writable LIGHT
-           * mode resolved at on_sync.  -ENOTSUP if the device firmware
-           * does not expose a LIGHT mode of the expected shape.
-           */
-
-          p = &g_legosensor_port[port_to_use];
-          nxmutex_lock(&p->lock);
-          light_mode_idx = p->light_mode_idx;
-          nxmutex_unlock(&p->lock);
-
-          if (light_mode_idx < 0)
-            {
-              return -ENOTSUP;
-            }
-
-          /* Quantize 0..10000 (.01 %) → 0..100 (percent INT8) with
-           * mid-point round-up.  Values are guaranteed non-negative
-           * here for the LED classes.
-           */
-
-          for (i = 0; i < (int)expected; i++)
-            {
-              payload[i] =
-                  (uint8_t)((pwm->channels[i] * 100 + 5000) / 10000);
-            }
-
-          return lump_send_data(port_to_use, (uint8_t)light_mode_idx,
-                                payload, expected);
         }
 
       default:

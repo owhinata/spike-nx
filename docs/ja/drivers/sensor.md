@@ -182,7 +182,7 @@ driver 側は per-port mutex 下で `pending_select_mode` + `pending_select_dead
 | COLOR | `-ENOTSUP` (Issue #92) | `LEGOSENSOR_SEND mode=3` (LIGHT、3×INT8 PCT) を直接使う | — |
 | ULTRASONIC | `-ENOTSUP` (Issue #92) | `LEGOSENSOR_SEND mode=5` (LIGHT、4×INT8 PCT) を直接使う | — |
 | FORCE | `-ENOTSUP` (恒久) | — | アクチュエータなし |
-| MOTOR_M / R / L | `-ENOTSUP` (本リリース段階) | LUMP ではなく STM32 TIM PWM、Issue #80 で実装 | channels[0] = signed duty -10000..10000 |
+| MOTOR_M / R / L | ✅ | `stm32_legoport_pwm_set_duty()` (STM32 TIM PWM、Issue #80) を直叩き | channels[0] = signed duty -10000..10000 (.01 % 単位) |
 
 **SET_PWM の意味付け**: H-bridge ベースの物理 PWM 専用 (motor 系)。LIGHT 系 (COLOR / ULTRASONIC) は LUMP writable mode への WRITE であって PWM ではないので SET_PWM 経路から外し、SEND を直に叩く形に統一した (Issue #92)。LIGHT mode の brightness は INT8 PCT (0..100) なので、`LEGOSENSOR_SEND` の `data[0..N]` にそれぞれ 0..100 を入れる。
 
@@ -192,9 +192,9 @@ LIGHT 書込み (`LEGOSENSOR_SEND` 経由、Issue #92):
 - engine entry は `lump_send_data(port, mode, data, len)`。`current_mode != mode` のときに `CMD SELECT mode` を **同じドレインパスで先送り** してから DATA を流す (Issue #92)。これにより `current_mode` も LIGHT 側に揃う — 古い実装は SELECT を呼ばず "writable mode SEND は active SELECT 独立" を利用していたが、SPIKE Color Sensor の firmware 自動 LED 制御の都合で SELECT 経由にした方が pybricks 流儀と合致する
 - (旧仕様メモ) LUMP プロトコル仕様としては writable mode への SEND は active SELECT mode から独立しており、SELECT を打たずに LED brightness を書くことも理論上は可能。ただし Color / Ultrasonic の firmware は SELECT 通知に対して自動 LED 制御を被せてくるため、SELECT を経由しないと LIGHT 値が即上書きされて意味を成さない
 
-> **物理 LED 点灯は H-bridge supply pin に依存 (Issue #80 で実装)**
+> **物理 LED 点灯は H-bridge supply pin が前提 (Issue #80 で実装済み)**
 >
-> SPIKE Color Sensor (`NEEDS_SUPPLY_PIN1`) と Ultrasonic Sensor (`NEEDS_SUPPLY_PIN1`) は SYNC 完了後に H-bridge を `-MAX_DUTY` で駆動して LED に電源を供給する必要がある (pybricks 参考実装: `pbio/drv/legodev/legodev_pup_uart.c:894-900`、capability map: `legodev_spec.c:201-208`)。本リリース (#79) では H-bridge driver が未実装のため、`LEGOSENSOR_SEND mode=LIGHT` は LUMP frame を wire 上に送出する (`tx_bytes` で確認可能) が **物理 LED は電源供給がないため点灯しない**。Issue #80 の H-bridge driver が landed すると、SYNC 後に該当 port の supply pin が自動駆動され、本 ioctl の brightness 設定が物理的にも反映される想定。
+> SPIKE Color Sensor (`NEEDS_SUPPLY_PIN1`) と Ultrasonic Sensor (`NEEDS_SUPPLY_PIN1`) は SYNC 完了後に H-bridge を `-MAX_DUTY` で駆動して LED に電源を供給する必要がある (pybricks 参考実装: `pbio/drv/legodev/legodev_pup_uart.c:894-900`、capability map: `legodev_spec.c:201-208`)。Issue #80 で `lump_pin_supply_on_sync()` 経由で auto-supply されるようになり、SYNCED 直後には既に H-bridge が supply rail に pin 済み。状態は `port pwm <P> status` (PINNED フラグ) で確認可能。
 
 ### 4.5 SPIKE Color Sensor の自動 LED 制御 (実機観測)
 
@@ -275,15 +275,21 @@ sensor <class> pwm <ch0> [ch1 ch2 ch3] open → CLAIM → SET_PWM → close
 sensor color info                    # bound port=A, modes 一覧
 sensor color watch                   # 1 秒間 sample を decode 表示
 sensor color select 1                # REFLT mode へ (mode 1)
-sensor color pwm 5000 0 0            # LED0 を 50% 点灯
-sensor color pwm 0 0 0               # 全 LED off
+sensor color send 3 32 00 00         # LIGHT (mode 3) — LED0 を 50% 点灯
+sensor color send 3 00 00 00         # LIGHT — 全 LED off
 
 # Ultrasonic を別 port に挿す
-sensor ultrasonic pwm 5000 5000 0 0  # eye LED 上 2 個点灯
+sensor ultrasonic send 5 32 32 00 00 # LIGHT (mode 5) — eye LED 上 2 個 50%
 
-# Force / motor の SET_PWM は本リリースでは未対応
-sensor force pwm 0                   # -ENOTSUP
-sensor motor_m pwm 0                 # -ENOTSUP
+# Motor — H-bridge PWM (Issue #80 backend)
+sensor motor_m pwm 5000              # 前進 50%
+sensor motor_m pwm -5000             # 後進 50%
+sensor motor_m pwm 0                 # ブレーキ (pybricks 互換、§4.4 参照)
+
+# Color / Ultrasonic / Force の PWM は不可 (SEND を使うか -ENOTSUP)
+sensor color pwm 0 0 0               # -ENOTSUP (SEND mode 3 を使う)
+sensor ultrasonic pwm 0 0 0 0        # -ENOTSUP (SEND mode 5 を使う)
+sensor force pwm 0                   # -ENOTSUP (アクチュエータなし)
 ```
 
 ### 5.2 `dd` / `sensortest` が使えない理由
@@ -313,9 +319,9 @@ sensor motor_m pwm 0                 # -ENOTSUP
 
 | Issue | 範囲 |
 |---|---|
-| #80 | モーター PWM H-bridge ドライバ (STM32 TIM 使用)。MOTOR_M / R / L の SET_PWM が `-ENOTSUP` から実装に切り替わる |
+| #80 | (CLOSED 2026-05-01) モーター PWM H-bridge ドライバ + LUMP supply auto-pin。MOTOR_M / R / L の SET_PWM は #92 でこれを直叩きする形に接続済み |
 | #78 | userspace ヘルパライブラリ `apps/legolib/` (per-class policy: mode → LED 自動制御 等) |
-| #77 | drivebase userspace daemon (`apps/drivebase/`、左右輪 motor をペアで制御。#78 + #80 に依存) |
+| #77 | drivebase userspace daemon (`apps/drivebase/`、左右輪 motor をペアで制御。#78 に依存) |
 
 ## 8. tuning 定数
 

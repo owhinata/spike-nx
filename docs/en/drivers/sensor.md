@@ -232,7 +232,7 @@ Expired requests are silently dropped.
 | COLOR | `-ENOTSUP` (Issue #92) | use `LEGOSENSOR_SEND mode=3` (LIGHT, 3×INT8 PCT) directly | — |
 | ULTRASONIC | `-ENOTSUP` (Issue #92) | use `LEGOSENSOR_SEND mode=5` (LIGHT, 4×INT8 PCT) directly | — |
 | FORCE | `-ENOTSUP` (permanent) | — | no actuator on the device |
-| MOTOR_M / R / L | `-ENOTSUP` (this release) | STM32 TIM PWM (lands with Issue #80) | channels[0] = signed duty -10000..10000 |
+| MOTOR_M / R / L | ✅ | `stm32_legoport_pwm_set_duty()` direct call (STM32 TIM PWM, Issue #80) | channels[0] = signed duty -10000..10000 (.01 % units) |
 
 **SET_PWM semantics**: reserved for **H-bridge physical PWM** (motors).
 LIGHT-mode brightness on COLOR / ULTRASONIC is a writable-mode WRITE,
@@ -261,20 +261,19 @@ LIGHT writes via `LEGOSENSOR_SEND` (Issue #92):
   the engine was originally relying on.  Color/Ultrasonic firmware
   quirks are the reason we no longer use it.
 
-> **Physical LED illumination depends on the H-bridge supply pin
-> (lands with Issue #80).**
+> **Physical LED illumination requires the H-bridge supply pin
+> (Issue #80, landed).**
 >
 > The SPIKE Color Sensor (`NEEDS_SUPPLY_PIN1`) and Ultrasonic Sensor
 > (`NEEDS_SUPPLY_PIN1`) require the H-bridge to be driven at
 > `-MAX_DUTY` after SYNC to power the device's LEDs (see the pybricks
 > reference at `pbio/drv/legodev/legodev_pup_uart.c:894-900` and the
-> capability map at `legodev_spec.c:201-208`).  This release (#79)
-> does not yet ship the H-bridge driver, so `LEGOSENSOR_SEND` for
-> mode=LIGHT emits the LUMP frame onto the wire (visible as
-> `tx_bytes` growth) but **the physical LED stays dark for lack of
-> supply voltage**.  Once Issue #80 lands, the H-bridge will be driven
-> automatically on SYNC and the brightness commanded here will
-> also light the LEDs.
+> capability map at `legodev_spec.c:201-208`).  Issue #80 ships this
+> auto-supply via `lump_pin_supply_on_sync()`, so on a freshly synced
+> port the H-bridge is already pinned to the supply rail by the time
+> userspace gets a chance to send LIGHT writes.  The pinned state is
+> visible in `port lump status` (DqDrop / Err / BadMsg) and the
+> H-bridge state can be inspected with `port pwm <P> status`.
 
 ### 4.5 SPIKE Color Sensor firmware-autonomous LED policy (empirical)
 
@@ -379,15 +378,21 @@ drivebase for an example).
 sensor color info                    # bound port=A, modes listed
 sensor color watch                   # 1 s of decoded samples
 sensor color select 1                # switch to REFLT (mode 1)
-sensor color pwm 5000 0 0            # LED0 at 50 %
-sensor color pwm 0 0 0               # all LEDs off
+sensor color send 3 32 00 00         # LIGHT (mode 3) — LED0 at 50 %
+sensor color send 3 00 00 00         # LIGHT — all LEDs off
 
 # Plug an Ultrasonic sensor elsewhere
-sensor ultrasonic pwm 5000 5000 0 0  # top two eye LEDs at 50 %
+sensor ultrasonic send 5 32 32 00 00 # LIGHT (mode 5) — top two eye LEDs at 50 %
 
-# Force / motor SET_PWM is unsupported in this release
-sensor force pwm 0                   # -ENOTSUP
-sensor motor_m pwm 0                 # -ENOTSUP
+# Motor — H-bridge PWM via SET_PWM (Issue #80 backend)
+sensor motor_m pwm 5000              # forward 50 %
+sensor motor_m pwm -5000             # reverse 50 %
+sensor motor_m pwm 0                 # brake (pybricks-compat semantics, see §4.4)
+
+# Color / Ultrasonic / Force have no PWM — use SEND or accept -ENOTSUP
+sensor color pwm 0 0 0               # -ENOTSUP (use SEND mode 3)
+sensor ultrasonic pwm 0 0 0 0        # -ENOTSUP (use SEND mode 5)
+sensor force pwm 0                   # -ENOTSUP (no actuator)
 ```
 
 ### 5.2 Why `dd` / `sensortest` don't work
@@ -425,9 +430,9 @@ through the LUMP-direct `/dev/legoport[N]` chardev with port-scoped
 
 | Issue | Scope |
 |---|---|
-| #80 | Motor PWM H-bridge driver (STM32 TIM).  MOTOR_M / R / L SET_PWM moves from `-ENOTSUP` to a real implementation |
+| #80 | (CLOSED 2026-05-01) Motor PWM H-bridge driver + LUMP supply auto-pin.  MOTOR_M / R / L SET_PWM is now wired straight through to it (Issue #92) |
 | #78 | Userspace helper library `apps/legolib/` (per-class policy: mode → LED automation, …) |
-| #77 | drivebase userspace daemon (`apps/drivebase/`, paired left/right wheel control; depends on #78 + #80) |
+| #77 | drivebase userspace daemon (`apps/drivebase/`, paired left/right wheel control; depends on #78) |
 
 ## 8. Tuning constants
 
