@@ -456,8 +456,11 @@ ahead of the next telemetry frame.
 |---|---|---|
 | `IMU ON\n`  | Include the IMU subsection in the BUNDLE (auto-activates the uORB driver) | — |
 | `IMU OFF\n` | Drop the IMU subsection | — |
-| `SENSOR ON\n`  | Stream all 6 LEGO sensor TLVs | — (writes are added in Issue B/C) |
+| `SENSOR ON\n`  | Stream all 6 LEGO sensor TLVs | — |
 | `SENSOR OFF\n` | Freeze TLVs to unbound/empty | — |
+| `SENSOR MODE <class> <mode>\n` | Switch the bound device to the given LUMP mode | only while SENSOR ON |
+| `SENSOR SEND <class> <mode> <hex>\n` | Write hex bytes to a writable mode (LEDs etc.) | only while SENSOR ON |
+| `SENSOR PWM <class> <ch0> [ch1..ch3]\n` | LED brightness / motor duty (-100..100; color=3ch, ultrasonic=4ch, motor_*=1ch) | only while SENSOR ON |
 | `SET ODR <hz>\n` | Set ODR (13/26/52/104/208/416/833 Hz) | only while IMU OFF.  **`> 833` returns `ERR invalid_odr`** |
 | `SET ACCEL_FSR <g>\n` | Accel FSR (2/4/8/16) | only while IMU OFF |
 | `SET GYRO_FSR <dps>\n` | Gyro FSR (125/250/500/1000/2000) | only while IMU OFF |

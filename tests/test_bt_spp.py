@@ -483,6 +483,27 @@ def test_bt_rfcomm_command_suite(p):
             assert _rfcomm_send_command(sock, "SENSOR ON") == "OK"
             status = p.sendCommand("btsensor status", timeout=5)
             assert re.search(r"sensor:\s+on", status), status
+
+            # Issue #91: write commands.  Without a physical LEGO sensor
+            # we cannot verify the actuator effect, so just check that
+            # the parser recognises each command (returns OK or ERR
+            # rather than `ERR unknown ...`).  ERR replies are fine when
+            # no device is bound — the firmware still went through the
+            # cmd_sensor branch.
+            for write_cmd in [
+                "SENSOR MODE color 0",
+                "SENSOR SEND color 3 64",
+                "SENSOR PWM color 0 0 0",
+                "SENSOR PWM force 1",        # force has no PWM → ERR not_supported
+                "SENSOR MODE bogus 0",       # invalid class
+                "SENSOR PWM color 0 0 0 0",  # too many channels
+            ]:
+                r = _rfcomm_send_command(sock, write_cmd)
+                assert r is not None, write_cmd
+                assert not r.startswith("ERR unknown"), (
+                    f"{write_cmd!r} produced {r!r} — parser did not recognise it"
+                )
+
             assert _rfcomm_send_command(sock, "SENSOR OFF") == "OK"
 
             # Phase 4: IMU ON, then verify BUNDLE frames flow on the

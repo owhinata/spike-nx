@@ -6,7 +6,7 @@
         x:Class="ImuViewer.App.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Title="ImuViewer"
-        Width="1280" Height="720"
+        Width="1400" Height="1040"
         Background="#1A1A1A">
   <Window.Styles>
     <Style Selector="TextBlock.label">
@@ -80,6 +80,71 @@
           <Button Grid.Column="1" Content="SENSOR OFF" HorizontalAlignment="Stretch"
                   Command="{Binding SensorOffCommand}" IsEnabled="{Binding CanToggleSensor}" />
         </Grid>
+
+        <!-- Sensor write panel: pick a class and drive its mode/SEND/PWM. -->
+        <StackPanel DataContext="{Binding SensorWrite}"
+                    IsEnabled="{Binding WriteEnabled}"
+                    Spacing="4">
+          <TextBlock Classes="header" Text="{Binding WriteHeader}" />
+          <ComboBox HorizontalAlignment="Stretch"
+                    ItemsSource="{Binding AvailableClasses}"
+                    SelectedItem="{Binding SelectedClass}" />
+
+          <TextBlock Classes="label" Text="MODE" />
+          <Grid ColumnDefinitions="*,Auto">
+            <ComboBox Grid.Column="0"
+                      HorizontalAlignment="Stretch"
+                      ItemsSource="{Binding AvailableModes}"
+                      SelectedItem="{Binding SelectedMode}" />
+            <Button Grid.Column="1" Content="Apply"
+                    Command="{Binding SetModeCommand}" />
+          </Grid>
+
+          <TextBlock Classes="label" Text="SEND  (mode + hex bytes)" />
+          <Grid ColumnDefinitions="60,*,Auto">
+            <NumericUpDown Grid.Column="0"
+                           Minimum="0" Maximum="7"
+                           Value="{Binding SendModeId}" />
+            <TextBox Grid.Column="1"
+                     Text="{Binding SendHexInput}"
+                     Watermark="hex bytes (e.g. 64 00 00)" />
+            <Button Grid.Column="2" Content="Send"
+                    Command="{Binding SendDataCommand}" />
+          </Grid>
+
+          <StackPanel IsVisible="{Binding PwmIsSupported}" Spacing="2">
+            <TextBlock Classes="label" Text="PWM  (-100..+100)" />
+            <UniformGrid Rows="1">
+              <StackPanel IsVisible="{Binding PwmCh0Visible}">
+                <TextBlock Classes="label" HorizontalAlignment="Center"
+                           Text="{Binding PwmCh0}" />
+                <Slider Minimum="-100" Maximum="100" Value="{Binding PwmCh0}" />
+              </StackPanel>
+              <StackPanel IsVisible="{Binding PwmCh1Visible}">
+                <TextBlock Classes="label" HorizontalAlignment="Center"
+                           Text="{Binding PwmCh1}" />
+                <Slider Minimum="-100" Maximum="100" Value="{Binding PwmCh1}" />
+              </StackPanel>
+              <StackPanel IsVisible="{Binding PwmCh2Visible}">
+                <TextBlock Classes="label" HorizontalAlignment="Center"
+                           Text="{Binding PwmCh2}" />
+                <Slider Minimum="-100" Maximum="100" Value="{Binding PwmCh2}" />
+              </StackPanel>
+              <StackPanel IsVisible="{Binding PwmCh3Visible}">
+                <TextBlock Classes="label" HorizontalAlignment="Center"
+                           Text="{Binding PwmCh3}" />
+                <Slider Minimum="-100" Maximum="100" Value="{Binding PwmCh3}" />
+              </StackPanel>
+            </UniformGrid>
+            <Button HorizontalAlignment="Stretch" Content="Apply PWM"
+                    Command="{Binding ApplyPwmCommand}" />
+          </StackPanel>
+
+          <TextBlock Classes="label" FontSize="11"
+                     Foreground="#A0A0A0"
+                     Text="{Binding StatusText}"
+                     TextWrapping="Wrap" />
+        </StackPanel>
 
         <TextBlock Classes="header" Text="Madgwick" />
         <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto">

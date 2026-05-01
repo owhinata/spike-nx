@@ -60,7 +60,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _orchestrator.BundleReceived += _ => _fps.Mark();
 
         // Pre-populate the six sensor panels in fixed enum order so the
-        // UI is stable across attach/detach.
+        // UI is stable across attach/detach.  Panels are read-only —
+        // the write side lives in SensorWriteViewModel on the sidebar.
         SensorPanelViewModel[] panels = new SensorPanelViewModel[]
         {
             new(LegoClassId.Color),
@@ -73,10 +74,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         SensorPanels = panels;
         _panelByClass = panels.ToDictionary(p => p.ClassId);
 
+        SensorWrite = new SensorWriteViewModel(orchestrator);
+
         _legoAggregator.StatusChanged += OnLegoStatusChanged;
         _legoAggregator.SampleReceived += OnLegoSampleReceived;
         _legoAggregator.PortChanged += OnLegoPortChanged;
     }
+
+    /// <summary>Single-class write panel for the sidebar.</summary>
+    public SensorWriteViewModel SensorWrite { get; }
 
     private void OnLegoStatusChanged(LegoClassId classId, LegoSampleAggregator.ClassState state)
     {
@@ -129,6 +135,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private bool _isSensorOn;
 
     public bool CanToggleSensor => IsConnected;
+
+    partial void OnIsSensorOnChanged(bool value) => SensorWrite?.SetWriteEnabled(value);
 
     [ObservableProperty]
     private string _statusText = "ready";

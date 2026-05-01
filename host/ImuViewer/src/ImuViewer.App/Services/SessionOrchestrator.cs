@@ -64,6 +64,56 @@ public sealed class SessionOrchestrator : IAsyncDisposable
     public Task<BtsensorReply> SetAccelFsrAsync(int g, CancellationToken ct) => SendAsync($"SET ACCEL_FSR {g}", ct);
     public Task<BtsensorReply> SetGyroFsrAsync(int dps, CancellationToken ct) => SendAsync($"SET GYRO_FSR {dps}", ct);
 
+    public Task<BtsensorReply> SetSensorModeAsync(
+        LegoClassId classId, int mode, CancellationToken ct) =>
+        SendAsync($"SENSOR MODE {ClassToken(classId)} {mode}", ct);
+
+    public Task<BtsensorReply> SensorSendAsync(
+        LegoClassId classId, int mode, ReadOnlySpan<byte> payload, CancellationToken ct)
+    {
+        // Build "SENSOR SEND <class> <mode> <hex...>".  Each byte ends up
+        // as a 2-char lowercase hex token; the parser accepts space-
+        // separated tokens of even length.
+        char[] hex = new char[payload.Length * 3];
+        for (int i = 0; i < payload.Length; i++)
+        {
+            byte b = payload[i];
+            hex[i * 3]     = ToHex((b >> 4) & 0xF);
+            hex[i * 3 + 1] = ToHex(b & 0xF);
+            hex[i * 3 + 2] = ' ';
+        }
+        string hexStr = payload.Length == 0
+            ? string.Empty
+            : new string(hex, 0, hex.Length - 1);
+        return SendAsync($"SENSOR SEND {ClassToken(classId)} {mode} {hexStr}", ct);
+    }
+
+    public Task<BtsensorReply> SensorPwmAsync(
+        LegoClassId classId, IReadOnlyList<int> channels, CancellationToken ct)
+    {
+        if (channels is null || channels.Count == 0)
+        {
+            throw new ArgumentException("channels must not be empty", nameof(channels));
+        }
+
+        string args = string.Join(' ', channels);
+        return SendAsync($"SENSOR PWM {ClassToken(classId)} {args}", ct);
+    }
+
+    private static char ToHex(int nibble) =>
+        (char)(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
+
+    private static string ClassToken(LegoClassId classId) => classId switch
+    {
+        LegoClassId.Color      => "color",
+        LegoClassId.Ultrasonic => "ultrasonic",
+        LegoClassId.Force      => "force",
+        LegoClassId.MotorM     => "motor_m",
+        LegoClassId.MotorR     => "motor_r",
+        LegoClassId.MotorL     => "motor_l",
+        _ => ((int)classId).ToString(),
+    };
+
     public async Task DisconnectAsync()
     {
         if (!IsConnected)

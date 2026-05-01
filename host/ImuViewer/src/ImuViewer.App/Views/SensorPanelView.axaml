@@ -6,28 +6,30 @@
              x:DataType="vm:SensorPanelViewModel"
              Padding="6"
              Background="#1F1F22">
-  <Grid RowDefinitions="Auto,Auto,*,Auto">
-    <TextBlock Grid.Row="0"
-               Text="{Binding Title}"
-               FontWeight="SemiBold"
-               FontSize="13"
-               Foreground="{Binding StatusForeground}" />
+  <DockPanel LastChildFill="True">
+    <StackPanel DockPanel.Dock="Top" Spacing="2">
+      <TextBlock Text="{Binding Title}"
+                 FontWeight="SemiBold"
+                 FontSize="13"
+                 Foreground="{Binding StatusForeground}" />
+      <TextBlock Text="{Binding ConnectionStatus}"
+                 FontSize="10"
+                 Foreground="#A0A0A0"
+                 TextTrimming="CharacterEllipsis" />
+    </StackPanel>
 
-    <TextBlock Grid.Row="1"
-               Text="{Binding ConnectionStatus}"
+    <TextBlock DockPanel.Dock="Bottom"
                FontSize="11"
-               Foreground="#A0A0A0"
-               TextWrapping="Wrap" />
-
-    <ctrl:SensorPlotControl Grid.Row="2"
-                            Points="{Binding RecentPoints}"
-                            MinHeight="60" />
-
-    <TextBlock Grid.Row="3"
-               Text="{Binding LatestValuesText}"
                FontFamily="Inter, monospace"
-               FontSize="11"
                Foreground="#E0E0E0"
+               Margin="0,2,0,0"
+               Text="{Binding LatestValuesText}"
                TextTrimming="CharacterEllipsis" />
-  </Grid>
+
+    <Border MinHeight="80"
+            Background="#18181C"
+            Margin="0,4,0,2">
+      <ctrl:SensorPlotControl Points="{Binding RecentPoints}" />
+    </Border>
+  </DockPanel>
 </UserControl>

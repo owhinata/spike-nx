@@ -94,6 +94,28 @@ static struct class_state_s g_classes[BTSENSOR_TLV_COUNT];
 static bool                 g_initialized;
 static bool                 g_enabled;
 
+/* Per-class 50 ms cool-down for write APIs (Codex review #7).  Updated
+ * on every successful select/send/set_pwm.
+ */
+
+#define SENSOR_WRITE_COOLDOWN_MS  50
+
+static uint32_t             g_last_write_ms[BTSENSOR_TLV_COUNT];
+
+/* Per-class PWM channel count, matching apps/sensor/sensor_main.c's
+ * pwm_channels.  0 means SET_PWM is not supported on that class.
+ */
+
+static const uint8_t g_pwm_channels[BTSENSOR_TLV_COUNT] =
+{
+  [LEGOSENSOR_CLASS_COLOR]      = 3,
+  [LEGOSENSOR_CLASS_ULTRASONIC] = 4,
+  [LEGOSENSOR_CLASS_FORCE]      = 0,
+  [LEGOSENSOR_CLASS_MOTOR_M]    = 1,
+  [LEGOSENSOR_CLASS_MOTOR_R]    = 1,
+  [LEGOSENSOR_CLASS_MOTOR_L]    = 1,
+};
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -392,4 +414,156 @@ void sensor_sampler_snapshot(
 
       cls->fresh = false;
     }
+}
+
+/****************************************************************************
+ * Write APIs (Issue C)
+ ****************************************************************************/
+
+/* Common pre-flight: validates class index, SENSOR enabled, and 50 ms
+ * cool-down, then opens a transient fd and takes LEGOSENSOR_CLAIM.
+ * On success returns the fd (caller must close to auto-RELEASE).  On
+ * failure returns -errno.
+ */
+
+static int write_open_and_claim(uint8_t class_id)
+{
+  if (class_id >= BTSENSOR_TLV_COUNT)
+    {
+      return -EINVAL;
+    }
+
+  if (!g_enabled)
+    {
+      return -EOPNOTSUPP;
+    }
+
+  uint32_t now = now_ms();
+  uint32_t last = g_last_write_ms[class_id];
+  if (last != 0 && (now - last) < SENSOR_WRITE_COOLDOWN_MS)
+    {
+      return -EBUSY;
+    }
+
+  int fd = open(g_class_table[class_id].path, O_RDONLY | O_NONBLOCK);
+  if (fd < 0)
+    {
+      return -errno;
+    }
+
+  int rc = ioctl(fd, LEGOSENSOR_CLAIM, 0);
+  if (rc < 0)
+    {
+      int err = -errno;
+      close(fd);
+      return err;
+    }
+
+  return fd;
+}
+
+static void write_record_success(uint8_t class_id)
+{
+  g_last_write_ms[class_id] = now_ms();
+}
+
+int sensor_sampler_select_mode(uint8_t class_id, uint8_t mode)
+{
+  int fd = write_open_and_claim(class_id);
+  if (fd < 0)
+    {
+      return fd;
+    }
+
+  struct legosensor_select_arg_s sel = { .mode = mode };
+  int rc = ioctl(fd, LEGOSENSOR_SELECT, (unsigned long)&sel);
+  if (rc < 0)
+    {
+      int err = -errno;
+      close(fd);
+      return err;
+    }
+
+  close(fd);
+  write_record_success(class_id);
+  return 0;
+}
+
+int sensor_sampler_send(uint8_t class_id, uint8_t mode,
+                        const uint8_t *data, size_t len)
+{
+  if (data == NULL || len == 0 || len > BTSENSOR_TLV_PAYLOAD_MAX)
+    {
+      return -EINVAL;
+    }
+
+  int fd = write_open_and_claim(class_id);
+  if (fd < 0)
+    {
+      return fd;
+    }
+
+  struct legosensor_send_arg_s snd;
+  memset(&snd, 0, sizeof(snd));
+  snd.mode = mode;
+  snd.len  = (uint8_t)len;
+  memcpy(snd.data, data, len);
+
+  int rc = ioctl(fd, LEGOSENSOR_SEND, (unsigned long)&snd);
+  if (rc < 0)
+    {
+      int err = -errno;
+      close(fd);
+      return err;
+    }
+
+  close(fd);
+  write_record_success(class_id);
+  return 0;
+}
+
+int sensor_sampler_set_pwm(uint8_t class_id,
+                           const int16_t *channels, size_t n)
+{
+  if (class_id >= BTSENSOR_TLV_COUNT || channels == NULL)
+    {
+      return -EINVAL;
+    }
+
+  uint8_t expected = g_pwm_channels[class_id];
+  if (expected == 0)
+    {
+      return -ENOTSUP;
+    }
+
+  if (n != expected || n > 4)
+    {
+      return -EINVAL;
+    }
+
+  int fd = write_open_and_claim(class_id);
+  if (fd < 0)
+    {
+      return fd;
+    }
+
+  struct legosensor_pwm_arg_s pwm;
+  memset(&pwm, 0, sizeof(pwm));
+  pwm.num_channels = expected;
+  for (size_t i = 0; i < n; i++)
+    {
+      pwm.channels[i] = channels[i];
+    }
+
+  int rc = ioctl(fd, LEGOSENSOR_SET_PWM, (unsigned long)&pwm);
+  if (rc < 0)
+    {
+      int err = -errno;
+      close(fd);
+      return err;
+    }
+
+  close(fd);
+  write_record_success(class_id);
+  return 0;
 }

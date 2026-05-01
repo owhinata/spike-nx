@@ -28,10 +28,16 @@
 #include <string.h>
 #include <syslog.h>
 
+#include <ctype.h>
+
+#include <arch/board/board_legosensor.h>
+
 #include "btsensor_cmd.h"
 #include "btsensor_tx.h"
+#include "btsensor_wire.h"
 #include "bundle_emitter.h"
 #include "imu_sampler.h"
+#include "sensor_sampler.h"
 
 /****************************************************************************
  * Private Data
@@ -101,7 +107,216 @@ static void cmd_imu(char *arg)
   reply(buf);
 }
 
-static void cmd_sensor(char *arg)
+/* Parse a class identifier — accepts canonical names (color, ultrasonic,
+ * force, motor_m, motor_r, motor_l) or numeric 0..5.  Returns 0 on
+ * success, -EINVAL on parse failure.
+ */
+
+static int parse_class_id(const char *tok, uint8_t *out)
+{
+  if (tok == NULL)
+    {
+      return -EINVAL;
+    }
+
+  static const struct { const char *name; uint8_t id; } table[] =
+  {
+    { "color",      LEGOSENSOR_CLASS_COLOR      },
+    { "ultrasonic", LEGOSENSOR_CLASS_ULTRASONIC },
+    { "force",      LEGOSENSOR_CLASS_FORCE      },
+    { "motor_m",    LEGOSENSOR_CLASS_MOTOR_M    },
+    { "motor_r",    LEGOSENSOR_CLASS_MOTOR_R    },
+    { "motor_l",    LEGOSENSOR_CLASS_MOTOR_L    },
+  };
+
+  for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++)
+    {
+      if (strcasecmp(tok, table[i].name) == 0)
+        {
+          *out = table[i].id;
+          return 0;
+        }
+    }
+
+  /* Fallback: numeric 0..5. */
+
+  char *end;
+  long v = strtol(tok, &end, 10);
+  if (*end != '\0' || v < 0 || v >= BTSENSOR_TLV_COUNT)
+    {
+      return -EINVAL;
+    }
+
+  *out = (uint8_t)v;
+  return 0;
+}
+
+/* Hex decoder.  Tokens are read with strtok_r " ", so each token must
+ * be even-length hex (no internal whitespace).  Returns total bytes on
+ * success or a negated errno.  `out` must hold at least
+ * BTSENSOR_TLV_PAYLOAD_MAX bytes.
+ */
+
+static int parse_hex_bytes(char **save, uint8_t *out, size_t cap)
+{
+  size_t total = 0;
+
+  for (char *tok = strtok_r(NULL, " ", save);
+       tok != NULL;
+       tok = strtok_r(NULL, " ", save))
+    {
+      size_t toklen = strlen(tok);
+      if ((toklen & 1U) != 0)
+        {
+          return -EINVAL;          /* odd hex digit count */
+        }
+
+      for (size_t i = 0; i < toklen; i += 2)
+        {
+          if (total >= cap)
+            {
+              return -E2BIG;
+            }
+
+          char c0 = tok[i];
+          char c1 = tok[i + 1];
+          if (!isxdigit((unsigned char)c0) || !isxdigit((unsigned char)c1))
+            {
+              return -EINVAL;
+            }
+
+          char pair[3] = { c0, c1, '\0' };
+          out[total++] = (uint8_t)strtol(pair, NULL, 16);
+        }
+    }
+
+  return total > 0 ? (int)total : -EINVAL;
+}
+
+/* Parse 1..4 signed integers in -100..+100 from successive strtok
+ * tokens, scaling each ×100 to match the LUMP int16 channel space
+ * (-10000..+10000 for motor duty, 0..10000 for color/ultrasonic LED
+ * brightness).  Returns the count parsed, or a negated errno.
+ */
+
+static int parse_pwm_channels(char **save, int16_t *out, size_t cap)
+{
+  size_t n = 0;
+  for (char *tok = strtok_r(NULL, " ", save);
+       tok != NULL;
+       tok = strtok_r(NULL, " ", save))
+    {
+      if (n >= cap)
+        {
+          return -E2BIG;
+        }
+
+      char *end;
+      long v = strtol(tok, &end, 10);
+      if (*end != '\0' || v < -100 || v > 100)
+        {
+          return -EINVAL;
+        }
+
+      out[n++] = (int16_t)(v * 100);
+    }
+
+  return n > 0 ? (int)n : -EINVAL;
+}
+
+static void cmd_sensor_mode(char **save)
+{
+  char *cls_tok  = strtok_r(NULL, " ", save);
+  char *mode_tok = strtok_r(NULL, " ", save);
+
+  uint8_t class_id;
+  if (parse_class_id(cls_tok, &class_id) < 0)
+    {
+      reply("ERR invalid class\n");
+      return;
+    }
+
+  if (mode_tok == NULL)
+    {
+      reply("ERR invalid mode\n");
+      return;
+    }
+
+  char *end;
+  long mode = strtol(mode_tok, &end, 10);
+  if (*end != '\0' || mode < 0 || mode > 7)
+    {
+      reply("ERR invalid mode\n");
+      return;
+    }
+
+  reply_rc(sensor_sampler_select_mode(class_id, (uint8_t)mode),
+           "SENSOR MODE");
+}
+
+static void cmd_sensor_send(char **save)
+{
+  char *cls_tok  = strtok_r(NULL, " ", save);
+  char *mode_tok = strtok_r(NULL, " ", save);
+
+  uint8_t class_id;
+  if (parse_class_id(cls_tok, &class_id) < 0)
+    {
+      reply("ERR invalid class\n");
+      return;
+    }
+
+  if (mode_tok == NULL)
+    {
+      reply("ERR invalid mode\n");
+      return;
+    }
+
+  char *end;
+  long mode = strtol(mode_tok, &end, 10);
+  if (*end != '\0' || mode < 0 || mode > 7)
+    {
+      reply("ERR invalid mode\n");
+      return;
+    }
+
+  uint8_t buf[BTSENSOR_TLV_PAYLOAD_MAX];
+  int n = parse_hex_bytes(save, buf, sizeof(buf));
+  if (n < 0)
+    {
+      reply(n == -E2BIG ? "ERR payload too long\n" : "ERR invalid hex\n");
+      return;
+    }
+
+  reply_rc(sensor_sampler_send(class_id, (uint8_t)mode, buf, (size_t)n),
+           "SENSOR SEND");
+}
+
+static void cmd_sensor_pwm(char **save)
+{
+  char *cls_tok = strtok_r(NULL, " ", save);
+
+  uint8_t class_id;
+  if (parse_class_id(cls_tok, &class_id) < 0)
+    {
+      reply("ERR invalid class\n");
+      return;
+    }
+
+  int16_t channels[4];
+  int n = parse_pwm_channels(save, channels, 4);
+  if (n < 0)
+    {
+      reply(n == -E2BIG ? "ERR too many channels\n"
+                        : "ERR invalid pwm\n");
+      return;
+    }
+
+  reply_rc(sensor_sampler_set_pwm(class_id, channels, (size_t)n),
+           "SENSOR PWM");
+}
+
+static void cmd_sensor(char *arg, char **save)
 {
   if (arg == NULL)
     {
@@ -109,25 +324,38 @@ static void cmd_sensor(char *arg)
       return;
     }
 
-  if (strcmp(arg, "ON") == 0)
+  if (strcasecmp(arg, "ON") == 0)
     {
       reply_rc(bundle_emitter_set_sensor_enabled(true), "SENSOR ON");
       return;
     }
 
-  if (strcmp(arg, "OFF") == 0)
+  if (strcasecmp(arg, "OFF") == 0)
     {
       reply_rc(bundle_emitter_set_sensor_enabled(false), "SENSOR OFF");
       return;
     }
 
-  /* MODE / SEND / PWM tokens are reserved for Issue C; surface a
-   * distinct error so the host UI can hide the corresponding controls
-   * until that lands.
-   */
+  if (strcasecmp(arg, "MODE") == 0)
+    {
+      cmd_sensor_mode(save);
+      return;
+    }
+
+  if (strcasecmp(arg, "SEND") == 0)
+    {
+      cmd_sensor_send(save);
+      return;
+    }
+
+  if (strcasecmp(arg, "PWM") == 0)
+    {
+      cmd_sensor_pwm(save);
+      return;
+    }
 
   char buf[BTSENSOR_CMD_MAX_LINE];
-  snprintf(buf, sizeof(buf), "ERR not_supported %s\n", arg);
+  snprintf(buf, sizeof(buf), "ERR invalid %s\n", arg);
   reply(buf);
 }
 
@@ -188,7 +416,7 @@ static void process_line(char *line)
 
   if (strcmp(cmd, "SENSOR") == 0)
     {
-      cmd_sensor(strtok_r(NULL, " ", &save));
+      cmd_sensor(strtok_r(NULL, " ", &save), &save);
       return;
     }
 

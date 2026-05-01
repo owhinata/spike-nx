@@ -7,6 +7,13 @@ using ImuViewer.Core.Wire;
 
 namespace ImuViewer.App.ViewModels;
 
+/// <summary>
+/// Read-only display panel for one LEGO sensor class — title +
+/// connection status + plot + last decoded values.  All write controls
+/// (mode select / SEND / PWM) live in the left sidebar
+/// (<see cref="SensorWriteViewModel"/>) so the panel grid stays
+/// compact and uniform.
+/// </summary>
 public sealed partial class SensorPanelViewModel : ObservableObject
 {
     /// <summary>Maximum points kept in <see cref="RecentPoints"/>.</summary>
@@ -66,7 +73,6 @@ public sealed partial class SensorPanelViewModel : ObservableObject
         });
     }
 
-    /// <summary>Append a fresh sample.</summary>
     public void AppendSample(LegoSamplePoint sample)
     {
         Dispatcher.UIThread.Post(() =>
@@ -81,7 +87,6 @@ public sealed partial class SensorPanelViewModel : ObservableObject
         });
     }
 
-    /// <summary>Clear the plot history (called on port_id / mode_id change).</summary>
     public void ResetPlot()
     {
         Dispatcher.UIThread.Post(() =>
