@@ -723,6 +723,48 @@ int stm32_legoport_pwm_pin_supply(int idx, int sign)
   return OK;
 }
 
+/* chardev-internal API: runaway-motor cleanup on fd close.  Coasts
+ * only if the port was actively driven (state == PWM); stable stop
+ * states (BRAKE, COAST) survive close() so an explicit
+ * `legoport pwm <P> brake` actually keeps the windings shorted after
+ * the CLI exits.  Pinned ports (LUMP-held SUPPLY rail) are also
+ * left alone — `coast()` itself absorbs that case, but the test
+ * here keeps the cleanup intent explicit at this layer.
+ */
+
+int stm32_legoport_pwm_close_cleanup(int idx)
+{
+  int  ret;
+  bool need_coast;
+
+  if (idx < 0 || idx >= BOARD_LEGOPORT_COUNT)
+    {
+      return -EINVAL;
+    }
+
+  if (!g_devs[idx].initialized)
+    {
+      return -ENODEV;
+    }
+
+  ret = nxmutex_lock(&g_devs[idx].lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  need_coast = !g_devs[idx].pinned &&
+               g_devs[idx].state == LEGOPORT_PWM_STATE_PWM;
+
+  if (need_coast)
+    {
+      hbridge_apply_coast(idx);
+    }
+
+  nxmutex_unlock(&g_devs[idx].lock);
+  return OK;
+}
+
 /* LUMP-internal API: drop the supply pin and coast.  Called from
  * the LUMP engine reset path (disconnect / ERR / re-init) and from
  * `stm32_legoport_pwm_initialize()` semantics if a re-init ever

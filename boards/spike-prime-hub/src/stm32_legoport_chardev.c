@@ -79,6 +79,7 @@ int stm32_legoport_pwm_coast(int idx);
 int stm32_legoport_pwm_brake(int idx);
 int stm32_legoport_pwm_get_status(int idx,
                                   FAR struct legoport_pwm_status_s *out);
+int stm32_legoport_pwm_close_cleanup(int idx);
 
 /****************************************************************************
  * File Operations
@@ -142,13 +143,12 @@ static int legoport_cdev_close(FAR struct file *filep)
 
   nxmutex_lock(&priv->lock);
 
-  /* Auto-COAST the H-bridge so a crashed controller daemon does not
-   * leave a motor running.  Phase B (forthcoming) adds a "pinned by
-   * LUMP supply" guard inside the HAL so this call becomes a no-op for
-   * Color / Ultrasonic sensor ports that LUMP needs to keep powered.
+  /* Runaway-motor cleanup: coast only if the port was actively driven
+   * (state == PWM).  Stable stop states (explicit BRAKE / COAST) and
+   * LUMP-pinned SUPPLY rails survive close().
    */
 
-  stm32_legoport_pwm_coast(priv->port);
+  stm32_legoport_pwm_close_cleanup(priv->port);
 
   priv->open = false;
   nxmutex_unlock(&priv->lock);
