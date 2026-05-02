@@ -7,4 +7,6 @@ MODULE    = $(CONFIG_APP_DRIVEBASE)
 
 MAINSRC = drivebase_main.c
 
+CSRCS  += drivebase_motor.c
+
 include $(APPDIR)/Application.mk

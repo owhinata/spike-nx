@@ -36,6 +36,203 @@
 
 #include <arch/board/board_drivebase.h>
 
+#include "drivebase_motor.h"
+
+/****************************************************************************
+ * Private Functions: hidden _motor test verbs (Issue #77 development only)
+ *
+ * These verbs let us bench drivebase_motor.c primitives from NSH while
+ * the surrounding daemon is being built up commit-by-commit.  They will
+ * be removed once commit #11 lands the lifecycle FSM that owns init /
+ * deinit and the drive verbs become the public surface.
+ ****************************************************************************/
+
+static int parse_side(const char *s, enum db_side_e *out)
+{
+  if ((s[0] == 'l' || s[0] == 'L') && s[1] == '\0')
+    {
+      *out = DB_SIDE_LEFT;
+      return 0;
+    }
+  if ((s[0] == 'r' || s[0] == 'R') && s[1] == '\0')
+    {
+      *out = DB_SIDE_RIGHT;
+      return 0;
+    }
+  return -1;
+}
+
+static int do_motor_subcmd(int argc, FAR char *argv[])
+{
+  /* Common: init both sides for every invocation, deinit at the end.
+   * Fresh task per invocation = stateless from CLI's perspective.
+   */
+
+  if (argc < 1)
+    {
+      fprintf(stderr,
+              "usage: drivebase _motor "
+              "{open|read [l|r]|select <l|r> <mode>|"
+              "duty <l|r> <-10000..10000>|coast <l|r>|brake <l|r>}\n");
+      return 1;
+    }
+
+  int rc = drivebase_motor_init();
+  if (rc < 0)
+    {
+      fprintf(stderr, "drivebase_motor_init: %s\n", strerror(-rc));
+      return 1;
+    }
+
+  const char *sub = argv[0];
+  int ret = 0;
+
+  if (strcmp(sub, "open") == 0)
+    {
+      printf("L: port_idx=%d (sensor_motor_l)\n",
+             drivebase_motor_port_idx(DB_SIDE_LEFT));
+      printf("R: port_idx=%d (sensor_motor_r)\n",
+             drivebase_motor_port_idx(DB_SIDE_RIGHT));
+    }
+  else if (strcmp(sub, "read") == 0)
+    {
+      enum db_side_e sides[2] = { DB_SIDE_LEFT, DB_SIDE_RIGHT };
+      int n_sides = 2;
+      if (argc >= 2)
+        {
+          enum db_side_e s;
+          if (parse_side(argv[1], &s) < 0)
+            {
+              fprintf(stderr, "bad side: %s\n", argv[1]);
+              ret = 1;
+              goto out;
+            }
+          sides[0] = s;
+          n_sides  = 1;
+        }
+      for (int i = 0; i < n_sides; i++)
+        {
+          struct db_motor_sample_s sm;
+          int dr;
+
+          /* Retry drain for ~10 ms — the upper-half sensor framework
+           * starts a fresh subscriber at "no data yet" and only fills
+           * the per-fd cursor when a new publish arrives.  LUMP runs
+           * ~1 kHz so 10 attempts × 1 ms is plenty.  The daemon does
+           * not need this — it owns a long-lived fd that sees every
+           * publish from the moment it subscribed.
+           */
+
+          for (int attempt = 0; attempt < 10; attempt++)
+            {
+              dr = drivebase_motor_drain(sides[i], &sm);
+              if (dr != -EAGAIN)
+                {
+                  break;
+                }
+              usleep(1000);
+            }
+
+          const char *name = (sides[i] == DB_SIDE_LEFT) ? "L" : "R";
+          if (dr == 0)
+            {
+              printf("%s port=%u mode=%u type=%u nval=%u "
+                     "seq=%lu gen=%lu ts_us=%llu raw=%ld\n",
+                     name, sm.port_idx, sm.mode_id, sm.data_type,
+                     sm.num_values,
+                     (unsigned long)sm.seq, (unsigned long)sm.generation,
+                     (unsigned long long)sm.timestamp_us,
+                     (long)sm.raw_value);
+            }
+          else
+            {
+              printf("%s drain: %s\n", name, strerror(-dr));
+            }
+        }
+    }
+  else if (strcmp(sub, "select") == 0)
+    {
+      enum db_side_e s;
+      if (argc < 3 || parse_side(argv[1], &s) < 0)
+        {
+          fprintf(stderr, "usage: _motor select <l|r> <mode>\n");
+          ret = 1;
+          goto out;
+        }
+      int mode = atoi(argv[2]);
+      int sr = drivebase_motor_select_mode(s, (uint8_t)mode);
+      if (sr < 0)
+        {
+          fprintf(stderr, "select: %s\n", strerror(-sr));
+          ret = 1;
+        }
+    }
+  else if (strcmp(sub, "duty") == 0)
+    {
+      enum db_side_e s;
+      if (argc < 3 || parse_side(argv[1], &s) < 0)
+        {
+          fprintf(stderr, "usage: _motor duty <l|r> <-10000..10000>\n");
+          ret = 1;
+          goto out;
+        }
+      int duty = atoi(argv[2]);
+      if (duty < -10000 || duty > 10000)
+        {
+          fprintf(stderr, "duty out of range: %d\n", duty);
+          ret = 1;
+          goto out;
+        }
+      int sr = drivebase_motor_set_duty(s, (int16_t)duty);
+      if (sr < 0)
+        {
+          fprintf(stderr, "set_duty: %s\n", strerror(-sr));
+          ret = 1;
+        }
+    }
+  else if (strcmp(sub, "coast") == 0)
+    {
+      enum db_side_e s;
+      if (argc < 2 || parse_side(argv[1], &s) < 0)
+        {
+          fprintf(stderr, "usage: _motor coast <l|r>\n");
+          ret = 1;
+          goto out;
+        }
+      int sr = drivebase_motor_coast(s);
+      if (sr < 0)
+        {
+          fprintf(stderr, "coast: %s\n", strerror(-sr));
+          ret = 1;
+        }
+    }
+  else if (strcmp(sub, "brake") == 0)
+    {
+      enum db_side_e s;
+      if (argc < 2 || parse_side(argv[1], &s) < 0)
+        {
+          fprintf(stderr, "usage: _motor brake <l|r>\n");
+          ret = 1;
+          goto out;
+        }
+      int sr = drivebase_motor_brake(s);
+      if (sr < 0)
+        {
+          fprintf(stderr, "brake: %s\n", strerror(-sr));
+          ret = 1;
+        }
+    }
+  else
+    {
+      fprintf(stderr, "_motor: unknown subcommand '%s'\n", sub);
+      ret = 1;
+    }
+
+out:
+  drivebase_motor_deinit();
+  return ret;
+}
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -125,6 +322,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(verb, "status") == 0)
     {
       return do_status();
+    }
+
+  if (strcmp(verb, "_motor") == 0)
+    {
+      return do_motor_subcmd(argc - 2, &argv[2]);
     }
 
   if (strcmp(verb, "help") == 0 ||
