@@ -79,6 +79,25 @@
 #define LEGOSENSOR_MOTOR_R_BASE      _SNIOC(0x0140)  /* 0x0140..0x014f */
 #define LEGOSENSOR_MOTOR_L_BASE      _SNIOC(0x0150)  /* 0x0150..0x015f */
 
+/* Per-class motor actuation ioctls — coast (H-bridge open) and brake
+ * (low-side short).  CLAIM is required (same write-side discipline as
+ * SET_PWM).  `arg` is ignored.  Each motor class owns its own ioctl
+ * number in its reserved range so the dispatch can match the caller's
+ * `class_id` against the requested base, preventing a stale fd with a
+ * mismatched class from accidentally driving an unrelated motor.
+ *
+ * For LEGOSENSOR_CLASS_FORCE / COLOR / ULTRASONIC the numbers are not
+ * defined: those classes return `-ENOTTY` when an MOTOR_*_COAST/_BRAKE
+ * is sent in.
+ */
+
+#define LEGOSENSOR_MOTOR_M_COAST     _SNIOC(0x0131)  /* arg: ignored */
+#define LEGOSENSOR_MOTOR_M_BRAKE     _SNIOC(0x0132)  /* arg: ignored */
+#define LEGOSENSOR_MOTOR_R_COAST     _SNIOC(0x0141)  /* arg: ignored */
+#define LEGOSENSOR_MOTOR_R_BRAKE     _SNIOC(0x0142)  /* arg: ignored */
+#define LEGOSENSOR_MOTOR_L_COAST     _SNIOC(0x0151)  /* arg: ignored */
+#define LEGOSENSOR_MOTOR_L_BRAKE     _SNIOC(0x0152)  /* arg: ignored */
+
 /****************************************************************************
  * Public Types
  ****************************************************************************/

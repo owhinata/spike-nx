@@ -126,3 +126,47 @@ def test_led_all(p):
     output = p.sendCommand("led all", timeout=120)
     assert "All tests done" in output
     p.waitUser("Confirm: Did the LEDs light up correctly?")
+
+
+@pytest.mark.interactive
+def test_legosensor_motor_coast_brake_works(p):
+    """B-10: `sensor motor_l coast/brake` reach the H-bridge driver
+    (Issue #77 prep commit — LEGOSENSOR_MOTOR_*_{COAST,BRAKE} ioctl).
+
+    Prerequisites: SPIKE Medium Motor on port B (or D / F — any odd
+    port so it binds to /dev/uorb/sensor_motor_l).  The test only
+    verifies that the kernel side accepts the command and that
+    `legoport pwm <port> status` reflects the requested H-bridge state;
+    the operator must visually confirm the motor reaction.
+    """
+
+    p.waitUser("Plug a SPIKE Medium Motor into port B and press Enter")
+
+    # Wait for LUMP to SYNC the device, then make sure motor_l bound.
+    time.sleep(2.0)
+    info = p.sendCommand("sensor motor_l info", timeout=5)
+    assert "type=48" in info or "type_id=48" in info or "TYPE 48" in info, (
+        f"motor_l did not bind to a SPIKE Medium Motor: {info!r}"
+    )
+
+    # 1) BRAKE — drives both H-bridge low-side FETs ON.
+    out = p.sendCommand("sensor motor_l brake")
+    assert "BRAKE:" not in out and "errno" not in out.lower(), (
+        f"sensor motor_l brake reported error: {out!r}"
+    )
+    status = p.sendCommand("legoport pwm B status")
+    assert "BRAKE" in status, f"port B not in BRAKE state: {status!r}"
+
+    # 2) COAST — opens the H-bridge.
+    out = p.sendCommand("sensor motor_l coast")
+    assert "COAST:" not in out and "errno" not in out.lower(), (
+        f"sensor motor_l coast reported error: {out!r}"
+    )
+    status = p.sendCommand("legoport pwm B status")
+    assert "COAST" in status, f"port B not in COAST state: {status!r}"
+
+    # 3) Cross-class rejection — `sensor color coast` must report -ENOTTY.
+    out = p.sendCommand("sensor color coast")
+    assert "Inappropriate" in out or "ENOTTY" in out or "not supported" in out.lower(), (
+        f"sensor color coast should reject with -ENOTTY, got: {out!r}"
+    )

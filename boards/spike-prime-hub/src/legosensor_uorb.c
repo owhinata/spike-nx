@@ -62,6 +62,8 @@
  */
 
 int stm32_legoport_pwm_set_duty(int idx, int16_t duty);
+int stm32_legoport_pwm_coast(int idx);
+int stm32_legoport_pwm_brake(int idx);
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -1067,6 +1069,58 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
                   }
                 return -ENOTSUP;
             }
+        }
+
+      case LEGOSENSOR_MOTOR_M_COAST:
+      case LEGOSENSOR_MOTOR_M_BRAKE:
+      case LEGOSENSOR_MOTOR_R_COAST:
+      case LEGOSENSOR_MOTOR_R_BRAKE:
+      case LEGOSENSOR_MOTOR_L_COAST:
+      case LEGOSENSOR_MOTOR_L_BRAKE:
+        {
+          /* Per-class motor coast / brake.  CLAIM required.  Each motor
+           * class owns its own ioctl number in the reserved range so the
+           * dispatch can verify the caller's `class_id` matches the
+           * requested base — guarantees an fd opened on the wrong class
+           * cannot drive an unrelated motor by mistake.
+           */
+
+          int port_to_use = -1;
+          enum legosensor_class_e expected_class;
+          bool is_brake;
+
+          if (cmd == LEGOSENSOR_MOTOR_M_COAST ||
+              cmd == LEGOSENSOR_MOTOR_M_BRAKE)
+            {
+              expected_class = LEGOSENSOR_CLASS_MOTOR_M;
+            }
+          else if (cmd == LEGOSENSOR_MOTOR_R_COAST ||
+                   cmd == LEGOSENSOR_MOTOR_R_BRAKE)
+            {
+              expected_class = LEGOSENSOR_CLASS_MOTOR_R;
+            }
+          else
+            {
+              expected_class = LEGOSENSOR_CLASS_MOTOR_L;
+            }
+
+          if (cdev->class_id != expected_class)
+            {
+              return -ENOTTY;
+            }
+
+          is_brake = (cmd == LEGOSENSOR_MOTOR_M_BRAKE ||
+                      cmd == LEGOSENSOR_MOTOR_R_BRAKE ||
+                      cmd == LEGOSENSOR_MOTOR_L_BRAKE);
+
+          ret = legosensor_check_write_claim(cs, filep, &port_to_use);
+          if (ret < 0)
+            {
+              return ret;
+            }
+
+          return is_brake ? stm32_legoport_pwm_brake(port_to_use)
+                          : stm32_legoport_pwm_coast(port_to_use);
         }
 
       default:

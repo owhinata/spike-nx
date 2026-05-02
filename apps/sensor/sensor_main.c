@@ -664,6 +664,65 @@ static int do_send(const struct class_entry_s *c, uint8_t mode,
   return ret < 0 ? -errno : 0;
 }
 
+/* Resolve the per-class motor coast/brake ioctl.  Each motor class owns
+ * its own ioctl number in the reserved LEGOSENSOR_MOTOR_*_BASE range so
+ * the kernel can verify the caller's class matches the requested action.
+ * Non-motor classes fall through to -ENOTTY at the kernel side; here we
+ * report a clearer error early.
+ */
+
+static int motor_actuate_cmd(const struct class_entry_s *c, bool brake)
+{
+  switch (c->id)
+    {
+      case LEGOSENSOR_CLASS_MOTOR_M:
+        return brake ? LEGOSENSOR_MOTOR_M_BRAKE : LEGOSENSOR_MOTOR_M_COAST;
+      case LEGOSENSOR_CLASS_MOTOR_R:
+        return brake ? LEGOSENSOR_MOTOR_R_BRAKE : LEGOSENSOR_MOTOR_R_COAST;
+      case LEGOSENSOR_CLASS_MOTOR_L:
+        return brake ? LEGOSENSOR_MOTOR_L_BRAKE : LEGOSENSOR_MOTOR_L_COAST;
+      default:
+        return -1;
+    }
+}
+
+static int do_motor_actuate(const struct class_entry_s *c, bool brake)
+{
+  int cmd = motor_actuate_cmd(c, brake);
+  if (cmd < 0)
+    {
+      fprintf(stderr,
+              "%s: %s only valid for motor_m / motor_r / motor_l\n",
+              c->name, brake ? "brake" : "coast");
+      return -ENOTSUP;
+    }
+
+  int fd = open(c->path, O_RDONLY | O_NONBLOCK);
+  if (fd < 0)
+    {
+      fprintf(stderr, "open(%s): %s\n", c->path, strerror(errno));
+      return -errno;
+    }
+
+  int ret = ioctl(fd, LEGOSENSOR_CLAIM, 0);
+  if (ret < 0)
+    {
+      fprintf(stderr, "CLAIM: %s\n", strerror(errno));
+      close(fd);
+      return -errno;
+    }
+
+  ret = ioctl(fd, cmd, 0);
+  if (ret < 0)
+    {
+      fprintf(stderr, "%s: %s\n",
+              brake ? "BRAKE" : "COAST", strerror(errno));
+    }
+
+  close(fd);                            /* auto-RELEASE */
+  return ret < 0 ? -errno : 0;
+}
+
 static int do_pwm(const struct class_entry_s *c, int argc, char **argv)
 {
   if (c->pwm_channels == 0)
@@ -738,6 +797,8 @@ static void usage(void)
           "  sensor <class> select <mode>           SELECT mode\n"
           "  sensor <class> send <mode> <hex>...    SEND writable-mode payload\n"
           "  sensor <class> pwm <ch0> [ch1 ch2 ch3] LED brightness / motor duty\n"
+          "  sensor <motor> coast                   H-bridge open (motor_m/r/l only)\n"
+          "  sensor <motor> brake                   low-side short  (motor_m/r/l only)\n"
           "  <class> ::= color | ultrasonic | force | motor_m | motor_r | motor_l\n");
 }
 
@@ -839,6 +900,16 @@ int main(int argc, FAR char *argv[])
   if (strcmp(verb, "pwm") == 0)
     {
       return do_pwm(c, argc - 3, &argv[3]) < 0 ? 1 : 0;
+    }
+
+  if (strcmp(verb, "coast") == 0)
+    {
+      return do_motor_actuate(c, false) < 0 ? 1 : 0;
+    }
+
+  if (strcmp(verb, "brake") == 0)
+    {
+      return do_motor_actuate(c, true) < 0 ? 1 : 0;
     }
 
   usage();
