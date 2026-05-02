@@ -45,7 +45,9 @@
 #include "drivebase_servo.h"
 #include "drivebase_drivebase.h"
 #include "drivebase_rt.h"
+#include "drivebase_chardev_handler.h"
 
+#include <pthread.h>
 #include <time.h>
 
 /****************************************************************************
@@ -248,6 +250,283 @@ out:
  */
 
 static uint64_t now_us(void);
+
+/****************************************************************************
+ * Private Functions: hidden _daemon test verb (Issue #77 development only)
+ *
+ * End-to-end smoke for the chardev IPC path.  Spawns a daemon thread
+ * that runs db_chardev_handler_tick + db_drivebase_update from
+ * drivebase_rt's RT loop, then issues drive ioctls from the main
+ * thread to exercise PICKUP_CMD + dispatch + state publish.
+ *
+ *   drivebase _daemon attach        # smoke: attach + idle 500ms + detach
+ *   drivebase _daemon straight 200  # config + drive_straight + watch state
+ *   drivebase _daemon turn 90       # config + turn
+ *   drivebase _daemon stop_lat      # measure STOP fast-path latency
+ ****************************************************************************/
+
+struct daemon_ctx_s
+{
+  struct db_drivebase_s          db;
+  struct db_chardev_handler_s    handler;
+  struct db_rt_s                 rt;
+  pthread_mutex_t                lock;
+};
+
+static int daemon_tick_cb(uint64_t now_us, void *arg)
+{
+  struct daemon_ctx_s *ctx = (struct daemon_ctx_s *)arg;
+  pthread_mutex_lock(&ctx->lock);
+  /* drain commands & dispatch */
+  db_chardev_handler_tick(&ctx->handler, now_us);
+  /* run drivebase loop if configured */
+  if (ctx->handler.configured)
+    {
+      db_drivebase_update(&ctx->db, now_us);
+      /* re-publish state after the update so a client polling
+       * GET_STATE sees the latest distance/heading immediately.
+       */
+      struct drivebase_state_s st;
+      db_drivebase_get_state(&ctx->db, &st);
+      st.tick_seq = (uint32_t)(now_us & 0xffffffff);
+      ioctl(ctx->handler.fd, DRIVEBASE_DAEMON_PUBLISH_STATE,
+            (unsigned long)&st);
+    }
+  pthread_mutex_unlock(&ctx->lock);
+  return 0;
+}
+
+static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
+                         uint32_t wheel_d_mm, uint32_t axle_t_mm)
+{
+  struct daemon_ctx_s ctx;
+  memset(&ctx, 0, sizeof(ctx));
+  pthread_mutex_init(&ctx.lock, NULL);
+
+  /* 1. Bring up motors (CLAIM both fds, verify type 48 ×2). */
+
+  int rc = drivebase_motor_init();
+  if (rc < 0)
+    {
+      fprintf(stderr, "drivebase_motor_init: %s\n", strerror(-rc));
+      return 1;
+    }
+  drivebase_motor_select_mode(DB_SIDE_LEFT,  2);
+  drivebase_motor_select_mode(DB_SIDE_RIGHT, 2);
+  usleep(30000);
+
+  int port_l = drivebase_motor_port_idx(DB_SIDE_LEFT);
+  int port_r = drivebase_motor_port_idx(DB_SIDE_RIGHT);
+
+  /* 2. Init drivebase up-front (skip the CONFIG ioctl path for now —
+   *    that exercises a separate dispatch in the RT thread context
+   *    that's covered in commit #11 once the daemon FSM owns it.
+   *    Hard-code wheel_d_mm / axle_t_mm from the verb args.)
+   */
+
+  rc = db_drivebase_init(&ctx.db, wheel_d_mm, axle_t_mm);
+  if (rc < 0)
+    {
+      fprintf(stderr, "db_drivebase_init: %s\n", strerror(-rc));
+      drivebase_motor_deinit();
+      return 1;
+    }
+  rc = db_drivebase_reset(&ctx.db, now_us());
+  if (rc < 0)
+    {
+      fprintf(stderr, "db_drivebase_reset: %s\n", strerror(-rc));
+      drivebase_motor_deinit();
+      return 1;
+    }
+
+  /* 3. ATTACH to /dev/drivebase. */
+
+  rc = db_chardev_handler_attach(&ctx.handler, &ctx.db, port_l, port_r,
+                                 DRIVEBASE_ON_COMPLETION_COAST);
+  if (rc < 0)
+    {
+      fprintf(stderr, "chardev_handler_attach: %s\n", strerror(-rc));
+      drivebase_motor_deinit();
+      return 1;
+    }
+  /* Tell the handler that drivebase is already configured so it won't
+   * wait for a CONFIG envelope from the user before dispatching drive
+   * verbs.
+   */
+
+  ctx.handler.configured = true;
+  ctx.handler.wheel_d_mm = wheel_d_mm;
+  ctx.handler.axle_t_mm  = axle_t_mm;
+
+  /* 3. Spawn the RT tick task. */
+
+  db_rt_init(&ctx.rt);
+  rc = db_rt_start(&ctx.rt, CONFIG_APP_DRIVEBASE_RT_PRIORITY,
+                   daemon_tick_cb, &ctx);
+  if (rc < 0)
+    {
+      fprintf(stderr, "db_rt_start: %s\n", strerror(-rc));
+      db_chardev_handler_detach(&ctx.handler);
+      drivebase_motor_deinit();
+      return 1;
+    }
+
+  /* 4. From the main thread, issue ioctls to the chardev so the daemon
+   *    thread sees them through PICKUP_CMD on the next tick.
+   */
+
+  int dev = open(DRIVEBASE_DEVPATH, O_RDWR);
+  if (dev < 0)
+    {
+      fprintf(stderr, "open dev: %s\n", strerror(errno));
+      db_rt_stop(&ctx.rt, 100);
+      db_chardev_handler_detach(&ctx.handler);
+      drivebase_motor_deinit();
+      return 1;
+    }
+
+  int exit_rc = 0;
+
+  if (strcmp(kind, "attach") == 0)
+    {
+      printf("attach: ok\n");
+      usleep(500000);
+    }
+  else
+    {
+      /* (CONFIG already applied at daemon init — issue drive verb
+       * directly via ioctl through the kernel cmd_ring.)
+       */
+
+      if (strcmp(kind, "straight") == 0)
+        {
+          struct drivebase_drive_straight_s a = {
+            .distance_mm   = arg1,
+            .on_completion = DRIVEBASE_ON_COMPLETION_BRAKE,
+          };
+          if (ioctl(dev, DRIVEBASE_DRIVE_STRAIGHT,
+                    (unsigned long)&a) < 0)
+            {
+              fprintf(stderr, "DRIVE_STRAIGHT: %s\n", strerror(errno));
+              exit_rc = 1; goto out;
+            }
+        }
+      else if (strcmp(kind, "turn") == 0)
+        {
+          struct drivebase_turn_s a = {
+            .angle_deg     = arg1,
+            .on_completion = DRIVEBASE_ON_COMPLETION_BRAKE,
+          };
+          if (ioctl(dev, DRIVEBASE_TURN, (unsigned long)&a) < 0)
+            {
+              fprintf(stderr, "TURN: %s\n", strerror(errno));
+              exit_rc = 1; goto out;
+            }
+        }
+      else if (strcmp(kind, "forever") == 0)
+        {
+          struct drivebase_drive_forever_s a = {
+            .speed_mmps    = arg1,
+            .turn_rate_dps = arg2,
+          };
+          if (ioctl(dev, DRIVEBASE_DRIVE_FOREVER,
+                    (unsigned long)&a) < 0)
+            {
+              fprintf(stderr, "DRIVE_FOREVER: %s\n", strerror(errno));
+              exit_rc = 1; goto out;
+            }
+        }
+      else if (strcmp(kind, "stop_lat") == 0)
+        {
+          /* Start a forever, wait for motor to be moving, time STOP. */
+          struct drivebase_drive_forever_s f = {
+            .speed_mmps    = 200,
+            .turn_rate_dps = 0,
+          };
+          ioctl(dev, DRIVEBASE_DRIVE_FOREVER, (unsigned long)&f);
+          usleep(700000);  /* let motors reach speed */
+          struct drivebase_state_s st_before;
+          ioctl(dev, DRIVEBASE_GET_STATE, (unsigned long)&st_before);
+
+          struct timespec t0, t1;
+          clock_gettime(CLOCK_MONOTONIC, &t0);
+          struct drivebase_stop_s st = {
+            .on_completion = DRIVEBASE_ON_COMPLETION_COAST,
+          };
+          ioctl(dev, DRIVEBASE_STOP, (unsigned long)&st);
+          clock_gettime(CLOCK_MONOTONIC, &t1);
+
+          uint64_t lat_us =
+              (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000ULL +
+              (uint64_t)(t1.tv_nsec - t0.tv_nsec) / 1000ULL;
+          printf("STOP latency: %llu us  (kernel emergency_cb path)\n",
+                 (unsigned long long)lat_us);
+          usleep(50000);
+          struct drivebase_state_s st_after;
+          ioctl(dev, DRIVEBASE_GET_STATE, (unsigned long)&st_after);
+          printf("  pre-STOP  v=%ld dist=%ld\n",
+                 (long)st_before.drive_speed_mmps,
+                 (long)st_before.distance_mm);
+          printf("  post-STOP v=%ld dist=%ld\n",
+                 (long)st_after.drive_speed_mmps,
+                 (long)st_after.distance_mm);
+          goto out;
+        }
+
+      /* Poll state for up to ~3 sec. */
+
+      for (int i = 0; i < 30; i++)
+        {
+          usleep(100000);
+          struct drivebase_state_s st;
+          if (ioctl(dev, DRIVEBASE_GET_STATE, (unsigned long)&st) < 0)
+            {
+              break;
+            }
+          printf("t=%4dms dist=%ld v=%ld angle=%ld done=%d cmd=%u\n",
+                 (i + 1) * 100, (long)st.distance_mm,
+                 (long)st.drive_speed_mmps, (long)st.angle_mdeg,
+                 (int)st.is_done, st.active_command);
+          if (st.is_done) break;
+        }
+
+      /* Final stop. */
+
+      struct drivebase_stop_s sst = {
+        .on_completion = DRIVEBASE_ON_COMPLETION_COAST,
+      };
+      ioctl(dev, DRIVEBASE_STOP, (unsigned long)&sst);
+      usleep(20000);
+    }
+
+out:
+  close(dev);
+  db_rt_stop(&ctx.rt, 100);
+  db_chardev_handler_detach(&ctx.handler);
+  drivebase_motor_deinit();
+  return exit_rc;
+}
+
+static int do_daemon_subcmd(int argc, FAR char *argv[])
+{
+  if (argc < 1)
+    {
+      fprintf(stderr,
+              "usage: drivebase _daemon "
+              "{attach|straight <mm>|turn <deg>|forever <mmps> <dps>|"
+              "stop_lat} [wheel_mm] [axle_mm]\n");
+      return 1;
+    }
+
+  const char *kind = argv[0];
+  int32_t  arg1 = (argc >= 2) ? (int32_t)atol(argv[1]) : 0;
+  int32_t  arg2 = (argc >= 3) ? (int32_t)atol(argv[2]) : 0;
+  uint32_t wheel_d_mm = 56;
+  uint32_t axle_t_mm  = 112;     /* SPIKE driving base reference frame  */
+  if (argc >= 4) wheel_d_mm = (uint32_t)atoi(argv[3]);
+  if (argc >= 5) axle_t_mm  = (uint32_t)atoi(argv[4]);
+  return do_daemon_run(kind, arg1, arg2, wheel_d_mm, axle_t_mm);
+}
 
 /****************************************************************************
  * Private Functions: hidden _rt test verb (Issue #77 development only)
@@ -457,7 +736,7 @@ static int do_drive_subcmd(int argc, FAR char *argv[])
   uint32_t duration = 3000;
   uint8_t on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
   uint32_t wheel_d = 56;     /* SPIKE Medium wheel default                */
-  uint32_t axle_t  = 100;    /* placeholder; user can override            */
+  uint32_t axle_t  = 112;    /* SPIKE driving base reference frame        */
 
   if (argc >= 2) arg1 = (int32_t)atol(argv[1]);
   if (argc >= 3) arg2 = (int32_t)atol(argv[2]);
@@ -711,7 +990,7 @@ static int do_alg_traj(int argc, FAR char *argv[])
 static int do_alg_settings(int argc, FAR char *argv[])
 {
   uint32_t wheel_d = (argc >= 1) ? (uint32_t)atoi(argv[0]) : 56;
-  uint32_t axle_t  = (argc >= 2) ? (uint32_t)atoi(argv[1]) : 100;
+  uint32_t axle_t  = (argc >= 2) ? (uint32_t)atoi(argv[1]) : 112;
 
   const struct db_servo_gains_s        *g = db_settings_servo_gains();
   const struct db_traj_limits_s        *dl = db_settings_distance_limits(wheel_d);
@@ -900,6 +1179,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(verb, "_rt") == 0)
     {
       return do_rt_subcmd(argc - 2, &argv[2]);
+    }
+
+  if (strcmp(verb, "_daemon") == 0)
+    {
+      return do_daemon_subcmd(argc - 2, &argv[2]);
     }
 
   if (strcmp(verb, "help") == 0 ||

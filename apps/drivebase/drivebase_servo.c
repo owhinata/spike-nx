@@ -59,37 +59,34 @@ int db_servo_reset(struct db_servo_s *s, uint64_t now_us)
       return -ENODEV;
     }
 
-  /* Drain whatever is currently sitting in the topic so the first
-   * observer update has a real sample to start from.  Retry briefly
-   * since a freshly-opened fd may need one publish to land.
+  /* Try a single non-blocking drain to seed the observer.  If the
+   * topic has no fresh sample yet (freshly opened fd, no publish
+   * since CLAIM), reset to (x=0, t=now) and let the first
+   * db_servo_update tick prime the observer when an encoder sample
+   * arrives.  This keeps reset() callable from the RT tick context
+   * without pulling in a multi-ms busy-wait.
    */
 
   struct db_motor_sample_s sm;
-  int rc = -EAGAIN;
-  for (int i = 0; i < 20 && rc == -EAGAIN; i++)
+  int rc = drivebase_motor_drain(s->side, &sm);
+  if (rc == 0)
     {
-      rc = drivebase_motor_drain(s->side, &sm);
-      if (rc == -EAGAIN)
-        {
-          /* 1 ms × 20 retries = up to 20 ms of slack waiting for the
-           * first publish.  LUMP fires every ~1 ms so the loop
-           * usually exits on the first retry; the upper-half sensor
-           * framework leaves a freshly-opened subscriber at "no data
-           * yet" until the next push, so we must wait for it.
-           */
-
-          usleep(1000);
-        }
+      s->x_actual_mdeg = db_angle_deg_to_mdeg(sm.raw_value);
+      s->t_last_us     = sm.timestamp_us > now_us ?
+                         now_us : sm.timestamp_us;
+      db_observer_reset(&s->observer, s->x_actual_mdeg, s->t_last_us);
     }
-  if (rc < 0)
+  else if (rc == -EAGAIN)
+    {
+      s->x_actual_mdeg = 0;
+      s->t_last_us     = now_us;
+      db_observer_reset(&s->observer, 0, now_us);
+    }
+  else
     {
       return rc;
     }
 
-  s->x_actual_mdeg = db_angle_deg_to_mdeg(sm.raw_value);
-  s->t_last_us     = sm.timestamp_us > now_us ? now_us : sm.timestamp_us;
-
-  db_observer_reset(&s->observer, s->x_actual_mdeg, s->t_last_us);
   db_pid_reset(&s->pid);
   s->trajectory_active   = false;
   s->prev_endpoint_valid = false;
