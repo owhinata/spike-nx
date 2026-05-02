@@ -18,5 +18,6 @@ CSRCS  += drivebase_trajectory.c
 CSRCS  += drivebase_observer.c
 CSRCS  += drivebase_control.c
 CSRCS  += drivebase_servo.c
+CSRCS  += drivebase_drivebase.c
 
 include $(APPDIR)/Application.mk

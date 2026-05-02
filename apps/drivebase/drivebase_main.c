@@ -43,6 +43,7 @@
 #include "drivebase_control.h"
 #include "drivebase_angle.h"
 #include "drivebase_servo.h"
+#include "drivebase_drivebase.h"
 
 #include <time.h>
 
@@ -239,6 +240,168 @@ static int do_motor_subcmd(int argc, FAR char *argv[])
 out:
   drivebase_motor_deinit();
   return ret;
+}
+
+/* Forward decls needed because the _drive block (next) uses helpers
+ * defined later in the file inside the _servo block.
+ */
+
+static uint64_t now_us(void);
+
+/****************************************************************************
+ * Private Functions: hidden _drive test verb (Issue #77 development only)
+ *
+ * Standalone L+R closed-loop runs through drivebase_drivebase before
+ * the daemon FSM (commit #11) wires the user-facing verbs.  Each
+ * invocation does motor_init + drivebase_init + reset + drive +
+ * tick-loop + stop + deinit in one task.
+ ****************************************************************************/
+
+static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
+                        uint32_t duration_ms, uint8_t on_completion,
+                        uint32_t wheel_d_mm, uint32_t axle_t_mm)
+{
+  int rc = drivebase_motor_init();
+  if (rc < 0)
+    {
+      fprintf(stderr, "drivebase_motor_init: %s\n", strerror(-rc));
+      return 1;
+    }
+
+  drivebase_motor_select_mode(DB_SIDE_LEFT,  2);
+  drivebase_motor_select_mode(DB_SIDE_RIGHT, 2);
+  usleep(30000);
+
+  struct db_drivebase_s db;
+  rc = db_drivebase_init(&db, wheel_d_mm, axle_t_mm);
+  if (rc < 0)
+    {
+      fprintf(stderr, "db_drivebase_init: %s\n", strerror(-rc));
+      drivebase_motor_deinit();
+      return 1;
+    }
+
+  uint64_t t0 = now_us();
+  rc = db_drivebase_reset(&db, t0);
+  if (rc < 0)
+    {
+      fprintf(stderr, "db_drivebase_reset: %s\n", strerror(-rc));
+      drivebase_motor_deinit();
+      return 1;
+    }
+
+  if (strcmp(kind, "straight") == 0)
+    {
+      rc = db_drivebase_drive_straight(&db, t0, arg1, on_completion);
+    }
+  else if (strcmp(kind, "turn") == 0)
+    {
+      rc = db_drivebase_turn(&db, t0, arg1, on_completion);
+    }
+  else if (strcmp(kind, "curve") == 0)
+    {
+      rc = db_drivebase_drive_curve(&db, t0, arg1, arg2, on_completion);
+    }
+  else if (strcmp(kind, "forever") == 0)
+    {
+      rc = db_drivebase_drive_forever(&db, t0, arg1, arg2);
+    }
+  else
+    {
+      rc = db_drivebase_stop(&db, t0, on_completion);
+    }
+  if (rc < 0)
+    {
+      fprintf(stderr, "drive %s: %s\n", kind, strerror(-rc));
+      db_drivebase_stop(&db, now_us(), DRIVEBASE_ON_COMPLETION_COAST);
+      drivebase_motor_deinit();
+      return 1;
+    }
+
+  /* 5 ms tick loop */
+
+  struct timespec next;
+  clock_gettime(CLOCK_MONOTONIC, &next);
+  uint32_t total_ticks  = duration_ms / 5;
+  uint32_t status_every = total_ticks / 12;
+  if (status_every == 0) status_every = 1;
+
+  for (uint32_t i = 0; i < total_ticks; i++)
+    {
+      next.tv_nsec += 5000000;
+      if (next.tv_nsec >= 1000000000)
+        {
+          next.tv_nsec -= 1000000000;
+          next.tv_sec  += 1;
+        }
+      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+
+      int ur = db_drivebase_update(&db, now_us());
+      if (ur < 0)
+        {
+          fprintf(stderr, "tick %lu: update %s\n",
+                  (unsigned long)i, strerror(-ur));
+          break;
+        }
+
+      if ((i % status_every) == 0)
+        {
+          struct drivebase_state_s st;
+          db_drivebase_get_state(&db, &st);
+          printf("t=%4lums dist=%ld mm v=%ld mmps angle=%ld mdeg "
+                 "tr=%ld dps done=%d stall=%d cmd=%u\n",
+                 (unsigned long)(i * 5),
+                 (long)st.distance_mm, (long)st.drive_speed_mmps,
+                 (long)st.angle_mdeg, (long)st.turn_rate_dps,
+                 (int)st.is_done, (int)st.is_stalled,
+                 st.active_command);
+        }
+    }
+
+  db_drivebase_stop(&db, now_us(), DRIVEBASE_ON_COMPLETION_COAST);
+  drivebase_motor_deinit();
+  return 0;
+}
+
+static int do_drive_subcmd(int argc, FAR char *argv[])
+{
+  if (argc < 1)
+    {
+      fprintf(stderr,
+              "usage: drivebase _drive {straight|turn|curve|forever|stop}\n"
+              "       <arg1> [arg2] [duration_ms] [coast|brake|hold]\n"
+              "       [wheel_mm] [axle_mm]\n"
+              "  straight: arg1 = distance_mm\n"
+              "  turn:     arg1 = angle_deg (positive = CCW from above)\n"
+              "  curve:    arg1 = radius_mm, arg2 = angle_deg\n"
+              "  forever:  arg1 = speed_mmps, arg2 = turn_rate_dps\n");
+      return 1;
+    }
+
+  const char *kind = argv[0];
+  int32_t arg1 = 0, arg2 = 0;
+  uint32_t duration = 3000;
+  uint8_t on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+  uint32_t wheel_d = 56;     /* SPIKE Medium wheel default                */
+  uint32_t axle_t  = 100;    /* placeholder; user can override            */
+
+  if (argc >= 2) arg1 = (int32_t)atol(argv[1]);
+  if (argc >= 3) arg2 = (int32_t)atol(argv[2]);
+  if (argc >= 4) duration = (uint32_t)atoi(argv[3]);
+  if (argc >= 5)
+    {
+      if (strcmp(argv[4], "coast") == 0)
+        on_completion = DRIVEBASE_ON_COMPLETION_COAST;
+      else if (strcmp(argv[4], "brake") == 0)
+        on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+      else if (strcmp(argv[4], "hold") == 0)
+        on_completion = DRIVEBASE_ON_COMPLETION_HOLD;
+    }
+  if (argc >= 6) wheel_d = (uint32_t)atoi(argv[5]);
+  if (argc >= 7) axle_t  = (uint32_t)atoi(argv[6]);
+
+  return do_drive_run(kind, arg1, arg2, duration, on_completion,
+                      wheel_d, axle_t);
 }
 
 /****************************************************************************
@@ -653,6 +816,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(verb, "_servo") == 0)
     {
       return do_servo_subcmd(argc - 2, &argv[2]);
+    }
+
+  if (strcmp(verb, "_drive") == 0)
+    {
+      return do_drive_subcmd(argc - 2, &argv[2]);
     }
 
   if (strcmp(verb, "help") == 0 ||
