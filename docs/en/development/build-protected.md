@@ -28,11 +28,13 @@ Designed for SPIKE Prime Hub (STM32F413VG, 1.5 MB Flash / 320 KB RAM).
 
 | Region | Range | Size | Purpose |
 |---|---|---|---|
-| `ksram` | `0x20000000..0x20010000` | 64K | Kernel .data/.bss (linker only) |
-| `usram` | `0x20010000..0x20020000` | 64K | User .data/.bss (64K aligned) |
+| `ksram` | `0x20000000..0x2000c000` | 48K | Kernel .data/.bss + idle stack (linker only) |
+| `usram` | `0x2000c000..0x20020000` | 80K | User .data/.bss (Issue #93 grew it from 64 K → 80 K) |
 | `xsram` | `0x20020000..0x20050000` | 192K | Runtime heap (kernel heap + user heap) |
 
 `CONFIG_MM_KERNEL_HEAPSIZE = 32768` (lower bound; `stm32_allocateheap.c` partitions the remainder at runtime).
+
+**Issue #93 (ksram → usram shift):** the kernel `.data/.bss + idle stack` only uses ~32 KB, leaving ~16 KB of ksram tail dead. We shrink ksram to 48 KB and extend usram down to `0x2000c000`, raising the user static (.data/.bss) ceiling from 64 KB to 80 KB. Although 80 KB is not a power of two, `mpu_user_intsram()` → `mpu_configure_region()` automatically builds a 128 KB MPU region @ `0x20000000` with SRD = 0x07 (subregions 0..2 = ksram disabled), so no extra code is needed.
 
 `SRAM1_END = 0x20050000` is not a power-of-two boundary, so rounding the largest MPU-protectable user heap (128 K) down to the next 2^n boundary leaves roughly a 60 K **tail region** unused. The two settings below recover it (see [NuttX-side fixes](#required-nuttx-side-fixes) for details):
 
