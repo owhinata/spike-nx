@@ -388,12 +388,23 @@ static int daemon_tick_cb(uint64_t now_us, void *arg)
   return 0;
 }
 
+/* `daemon_ctx_s` carries struct db_drivebase_s inside, which is
+ * ~3 KB on its own.  Stack-allocating it would push the CLI task's
+ * 4 KB stack over the edge, so we keep one BSS instance.  The verb
+ * is a developer smoke test that does not run while the production
+ * daemon FSM owns the same drivebase state in g_daemon, so the
+ * single static instance is safe by construction.
+ */
+
+static struct daemon_ctx_s g_daemon_test_ctx;
+
 static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
                          uint32_t wheel_d_mm, uint32_t axle_t_mm)
 {
-  struct daemon_ctx_s ctx;
-  memset(&ctx, 0, sizeof(ctx));
-  pthread_mutex_init(&ctx.lock, NULL);
+  struct daemon_ctx_s *ctxp = &g_daemon_test_ctx;
+  memset(ctxp, 0, sizeof(*ctxp));
+  pthread_mutex_init(&ctxp->lock, NULL);
+#define ctx (*ctxp)
 
   /* 1. Bring up motors (CLAIM both fds, verify type 48 ×2). */
 
@@ -596,6 +607,7 @@ out:
   db_rt_stop(&ctx.rt, 100);
   db_chardev_handler_detach(&ctx.handler);
   drivebase_motor_deinit();
+#undef ctx
   return exit_rc;
 }
 
@@ -702,6 +714,16 @@ static int do_rt_subcmd(int argc, FAR char *argv[])
  * tick-loop + stop + deinit in one task.
  ****************************************************************************/
 
+/* `struct db_drivebase_s` is ~3 KB (two servos × ~1.4 KB each).
+ * Stack-allocating it overflows the 4 KB CLI stack, so the test
+ * verb keeps a single BSS instance.  Same safety argument as
+ * g_daemon_test_ctx — the verb is a developer smoke that shares
+ * BSS with g_daemon and must not be invoked while the production
+ * daemon FSM is running.
+ */
+
+static struct db_drivebase_s g_drive_test_db;
+
 static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
                         uint32_t duration_ms, uint8_t on_completion,
                         uint32_t wheel_d_mm, uint32_t axle_t_mm)
@@ -717,7 +739,9 @@ static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
   drivebase_motor_select_mode(DB_SIDE_RIGHT, 2);
   usleep(30000);
 
-  struct db_drivebase_s db;
+  struct db_drivebase_s *dbp = &g_drive_test_db;
+  memset(dbp, 0, sizeof(*dbp));
+#define db (*dbp)
   rc = db_drivebase_init(&db, wheel_d_mm, axle_t_mm);
   if (rc < 0)
     {
@@ -805,6 +829,7 @@ static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
 
   db_drivebase_stop(&db, now_us(), DRIVEBASE_ON_COMPLETION_COAST);
   drivebase_motor_deinit();
+#undef db
   return 0;
 }
 
@@ -890,7 +915,16 @@ static int do_servo_run(enum db_side_e side, const char *target_kind,
 
   usleep(30000);
 
-  struct db_servo_s servo;
+  /* Same BSS-not-stack reasoning as g_drive_test_db: the servo struct
+   * is ~1.4 KB which crowds a 4 KB CLI stack once printf frames pile
+   * on top.  Single static instance — verb is dev-only and shares
+   * BSS with g_daemon.servo[] by intent.
+   */
+
+  static struct db_servo_s g_servo_test;
+  struct db_servo_s *servop = &g_servo_test;
+  memset(servop, 0, sizeof(*servop));
+#define servo (*servop)
   db_servo_init(&servo, side);
   rc = db_servo_reset(&servo, now_us());
   if (rc < 0)
@@ -967,6 +1001,7 @@ static int do_servo_run(enum db_side_e side, const char *target_kind,
 
   db_servo_stop(&servo, now_us(), DRIVEBASE_ON_COMPLETION_COAST);
   drivebase_motor_deinit();
+#undef servo
   return 0;
 }
 
