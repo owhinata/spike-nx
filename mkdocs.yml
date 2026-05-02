@@ -63,6 +63,7 @@ nav:
       - drivers/lump-protocol.md
       - drivers/sensor.md
       - drivers/motor-control.md
+      - drivers/drivebase.md
       - drivers/imu.md
       - drivers/led.md
       - drivers/battery.md
