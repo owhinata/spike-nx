@@ -388,21 +388,23 @@ static int daemon_tick_cb(uint64_t now_us, void *arg)
   return 0;
 }
 
-/* `daemon_ctx_s` carries struct db_drivebase_s inside, which is
- * ~3 KB on its own.  Stack-allocating it would push the CLI task's
- * 4 KB stack over the edge, so we keep one BSS instance.  The verb
- * is a developer smoke test that does not run while the production
- * daemon FSM owns the same drivebase state in g_daemon, so the
- * single static instance is safe by construction.
+/* `daemon_ctx_s` carries struct db_drivebase_s inside (~3 KB).  Stack-
+ * allocating it would push the CLI task's 4 KB stack over the edge, so
+ * we calloc it from the user heap instead — keeps usram .bss tight at
+ * the cost of a per-invocation umm_alloc/free pair.  The verb is a
+ * developer smoke test that should not run while the production daemon
+ * FSM is alive (g_daemon owns the same drivebase state).
  */
-
-static struct daemon_ctx_s g_daemon_test_ctx;
 
 static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
                          uint32_t wheel_d_mm, uint32_t axle_t_mm)
 {
-  struct daemon_ctx_s *ctxp = &g_daemon_test_ctx;
-  memset(ctxp, 0, sizeof(*ctxp));
+  struct daemon_ctx_s *ctxp = calloc(1, sizeof(*ctxp));
+  if (ctxp == NULL)
+    {
+      fprintf(stderr, "_daemon: out of memory\n");
+      return 1;
+    }
   pthread_mutex_init(&ctxp->lock, NULL);
 #define ctx (*ctxp)
 
@@ -412,6 +414,7 @@ static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
   if (rc < 0)
     {
       fprintf(stderr, "drivebase_motor_init: %s\n", strerror(-rc));
+      free(ctxp);
       return 1;
     }
   drivebase_motor_select_mode(DB_SIDE_LEFT,  2);
@@ -432,6 +435,7 @@ static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
     {
       fprintf(stderr, "db_drivebase_init: %s\n", strerror(-rc));
       drivebase_motor_deinit();
+      free(ctxp);
       return 1;
     }
   rc = db_drivebase_reset(&ctx.db, now_us());
@@ -439,6 +443,7 @@ static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
     {
       fprintf(stderr, "db_drivebase_reset: %s\n", strerror(-rc));
       drivebase_motor_deinit();
+      free(ctxp);
       return 1;
     }
 
@@ -450,6 +455,7 @@ static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
     {
       fprintf(stderr, "chardev_handler_attach: %s\n", strerror(-rc));
       drivebase_motor_deinit();
+      free(ctxp);
       return 1;
     }
   /* Tell the handler that drivebase is already configured so it won't
@@ -471,6 +477,7 @@ static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
       fprintf(stderr, "db_rt_start: %s\n", strerror(-rc));
       db_chardev_handler_detach(&ctx.handler);
       drivebase_motor_deinit();
+      free(ctxp);
       return 1;
     }
 
@@ -485,6 +492,7 @@ static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
       db_rt_stop(&ctx.rt, 100);
       db_chardev_handler_detach(&ctx.handler);
       drivebase_motor_deinit();
+      free(ctxp);
       return 1;
     }
 
@@ -608,6 +616,7 @@ out:
   db_chardev_handler_detach(&ctx.handler);
   drivebase_motor_deinit();
 #undef ctx
+  free(ctxp);
   return exit_rc;
 }
 
@@ -716,22 +725,29 @@ static int do_rt_subcmd(int argc, FAR char *argv[])
 
 /* `struct db_drivebase_s` is ~3 KB (two servos × ~1.4 KB each).
  * Stack-allocating it overflows the 4 KB CLI stack, so the test
- * verb keeps a single BSS instance.  Same safety argument as
- * g_daemon_test_ctx — the verb is a developer smoke that shares
- * BSS with g_daemon and must not be invoked while the production
- * daemon FSM is running.
+ * verb calloc's it from the user heap and frees it on exit.  Avoids
+ * keeping the same bytes resident in usram .bss for a developer
+ * smoke verb that should not run while the production daemon FSM is
+ * alive (which would also conflict with g_daemon's drivebase state).
  */
-
-static struct db_drivebase_s g_drive_test_db;
 
 static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
                         uint32_t duration_ms, uint8_t on_completion,
                         uint32_t wheel_d_mm, uint32_t axle_t_mm)
 {
+  struct db_drivebase_s *dbp = calloc(1, sizeof(*dbp));
+  if (dbp == NULL)
+    {
+      fprintf(stderr, "_drive: out of memory\n");
+      return 1;
+    }
+#define db (*dbp)
+
   int rc = drivebase_motor_init();
   if (rc < 0)
     {
       fprintf(stderr, "drivebase_motor_init: %s\n", strerror(-rc));
+      free(dbp);
       return 1;
     }
 
@@ -739,14 +755,12 @@ static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
   drivebase_motor_select_mode(DB_SIDE_RIGHT, 2);
   usleep(30000);
 
-  struct db_drivebase_s *dbp = &g_drive_test_db;
-  memset(dbp, 0, sizeof(*dbp));
-#define db (*dbp)
   rc = db_drivebase_init(&db, wheel_d_mm, axle_t_mm);
   if (rc < 0)
     {
       fprintf(stderr, "db_drivebase_init: %s\n", strerror(-rc));
       drivebase_motor_deinit();
+      free(dbp);
       return 1;
     }
 
@@ -756,6 +770,7 @@ static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
     {
       fprintf(stderr, "db_drivebase_reset: %s\n", strerror(-rc));
       drivebase_motor_deinit();
+      free(dbp);
       return 1;
     }
 
@@ -784,6 +799,7 @@ static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
       fprintf(stderr, "drive %s: %s\n", kind, strerror(-rc));
       db_drivebase_stop(&db, now_us(), DRIVEBASE_ON_COMPLETION_COAST);
       drivebase_motor_deinit();
+      free(dbp);
       return 1;
     }
 
@@ -830,6 +846,7 @@ static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
   db_drivebase_stop(&db, now_us(), DRIVEBASE_ON_COMPLETION_COAST);
   drivebase_motor_deinit();
 #undef db
+  free(dbp);
   return 0;
 }
 
@@ -915,15 +932,20 @@ static int do_servo_run(enum db_side_e side, const char *target_kind,
 
   usleep(30000);
 
-  /* Same BSS-not-stack reasoning as g_drive_test_db: the servo struct
-   * is ~1.4 KB which crowds a 4 KB CLI stack once printf frames pile
-   * on top.  Single static instance — verb is dev-only and shares
-   * BSS with g_daemon.servo[] by intent.
+  /* Same heap-not-BSS reasoning as do_drive_run: the servo struct is
+   * ~1.4 KB which crowds the 4 KB CLI stack once printf frames pile
+   * on top.  calloc'd here, freed at function exit; only used by the
+   * dev-only _servo verb which must not run while the production
+   * daemon FSM owns g_daemon.servo[].
    */
 
-  static struct db_servo_s g_servo_test;
-  struct db_servo_s *servop = &g_servo_test;
-  memset(servop, 0, sizeof(*servop));
+  struct db_servo_s *servop = calloc(1, sizeof(*servop));
+  if (servop == NULL)
+    {
+      fprintf(stderr, "_servo: out of memory\n");
+      drivebase_motor_deinit();
+      return 1;
+    }
 #define servo (*servop)
   db_servo_init(&servo, side);
   rc = db_servo_reset(&servo, now_us());
@@ -931,6 +953,7 @@ static int do_servo_run(enum db_side_e side, const char *target_kind,
     {
       fprintf(stderr, "db_servo_reset: %s\n", strerror(-rc));
       drivebase_motor_deinit();
+      free(servop);
       return 1;
     }
 
@@ -1002,6 +1025,7 @@ static int do_servo_run(enum db_side_e side, const char *target_kind,
   db_servo_stop(&servo, now_us(), DRIVEBASE_ON_COMPLETION_COAST);
   drivebase_motor_deinit();
 #undef servo
+  free(servop);
   return 0;
 }
 

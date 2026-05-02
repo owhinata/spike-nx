@@ -28,13 +28,11 @@ SPIKE Prime Hub (STM32F413VG, Flash 1.5MB / RAM 320KB) 用に設計:
 
 | 区画 | 範囲 | サイズ | 用途 |
 |---|---|---|---|
-| `ksram` | `0x20000000..0x2000c000` | 48K | kernel .data/.bss + idle stack (linker placement only) |
-| `usram` | `0x2000c000..0x20020000` | 80K | user .data/.bss (Issue #93 で 64K → 80K に拡張) |
+| `ksram` | `0x20000000..0x20010000` | 64K | kernel .data/.bss (linker placement only) |
+| `usram` | `0x20010000..0x20020000` | 64K | user .data/.bss (64K 境界整列) |
 | `xsram` | `0x20020000..0x20050000` | 192K | runtime heap (kernel heap + user heap) |
 
 `CONFIG_MM_KERNEL_HEAPSIZE = 32768` (下限値; 実行時は `stm32_allocateheap.c` が残りを自動分割)
-
-**Issue #93 (ksram → usram シフト):** kernel `.data/.bss + idle stack` は ~32 KB しか使わないため ksram 末尾の 16 KB がデッドメモリだった。これを usram 末尾に隣接させて usram 全体を 0x2000c000..0x20020000 (80 KB) に伸ばし、user 静的領域 (.data/.bss) の上限を 64 KB → 80 KB に引き上げた。usram は 2^n でないが、`mpu_user_intsram()` → `mpu_configure_region()` が 128 KB MPU リージョン @ 0x20000000 を SRD = 0x07 (subregion 0..2 disable = ksram) で組み立てるため追加コードは不要。
 
 `SRAM1_END = 0x20050000` は 2^n 境界ではないため、MPU で保護できる最大 user heap 領域 (128K) を 2^n 境界に切り下げると 60K 程度の **末端 tail 領域** が宙に浮く。これを救済するために以下の 2 設定を有効化している (詳細は [NuttX 側の必須修正](#nuttx) 参照):
 

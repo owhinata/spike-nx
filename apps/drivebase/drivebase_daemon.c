@@ -100,16 +100,37 @@ struct daemon_global_s
 
 /****************************************************************************
  * Private Data
+ *
+ * `g_daemon` is calloc'd from the user heap on first start and never
+ * freed — keeps the 3+ KB struct out of the tight 64 KB usram .bss
+ * region (Issue #95 / revert of #93).  The pointer is checked by every
+ * accessor; pre-first-start state is reported as STOPPED with no
+ * daemon attached.
  ****************************************************************************/
 
-static struct daemon_global_s g_daemon =
-{
-  .state    = ATOMIC_VAR_INIT(DB_DAEMON_STOPPED),
-  .running  = ATOMIC_VAR_INIT(false),
-  .pid      = -1,
-};
+static struct daemon_global_s *g_daemon;
 
-static bool g_daemon_inited;
+static int daemon_global_alloc(void)
+{
+  if (g_daemon != NULL)
+    {
+      return 0;
+    }
+
+  struct daemon_global_s *d = calloc(1, sizeof(*d));
+  if (d == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  atomic_init(&d->state,   DB_DAEMON_STOPPED);
+  atomic_init(&d->running, false);
+  d->pid = -1;
+  pthread_mutex_init(&d->lock, NULL);
+  sem_init(&d->teardown_done, 0, 0);
+  g_daemon = d;
+  return 0;
+}
 
 /****************************************************************************
  * Private Helpers
@@ -178,7 +199,7 @@ static int rt_tick_cb(uint64_t now_us_arg, void *arg)
 
 static int daemon_task_main(int argc, char *argv[])
 {
-  struct daemon_global_s *d = &g_daemon;
+  struct daemon_global_s *d = g_daemon;
 
   uint32_t wheel_d_mm = (argc >= 2) ? (uint32_t)atoi(argv[1]) : 56;
   uint32_t axle_t_mm  = (argc >= 3) ? (uint32_t)atoi(argv[2]) : 112;
@@ -278,23 +299,22 @@ fail:
 
 int drivebase_daemon_start(uint32_t wheel_d_mm, uint32_t axle_t_mm)
 {
-  if (!g_daemon_inited)
+  int rc = daemon_global_alloc();
+  if (rc < 0)
     {
-      pthread_mutex_init(&g_daemon.lock, NULL);
-      sem_init(&g_daemon.teardown_done, 0, 0);
-      g_daemon_inited = true;
+      return rc;
     }
 
-  if (atomic_load(&g_daemon.state) != DB_DAEMON_STOPPED)
+  if (atomic_load(&g_daemon->state) != DB_DAEMON_STOPPED)
     {
       return -EALREADY;
     }
 
-  pthread_mutex_lock(&g_daemon.lock);
+  pthread_mutex_lock(&g_daemon->lock);
 
   /* Drain any stale teardown_done from a previous start/stop cycle. */
 
-  while (sem_trywait(&g_daemon.teardown_done) == 0) { }
+  while (sem_trywait(&g_daemon->teardown_done) == 0) { }
 
   /* Pass wheel/axle to the daemon task via argv strings. */
 
@@ -307,24 +327,24 @@ int drivebase_daemon_start(uint32_t wheel_d_mm, uint32_t axle_t_mm)
                         DAEMON_TASK_STACK, daemon_task_main, argv);
   if (pid < 0)
     {
-      pthread_mutex_unlock(&g_daemon.lock);
+      pthread_mutex_unlock(&g_daemon->lock);
       return -errno;
     }
 
-  g_daemon.pid = (pid_t)pid;
-  pthread_mutex_unlock(&g_daemon.lock);
+  g_daemon->pid = (pid_t)pid;
+  pthread_mutex_unlock(&g_daemon->lock);
   return pid;
 }
 
 int drivebase_daemon_stop(uint32_t timeout_ms)
 {
-  if (!g_daemon_inited ||
-      atomic_load(&g_daemon.state) == DB_DAEMON_STOPPED)
+  if (g_daemon == NULL ||
+      atomic_load(&g_daemon->state) == DB_DAEMON_STOPPED)
     {
       return -EAGAIN;
     }
 
-  atomic_store(&g_daemon.running, false);
+  atomic_store(&g_daemon->running, false);
 
   if (timeout_ms == 0) timeout_ms = 2000;
 
@@ -339,7 +359,7 @@ int drivebase_daemon_stop(uint32_t timeout_ms)
       deadline.tv_nsec -= 1000000000L;
       deadline.tv_sec  += 1;
     }
-  if (sem_timedwait(&g_daemon.teardown_done, &deadline) < 0)
+  if (sem_timedwait(&g_daemon->teardown_done, &deadline) < 0)
     {
       return -ETIMEDOUT;
     }
@@ -348,10 +368,12 @@ int drivebase_daemon_stop(uint32_t timeout_ms)
 
 enum db_daemon_state_e drivebase_daemon_state(void)
 {
-  return (enum db_daemon_state_e)atomic_load(&g_daemon.state);
+  return g_daemon == NULL ? DB_DAEMON_STOPPED
+                          : (enum db_daemon_state_e)
+                              atomic_load(&g_daemon->state);
 }
 
 int drivebase_daemon_get_pid(void)
 {
-  return g_daemon.pid;
+  return g_daemon == NULL ? -1 : g_daemon->pid;
 }
