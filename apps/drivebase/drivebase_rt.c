@@ -99,8 +99,13 @@ static void *db_rt_thread(void *arg)
    * or a positive errno (not negated).
    */
 
-  struct sched_param sp = { .sched_priority = rt->priority };
-  pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+  /* SCHED_FIFO promotion now happens via pthread_attr_setschedparam
+   * in db_rt_start (which set both POSIX_SPAWN_SETSCHEDULER and
+   * POSIX_SPAWN_SETSCHEDPARAM).  Calling pthread_setschedparam from
+   * the thread itself accumulates kernel scheduling state across
+   * create/join cycles and crashes the device on the 3rd cycle
+   * (Issue #96).
+   */
 
   struct timespec next;
   if (clock_gettime(CLOCK_MONOTONIC, &next) != 0)
@@ -186,6 +191,17 @@ int db_rt_start(struct db_rt_s *rt, int priority,
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setstacksize(&attr, 4096);
+
+  /* Promote to SCHED_FIFO at the requested priority via attr — calling
+   * pthread_setschedparam from the thread itself accumulates internal
+   * scheduling state and crashes the device after a few create/join
+   * cycles (Issue #96 bisect).
+   */
+
+  struct sched_param sp = { .sched_priority = rt->priority };
+  pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
+  pthread_attr_setschedparam(&attr, &sp);
+  pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
 
   int rc = pthread_create(&rt->thread, &attr, db_rt_thread, rt);
   pthread_attr_destroy(&attr);

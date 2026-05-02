@@ -497,6 +497,15 @@ static int lsm6dsl_activate(FAR struct sensor_lowerhalf_s *lower,
     {
       err = lsm6dsl_set_odr(dev, ODR_OFF);
       dev->active = false;
+
+      /* Drain any HPWORK item that the chip's last DRDY interrupt may
+       * have queued; otherwise drdy_worker can fire after sensor_close
+       * has freed `user` and use sensor_pollnotify_one on a dangling
+       * pointer.  Issue #97 found this manifests as a deterministic
+       * crash on the 4th rapid open/close cycle.
+       */
+
+      work_cancel(HPWORK, &dev->work);
     }
 
 unlock:
