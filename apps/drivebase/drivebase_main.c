@@ -37,6 +37,11 @@
 #include <arch/board/board_drivebase.h>
 
 #include "drivebase_motor.h"
+#include "drivebase_settings.h"
+#include "drivebase_trajectory.h"
+#include "drivebase_observer.h"
+#include "drivebase_control.h"
+#include "drivebase_angle.h"
 
 /****************************************************************************
  * Private Functions: hidden _motor test verbs (Issue #77 development only)
@@ -234,6 +239,147 @@ out:
 }
 
 /****************************************************************************
+ * Private Functions: hidden _alg test verbs (Issue #77 development only)
+ *
+ * Sample the trapezoidal trajectory and the default settings tables
+ * from NSH so commit #5 is verifiable without a host-side unit test.
+ * Removed once the daemon's drive verbs subsume the surface in commit
+ * #11.
+ ****************************************************************************/
+
+static int do_alg_traj(int argc, FAR char *argv[])
+{
+  if (argc < 5)
+    {
+      fprintf(stderr,
+              "usage: drivebase _alg traj <x0_mdeg> <x1_mdeg> "
+              "<vmax_mdegps> <accel_mdegps2> <decel_mdegps2>\n");
+      return 1;
+    }
+
+  int64_t x0  = (int64_t)atoll(argv[0]);
+  int64_t x1  = (int64_t)atoll(argv[1]);
+  int32_t v   = (int32_t)atol(argv[2]);
+  int32_t a   = (int32_t)atol(argv[3]);
+  int32_t d   = (int32_t)atol(argv[4]);
+
+  struct db_trajectory_s tr;
+  db_trajectory_init_position(&tr, 0, x0, x1, v, a, d);
+
+  printf("traj: dir=%d v_peak=%ld accel_dt=%llu cruise_dt=%llu "
+         "decel_dt=%llu total=%llu us\n",
+         tr.direction, (long)tr.v_peak_mdegps,
+         (unsigned long long)tr.accel_dt_us,
+         (unsigned long long)tr.cruise_dt_us,
+         (unsigned long long)tr.decel_dt_us,
+         (unsigned long long)tr.total_dt_us);
+  printf("     x_accel_end=%lld x_cruise_end=%lld x1=%lld mdeg\n",
+         (long long)tr.x_accel_end_mdeg,
+         (long long)tr.x_cruise_end_mdeg,
+         (long long)tr.x1_mdeg);
+
+  /* Sample at 0%, 25%, 50%, 75%, 100%, 110% of total time */
+
+  uint64_t pts[6];
+  pts[0] = 0;
+  pts[1] = tr.total_dt_us / 4;
+  pts[2] = tr.total_dt_us / 2;
+  pts[3] = (tr.total_dt_us * 3) / 4;
+  pts[4] = tr.total_dt_us;
+  pts[5] = tr.total_dt_us + tr.total_dt_us / 10;
+
+  for (int i = 0; i < 6; i++)
+    {
+      struct db_trajectory_ref_s ref;
+      db_trajectory_get_reference(&tr, pts[i], &ref);
+      printf("  t=%llu us  x=%lld v=%ld a=%ld done=%d\n",
+             (unsigned long long)pts[i],
+             (long long)ref.x_mdeg, (long)ref.v_mdegps,
+             (long)ref.a_mdegps2, (int)ref.done);
+    }
+
+  return 0;
+}
+
+static int do_alg_settings(int argc, FAR char *argv[])
+{
+  uint32_t wheel_d = (argc >= 1) ? (uint32_t)atoi(argv[0]) : 56;
+  uint32_t axle_t  = (argc >= 2) ? (uint32_t)atoi(argv[1]) : 100;
+
+  const struct db_servo_gains_s        *g = db_settings_servo_gains();
+  const struct db_traj_limits_s        *dl = db_settings_distance_limits(wheel_d);
+  const struct db_traj_limits_s        *hl = db_settings_heading_limits(wheel_d, axle_t);
+  const struct db_stall_settings_s     *st = db_settings_stall();
+  const struct db_completion_settings_s *cm = db_settings_completion();
+
+  printf("wheel_d=%lu mm  axle_t=%lu mm\n",
+         (unsigned long)wheel_d, (unsigned long)axle_t);
+  printf("servo: kp_pos=%ld ki_pos=%ld kd_pos=%ld "
+         "kp_speed=%ld ki_speed=%ld deadband=%ld out=[%ld,%ld]\n",
+         (long)g->kp_pos, (long)g->ki_pos, (long)g->kd_pos,
+         (long)g->kp_speed, (long)g->ki_speed,
+         (long)g->deadband_mdeg, (long)g->out_min, (long)g->out_max);
+  printf("distance limits: v=%ld accel=%ld decel=%ld mdeg/s,/s/s\n",
+         (long)dl->v_max_mdegps, (long)dl->accel_mdegps2,
+         (long)dl->decel_mdegps2);
+  printf("heading  limits: v=%ld accel=%ld decel=%ld mdeg/s,/s/s\n",
+         (long)hl->v_max_mdegps, (long)hl->accel_mdegps2,
+         (long)hl->decel_mdegps2);
+  printf("stall: low_speed=%ld min_duty=%ld window=%lu ms\n",
+         (long)st->stall_speed_mdegps, (long)st->stall_duty_min,
+         (unsigned long)st->stall_window_ms);
+  printf("completion: pos_tol=%ld speed_tol=%ld done_window=%lu ms "
+         "smart_hold=%lu ms\n",
+         (long)cm->pos_tolerance_mdeg,
+         (long)cm->speed_tolerance_mdegps,
+         (unsigned long)cm->done_window_ms,
+         (unsigned long)cm->smart_passive_hold_ms);
+  return 0;
+}
+
+static int do_alg_angle(int argc, FAR char *argv[])
+{
+  if (argc < 2)
+    {
+      fprintf(stderr,
+              "usage: drivebase _alg angle <wheel_d_mm> <mdeg>\n");
+      return 1;
+    }
+  uint32_t wheel_d = (uint32_t)atoi(argv[0]);
+  int64_t mdeg     = (int64_t)atoll(argv[1]);
+  int32_t mm       = db_angle_mdeg_to_mm(mdeg, wheel_d);
+  int64_t back     = db_angle_mm_to_mdeg(mm, wheel_d);
+  printf("wheel_d=%lu mm  mdeg=%lld -> mm=%ld -> mdeg=%lld\n",
+         (unsigned long)wheel_d, (long long)mdeg,
+         (long)mm, (long long)back);
+  return 0;
+}
+
+static int do_alg_subcmd(int argc, FAR char *argv[])
+{
+  if (argc < 1)
+    {
+      fprintf(stderr,
+              "usage: drivebase _alg {traj|settings|angle} ...\n");
+      return 1;
+    }
+  if (strcmp(argv[0], "traj") == 0)
+    {
+      return do_alg_traj(argc - 1, &argv[1]);
+    }
+  if (strcmp(argv[0], "settings") == 0)
+    {
+      return do_alg_settings(argc - 1, &argv[1]);
+    }
+  if (strcmp(argv[0], "angle") == 0)
+    {
+      return do_alg_angle(argc - 1, &argv[1]);
+    }
+  fprintf(stderr, "_alg: unknown subcommand '%s'\n", argv[0]);
+  return 1;
+}
+
+/****************************************************************************
  * Private Functions
  ****************************************************************************/
 
@@ -327,6 +473,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(verb, "_motor") == 0)
     {
       return do_motor_subcmd(argc - 2, &argv[2]);
+    }
+
+  if (strcmp(verb, "_alg") == 0)
+    {
+      return do_alg_subcmd(argc - 2, &argv[2]);
     }
 
   if (strcmp(verb, "help") == 0 ||
