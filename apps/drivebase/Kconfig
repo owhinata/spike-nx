@@ -1,0 +1,67 @@
+config APP_DRIVEBASE
+	tristate "SPIKE Prime drivebase userspace daemon (Issue #77)"
+	default n
+	depends on BOARD_DRIVEBASE_CHARDEV
+	depends on LEGO_SENSOR
+	depends on STM32_I2C2  # board-local LSM6DSL uORB (sensor_imu0)
+	---help---
+		Userspace 5 ms control loop for the SPIKE Prime two-motor
+		drivebase.  Talks to the kernel-side /dev/drivebase chardev
+		(Issue #77, board-side) over DRIVEBASE_DAEMON_* ioctls and
+		exposes the user-facing DRIVEBASE_DRIVE_STRAIGHT / TURN /
+		FOREVER / STOP / etc verbs to user apps and the NSH CLI.
+
+		The daemon owns the per-tick observer + trajectory + PID
+		stack (re-implemented from pybricks pbio for SPIKE only —
+		feature parity, no source copy) and routes encoder / IMU
+		drain to LEGOSENSOR class topics + LSM6DSL uORB.  Motor
+		actuation goes through LEGOSENSOR_SET_PWM /
+		LEGOSENSOR_MOTOR_*_{COAST,BRAKE} on /dev/uorb/sensor_motor_l/r
+		so the H-bridge driver only sees one CLAIM holder.
+
+		Disable for boards that do not run the drivebase (mass-
+		storage / sensor-only / non-spike boards).
+
+if APP_DRIVEBASE
+
+config APP_DRIVEBASE_CLI_PRIORITY
+	int "drivebase CLI task priority"
+	default 100
+	range 50 200
+	---help---
+		Priority of the `drivebase` builtin CLI helper that issues
+		ioctls to /dev/drivebase.  This is the user-side CLI only —
+		the daemon's RT control loop runs at
+		APP_DRIVEBASE_RT_PRIORITY (separate Kconfig, default 220).
+
+config APP_DRIVEBASE_RT_PRIORITY
+	int "RT control task priority (SCHED_FIFO)"
+	default 220
+	range 200 240
+	---help---
+		Priority of the 5 ms control loop pthread inside the daemon.
+		Default 220 sits below HPWORK (224 — sound DMA softdog and
+		legoport TX live there) and above LPWORK (176) plus BTstack
+		main (100).  Lowering this risks deadline misses under audio
+		/ flash load; raising past 224 can starve the audio path.
+
+config APP_DRIVEBASE_RT_STACKSIZE
+	int "RT control task stack size"
+	default 4096
+	range 2048 16384
+
+config APP_DRIVEBASE_DAEMON_STACKSIZE
+	int "Lifecycle / chardev daemon task stack size"
+	default 4096
+	range 2048 16384
+
+config APP_DRIVEBASE_JITTER_RING_DEPTH
+	int "Jitter ring depth (samples retained for DRIVEBASE_JITTER_DUMP)"
+	default 256
+	range 64 4096
+	---help---
+		Per-tick wake-latency samples kept by the daemon for the
+		DRIVEBASE_JITTER_DUMP ioctl.  Larger rings cost RAM
+		(8 B / sample) but capture longer load windows.
+
+endif

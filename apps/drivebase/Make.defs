@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_APP_DRIVEBASE),)
+CONFIGURED_APPS += $(APPDIR)/external/drivebase
+endif
