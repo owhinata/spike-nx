@@ -249,6 +249,29 @@ LEGO 公式 spec PDF (`techspecs_techniccolorsensor.pdf` の姉妹版) では 10
 
 ポート給電: COLOR と同じく `NEEDS_SUPPLY_PIN1`、SYNC 後に H-bridge を `-MAX_DUTY` に振って LED 系を通電する必要あり (Issue #80)。LIGHT mode の brightness は COLOR と同じく **mode 5 滞在中に書いた値だけ有効** と仮定 (実機検証は未だ — COLOR の §4.5 仮説 A と同パターンが想定される)。
 
+### 4.8 SPIKE Motor modes (Medium=48, Large=49) と LUMP-write 無効性 (実機観測)
+
+SPIKE Medium (`motor_r` / `motor_l`、type 48 = relative encoder) と Large (`motor_m`、type 49 = absolute encoder) の per-mode 仕様 (pybricks `legodev.h:359` と LUMP info から):
+
+| mode | 名称 | サイズ | データ型 | 公開 API | 実機での意味 |
+|---|---|---|---|---|---|
+| 0 | POWER | 1×INT8 (writable, -100..100) | LUMP-internal commanded power | (pybricks 未使用) | **常に 0** (Hub が H-bridge 直叩きで動かしているため firmware の commanded power は 0 のまま) |
+| 1 | SPEED | 1×INT8 (writable, -100..100) | encoder 由来 | (pybricks 未使用 publish) | encoder 実測速度。~1000 fps publish、driving 状況がそのまま反映 (例: pwm 3000 → SPEED 21、すべり込み) |
+| 2 | POS | 1×INT32 (writable, deg) | encoder 由来 | (pybricks 未使用 publish) | 相対累積角度。~1000 fps、回転を単調にカウント |
+| 3 | APOS | 1×INT16 (writable、Large のみ -180..179) | absolute encoder | (pybricks 未使用 publish) | 絶対角度 |
+| 4 | CALIB | 2×INT16 | — | (pybricks 未使用) | キャリブレーション |
+| 5 | STATS | 14×INT16 | — | (pybricks 未使用) | 内部統計 |
+
+**LUMP-write 経路 (`sensor motor_* send 0/1/2/3 ...`) は完全に no-op (実機検証 2026-05-02)**:
+
+- `pwm 0` (BRAKE) 状態で `sensor motor_r send 0 50` (POWER に 80 を LUMP-write) → 1 秒待っても **`port pwm A status` は BRAKE/duty=0 のまま**、motor も動かない
+- `send 0 50` 後に POWER (mode 0) を read しても **0 のまま** (echo もされない)
+- LUMP wire frame は出ている (motor MCU は受信しているはず) が、**firmware が完全に無視**
+
+つまり SPIKE Hub 上での motor 駆動は **H-bridge 1 経路のみ** (`sensor motor_* pwm <duty>` / `port pwm <P> set <duty>`) が実用解。pybricks が LUMP-write を一切使わず H-bridge 直叩きに統一しているのは、この実機制約に対する正しい設計判断と確認できる。
+
+副作用: mode 0 POWER は telemetry としても無価値 (常に 0)。**速度を読みたいなら mode 1 SPEED**、**角度を読みたいなら mode 2 POS / 3 APOS** を select する。
+
 ## 5. CLI (`sensor`)
 
 ```

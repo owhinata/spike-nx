@@ -349,6 +349,42 @@ LIGHT-mode brightness is assumed to follow the same firmware-gating
 behaviour as COLOR (only effective while mode 5 is the active SELECT —
 hypothesis A in §4.5); ULTRASONIC re-verification is still TODO.
 
+### 4.8 SPIKE Motor modes (Medium=48, Large=49) and LUMP-write no-op (empirical)
+
+Per-mode layout for SPIKE Medium (`motor_r` / `motor_l`, type 48 =
+relative encoder) and Large (`motor_m`, type 49 = absolute encoder),
+from pybricks `legodev.h:359` cross-referenced against LUMP info:
+
+| mode | Name | Shape | Source | pybricks API | Reading on this platform |
+|---|---|---|---|---|---|
+| 0 | POWER | 1×INT8 (writable, -100..100) | LUMP-internal commanded power | (pybricks does not consume) | **Always 0** — the Hub drives the H-bridge directly, so the motor MCU's "commanded power" stays at 0 |
+| 1 | SPEED | 1×INT8 (writable, -100..100) | encoder-derived | (pybricks does not subscribe via LUMP) | Real measured speed, ~1000 fps.  pwm 3000 → SPEED ≈ 21 with realistic mechanical load (slip) |
+| 2 | POS | 1×INT32 (writable, deg) | encoder-derived | (pybricks does not subscribe via LUMP) | Cumulative relative angle, ~1000 fps |
+| 3 | APOS | 1×INT16 (writable, Large only, -180..179) | absolute encoder | (pybricks does not subscribe via LUMP) | Absolute angle |
+| 4 | CALIB | 2×INT16 | — | — | Calibration |
+| 5 | STATS | 14×INT16 | — | — | Internal stats |
+
+**`sensor motor_* send 0/1/2/3 …` (LUMP WRITE) is a complete no-op**
+(verified on hardware on 2026-05-02):
+
+- After `pwm 0` (BRAKE), issue `sensor motor_r send 0 50` (write 0x50 =
+  decimal 80 to POWER over LUMP), wait 1 s, query `port pwm A status` →
+  state remains **BRAKE / duty=0** and the motor does not move
+- Reading POWER after the WRITE still returns **0** (no echo)
+- The LUMP frame goes out on the wire and the motor MCU receives it,
+  but the firmware silently discards it — there is no Hub-side
+  shortcut that translates LUMP WRITE into H-bridge commands
+
+So motor drive on the SPIKE Hub goes through one path only: the
+H-bridge (`sensor motor_* pwm <duty>` / `port pwm <P> set <duty>`),
+which is exactly the design pybricks settled on (`pbio/src/dcmotor.c`
+calls `pbdrv_motor_driver_set_duty_cycle()` and never touches LUMP
+write).
+
+Side effect: mode 0 POWER is useless as telemetry on this platform —
+it is permanently 0.  **Use mode 1 SPEED for measured rotational
+speed**, **mode 2 POS / 3 APOS for angle**, and ignore POWER.
+
 ## 5. CLI (`sensor`)
 
 ```
