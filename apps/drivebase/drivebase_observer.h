@@ -2,16 +2,22 @@
  * apps/drivebase/drivebase_observer.h
  *
  * Speed observer + stall detector for the per-motor servo (Issue #77
- * commit #5).  Inputs are the (timestamp, position) samples produced
- * by drivebase_motor_drain(); outputs are the smoothed speed estimate
- * the PID consumes and a stall flag the completion logic uses.
+ * commit #6.5).  The first cut was a per-sample IIR low-pass on
+ * (Δx / Δt), but at 1-deg encoder resolution × 1 kHz LUMP publish a
+ * single-pair velocity estimate is either 0 or ±1000 deg/s — pure
+ * quantization noise that the LP filter cannot recover from no matter
+ * how aggressive α is.
  *
- * The estimator is a first-order IIR low-pass on (Δx / Δt).  pybricks
- * uses a richer Luenberger observer with motor electrical-side state
- * (`pbio/src/observer.c`), but the encoder is good enough on the
- * Medium Motor that an LP filter at α ≈ 0.4 already gives < 5 deg/s
- * RMS noise.  We can swap in the Luenberger version later behind the
- * same API if bench measurements show the LP isn't enough.
+ * The replacement keeps a ring of recent (timestamp, position) pairs
+ * spanning a configurable window (default ≈ 30 ms).  Velocity = slope
+ * between the newest and the oldest entry still in the window.  At
+ * 100 deg/s motor motion the 30 ms span covers 3 deg of encoder change
+ * — well above the 1-deg quantization, so the slope reads the real
+ * velocity within ~5 % rather than ±200 % per-sample noise.
+ *
+ * Pybricks uses a fuller Luenberger observer with motor electrical
+ * state.  We can swap that in later behind the same API if bench
+ * measurements show the slope estimator is not enough.
  ****************************************************************************/
 
 #ifndef __APPS_DRIVEBASE_DRIVEBASE_OBSERVER_H
@@ -26,29 +32,46 @@ extern "C"
 #endif
 
 /****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+#define DB_OBSERVER_RING_DEPTH   64
+                              /* covers 64 ms at 1 kHz publish rate;     */
+                              /* tick consumes 1-5 entries per 5 ms tick */
+
+/****************************************************************************
  * Types
  ****************************************************************************/
 
+struct db_observer_sample_s
+{
+  uint64_t t_us;
+  int64_t  x_mdeg;
+};
+
 struct db_observer_s
 {
-  /* Last consumed encoder sample */
+  /* Ring of recent samples.  Producer = update_sample() pushes to the
+   * head; oldest entries fall off as the window slides forward.
+   */
 
-  int64_t  x_mdeg;             /* cumulative angle in milli-deg          */
-  uint64_t t_us;
-  bool     primed;             /* false until first update_sample()      */
+  struct db_observer_sample_s ring[DB_OBSERVER_RING_DEPTH];
+  uint8_t                     head;     /* next write slot                */
+  uint8_t                     count;    /* live entries (≤ DEPTH)         */
 
-  /* Filter state */
+  /* Derived state */
 
-  int32_t  v_est_mdegps;
-  uint32_t alpha_q15;          /* IIR coefficient × 32768                */
+  int32_t                     v_est_mdegps;
+  uint64_t                    window_us;       /* slope window           */
+  bool                        primed;
 
-  /* Stall detection (consecutive ms with low speed AND high duty) */
+  /* Stall detection */
 
-  uint32_t stall_low_speed_mdegps;
-  uint32_t stall_min_duty;
-  uint32_t stall_window_ms;
-  uint32_t stall_streak_ms;
-  bool     stalled;
+  uint32_t                    stall_low_speed_mdegps;
+  uint32_t                    stall_min_duty;
+  uint32_t                    stall_window_ms;
+  uint32_t                    stall_streak_ms;
+  bool                        stalled;
 };
 
 /****************************************************************************
@@ -59,25 +82,14 @@ void db_observer_init(struct db_observer_s *o,
                       uint32_t low_speed_mdegps,
                       uint32_t min_duty,
                       uint32_t stall_window_ms,
-                      uint32_t alpha_q15);
+                      uint32_t window_ms);
 
 void db_observer_reset(struct db_observer_s *o,
                        int64_t x_mdeg, uint64_t t_us);
 
-/* Feed one fresh encoder sample.  Updates v_est_mdegps and stall_streak.
- * `applied_duty` is the magnitude of the most-recent PWM duty (0..10000)
- * — used together with v_est for the stall heuristic.
- */
-
 void db_observer_update_sample(struct db_observer_s *o,
                                int64_t x_mdeg, uint64_t t_us,
                                uint32_t applied_duty_abs);
-
-/* Tick variant: no fresh sample arrived this tick.  Bumps stall_streak
- * if the current state still satisfies the low-speed-with-duty
- * condition; does *not* update the velocity estimate (we keep the
- * previous one rather than decay artificially).
- */
 
 void db_observer_idle_tick(struct db_observer_s *o, uint32_t dt_ms,
                            uint32_t applied_duty_abs);

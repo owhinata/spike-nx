@@ -47,7 +47,7 @@ void db_servo_init(struct db_servo_s *s, enum db_side_e side)
                    (uint32_t)st->stall_speed_mdegps,
                    (uint32_t)st->stall_duty_min,
                    st->stall_window_ms,
-                   13107 /* α ≈ 0.4, q15 */);
+                   30 /* slope window in ms */);
 
   db_pid_init(&s->pid);
 }

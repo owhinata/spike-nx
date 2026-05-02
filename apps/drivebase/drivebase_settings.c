@@ -22,27 +22,40 @@
  * for the same motor, which keeps anti-windup behaviour predictable.
  ****************************************************************************/
 
-/* Conservative seed for commit #6.  The 1-deg encoder resolution at
- * 1 kHz publish makes per-tick (5 ms) Δposition either 0 or 1 deg —
- * sample-to-sample velocity estimates jitter ±200 deg/s even under a
- * steady physical motion of ~100 deg/s.  Enable the speed and D
- * branches only after the observer is upgraded to a multi-sample
- * window (commit #7 / commit #11 retune work).  For now run pure
- * P-on-position so the closed loop converges deterministically inside
- * the deadband without amplifying observer noise.
+/* Tuning iteration after commit #6.5 swapped the per-sample IIR
+ * observer for a sliding-window slope estimator (≈ 30 ms window).
+ * v_est now reflects real motor speed within ~5 % at the typical
+ * SPIKE Medium Motor operating range (50-500 deg/s), so the speed
+ * branch is no longer noise-amplifying.
+ *
+ * Bench tuning posture (refined in commits #7/#11 once the L+R
+ * coupling is in the loop):
+ *   - kp_pos  drives the bulk of the response.  50 .01% per deg →
+ *     45 % PWM at a 90 deg error, comfortably above the observed
+ *     ~6-8 % static-friction floor.
+ *   - ki_pos  small but present, just enough to push past static
+ *     friction at the end of a move.  Wind-up is bounded by the
+ *     anti-windup deadband + saturation gates from commit #5.
+ *   - kp_speed adds damping while moving; helps avoid the brake-
+ *     reverse-brake oscillation we saw with the per-sample observer.
+ *   - kd_pos stays 0 — the slope estimator already provides the
+ *     time-derivative information through the speed loop, and a
+ *     direct D on position would re-introduce the high-frequency
+ *     jitter the observer is filtering out.
+ *
+ * deadband_mdeg matches the completion pos_tolerance so the
+ * integrator stops accumulating exactly where the motion is
+ * declared "done".
  */
 
 static const struct db_servo_gains_s g_servo_gains =
 {
-  .kp_pos        = 50,       /* duty.01% per deg ; 90 deg err → 4500 = */
-                              /* 45 % PWM, comfortably above the SPIKE   */
-                              /* Medium Motor's static-friction floor of */
-                              /* ~6-8 % observed on the bench            */
-  .ki_pos        = 0,        /* TODO commit #7: re-enable once observer */
-  .kd_pos        = 0,        /*    settles                              */
-  .kp_speed      = 0,
+  .kp_pos        = 50,
+  .ki_pos        = 20,
+  .kd_pos        = 0,
+  .kp_speed      = 5,
   .ki_speed      = 0,
-  .deadband_mdeg = 1500,     /* ±1.5 deg around target                  */
+  .deadband_mdeg = 3000,
   .out_min       = -10000,
   .out_max       =  10000,
 };

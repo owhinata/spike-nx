@@ -112,7 +112,7 @@ void db_pid_update(struct db_pid_state_s *st,
     }
   int64_t kpv     = (int64_t)g->kp_speed * speed_err / 1000;
 
-  int64_t out_unsat = p_term + d_term + kpv + (st->i_acc / 4096);
+  int64_t out_unsat = p_term + d_term + kpv + (st->i_acc / 256);
 
   int32_t duty = clamp_i32((int32_t)out_unsat, g->out_min, g->out_max);
 
@@ -140,7 +140,7 @@ void db_pid_update(struct db_pid_state_s *st,
       /* the contribution stage, so it can never single-handedly       */
       /* saturate the output.                                          */
 
-      int64_t i_clip = (int64_t)g->out_max * 4096;
+      int64_t i_clip = (int64_t)g->out_max * 256;
       if (st->i_acc >  i_clip) st->i_acc =  i_clip;
       if (st->i_acc < -i_clip) st->i_acc = -i_clip;
     }
