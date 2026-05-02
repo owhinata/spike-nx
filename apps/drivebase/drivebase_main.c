@@ -44,6 +44,7 @@
 #include "drivebase_angle.h"
 #include "drivebase_servo.h"
 #include "drivebase_drivebase.h"
+#include "drivebase_rt.h"
 
 #include <time.h>
 
@@ -247,6 +248,79 @@ out:
  */
 
 static uint64_t now_us(void);
+
+/****************************************************************************
+ * Private Functions: hidden _rt test verb (Issue #77 development only)
+ *
+ * Spawns the SCHED_FIFO 5 ms tick task with a no-op callback so the
+ * jitter ring fills up under realistic scheduling pressure (BTstack,
+ * sound DAC, USB CDC, LUMP kthreads all running).  Stops after the
+ * requested duration and prints the histogram.
+ ****************************************************************************/
+
+static int rt_noop_cb(uint64_t now_us, void *arg)
+{
+  (void)now_us;
+  (void)arg;
+  return 0;
+}
+
+static int do_rt_subcmd(int argc, FAR char *argv[])
+{
+  uint32_t duration_ms = (argc >= 1) ? (uint32_t)atoi(argv[0]) : 2000;
+
+  struct db_rt_s rt;
+  db_rt_init(&rt);
+  int rc = db_rt_start(&rt, CONFIG_APP_DRIVEBASE_RT_PRIORITY,
+                       rt_noop_cb, NULL);
+  if (rc < 0)
+    {
+      fprintf(stderr, "db_rt_start: %s\n", strerror(-rc));
+      return 1;
+    }
+
+  /* Sleep at the CLI task's priority while the RT task burns ticks. */
+
+  usleep(duration_ms * 1000);
+
+  db_rt_stop(&rt, 100);
+
+  struct drivebase_jitter_dump_s d;
+  db_rt_get_jitter(&rt, &d);
+
+  printf("rt: ticks=%lu max_lag=%lu us miss=%lu\n",
+         (unsigned long)d.total_ticks,
+         (unsigned long)d.max_lag_us,
+         (unsigned long)d.deadline_miss_count);
+  printf("    hist <50/50-100/100-200/200-500/500-1k/1k-2k/2k-5k/5k+:\n"
+         "         %5lu %5lu %5lu %5lu %5lu %5lu %5lu %5lu\n",
+         (unsigned long)d.hist_us[0], (unsigned long)d.hist_us[1],
+         (unsigned long)d.hist_us[2], (unsigned long)d.hist_us[3],
+         (unsigned long)d.hist_us[4], (unsigned long)d.hist_us[5],
+         (unsigned long)d.hist_us[6], (unsigned long)d.hist_us[7]);
+
+  if (d.total_ticks > 0)
+    {
+      uint32_t cum = 0;
+      uint32_t p50_th  = (d.total_ticks + 1) / 2;
+      uint32_t p99_th  = (d.total_ticks * 99 + 99) / 100;
+      uint32_t p999_th = (d.total_ticks * 999 + 999) / 1000;
+      static const uint32_t bucket_hi[8] =
+        { 50, 100, 200, 500, 1000, 2000, 5000, UINT32_MAX };
+      uint32_t p50 = 0, p99 = 0, p999 = 0;
+      for (uint32_t i = 0; i < 8; i++)
+        {
+          cum += d.hist_us[i];
+          if (p50  == 0 && cum >= p50_th)  p50  = bucket_hi[i];
+          if (p99  == 0 && cum >= p99_th)  p99  = bucket_hi[i];
+          if (p999 == 0 && cum >= p999_th) p999 = bucket_hi[i];
+        }
+      printf("    p50<= %lu  p99<= %lu  p999<= %lu  (us)\n",
+             (unsigned long)p50, (unsigned long)p99,
+             (unsigned long)p999);
+    }
+  return 0;
+}
 
 /****************************************************************************
  * Private Functions: hidden _drive test verb (Issue #77 development only)
@@ -821,6 +895,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(verb, "_drive") == 0)
     {
       return do_drive_subcmd(argc - 2, &argv[2]);
+    }
+
+  if (strcmp(verb, "_rt") == 0)
+    {
+      return do_rt_subcmd(argc - 2, &argv[2]);
     }
 
   if (strcmp(verb, "help") == 0 ||
