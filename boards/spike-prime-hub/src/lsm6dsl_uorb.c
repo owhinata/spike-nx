@@ -347,6 +347,7 @@ static int push_data(FAR struct lsm6dsl_dev_s *dev)
   int16_t raw[6];  /* gyro XYZ + accel XYZ */
   struct sensor_imu sample;
   int err;
+  bool publish = false;
 
   err = nxmutex_lock(&dev->devlock);
   if (err < 0)
@@ -401,15 +402,23 @@ static int push_data(FAR struct lsm6dsl_dev_s *dev)
   sample.az              = -raw[5];
   sample.temperature_raw = dev->temperature_raw;
   sample.reserved        = 0;
+  publish                = dev->active;
 
-  if (dev->active)
+unlock:
+  nxmutex_unlock(&dev->devlock);
+
+  /* Issue #96: push_event() reaches into the NuttX uORB sensor framework
+   * which takes its own subscriber-list lock.  sensor_close() takes that
+   * same lock and then calls activate(false) which wants devlock — so
+   * holding devlock across push_event would invert the lock order and
+   * deadlock the second daemon stop.  Publish after releasing devlock.
+   */
+
+  if (err >= 0 && publish)
     {
       dev->imu_lower.push_event(dev->imu_lower.priv,
                                 &sample, sizeof(sample));
     }
-
-unlock:
-  nxmutex_unlock(&dev->devlock);
   return err;
 }
 
