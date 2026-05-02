@@ -177,7 +177,18 @@ int db_rt_start(struct db_rt_s *rt, int priority,
   rt->last_cb_error = 0;
   atomic_store(&rt->running, true);
 
-  int rc = pthread_create(&rt->thread, NULL, db_rt_thread, rt);
+  /* Explicit 4 KB stack — CONFIG_PTHREAD_STACK_DEFAULT is 2 KB on
+   * this build, which is not enough for the RT loop's dispatch path
+   * (encoder drain + observer + PID + motor ioctl + state publish
+   * have nested call frames easily reaching 2-3 KB).
+   */
+
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 4096);
+
+  int rc = pthread_create(&rt->thread, &attr, db_rt_thread, rt);
+  pthread_attr_destroy(&attr);
   if (rc != 0)
     {
       atomic_store(&rt->running, false);

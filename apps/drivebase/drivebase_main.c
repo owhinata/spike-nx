@@ -47,6 +47,7 @@
 #include "drivebase_rt.h"
 #include "drivebase_chardev_handler.h"
 #include "drivebase_imu.h"
+#include "drivebase_daemon.h"
 
 #include <pthread.h>
 #include <time.h>
@@ -1290,18 +1291,196 @@ int main(int argc, FAR char *argv[])
       return 0;
     }
 
-  /* All other verbs are wired in subsequent commits of Issue #77. */
+  /* User-facing verbs.  start/stop talk to drivebase_daemon_*; the
+   * rest go through real ioctl on /dev/drivebase, served by the
+   * kernel chardev shim from commit #2.
+   */
 
-  if (strcmp(verb, "start") == 0 || strcmp(verb, "stop") == 0 ||
-      strcmp(verb, "config") == 0 || strcmp(verb, "straight") == 0 ||
-      strcmp(verb, "turn") == 0 || strcmp(verb, "forever") == 0 ||
-      strcmp(verb, "stop-motion") == 0 || strcmp(verb, "get-state") == 0 ||
-      strcmp(verb, "set-gyro") == 0 || strcmp(verb, "jitter") == 0)
+  if (strcmp(verb, "start") == 0)
     {
-      fprintf(stderr,
-              "drivebase: '%s' not yet implemented (Issue #77 in progress)\n",
-              verb);
-      return 1;
+      uint32_t wheel_d_mm = (argc >= 3) ? (uint32_t)atoi(argv[2]) : 56;
+      uint32_t axle_t_mm  = (argc >= 4) ? (uint32_t)atoi(argv[3]) : 112;
+      int rc = drivebase_daemon_start(wheel_d_mm, axle_t_mm);
+      if (rc < 0)
+        {
+          fprintf(stderr, "drivebase start: %s\n", strerror(-rc));
+          return 1;
+        }
+      printf("drivebase: started (pid=%d wheel=%lu axle=%lu)\n",
+             rc, (unsigned long)wheel_d_mm, (unsigned long)axle_t_mm);
+      return 0;
+    }
+
+  if (strcmp(verb, "stop") == 0)
+    {
+      int rc = drivebase_daemon_stop(2000);
+      if (rc < 0 && rc != -EAGAIN)
+        {
+          fprintf(stderr, "drivebase stop: %s\n", strerror(-rc));
+          return 1;
+        }
+      printf("drivebase: %s\n",
+             rc == -EAGAIN ? "not running" : "stopped");
+      return 0;
+    }
+
+  /* All remaining verbs need an open /dev/drivebase. */
+
+  int dev = -1;
+  if (strcmp(verb, "config")     == 0 || strcmp(verb, "straight")  == 0 ||
+      strcmp(verb, "turn")       == 0 || strcmp(verb, "forever")   == 0 ||
+      strcmp(verb, "stop-motion")== 0 || strcmp(verb, "get-state") == 0 ||
+      strcmp(verb, "set-gyro")   == 0 || strcmp(verb, "jitter")    == 0)
+    {
+      dev = open(DRIVEBASE_DEVPATH, O_RDWR);
+      if (dev < 0)
+        {
+          fprintf(stderr, "open(%s): %s\n", DRIVEBASE_DEVPATH,
+                  strerror(errno));
+          return 1;
+        }
+    }
+
+  if (strcmp(verb, "config") == 0)
+    {
+      if (argc < 4)
+        {
+          fprintf(stderr, "usage: drivebase config <wheel_mm> <axle_mm>\n");
+          close(dev); return 1;
+        }
+      struct drivebase_config_s c =
+        { .wheel_diameter_mm = (uint32_t)atoi(argv[2]),
+          .axle_track_mm     = (uint32_t)atoi(argv[3]) };
+      int rc = ioctl(dev, DRIVEBASE_CONFIG, (unsigned long)&c);
+      close(dev);
+      if (rc < 0)
+        {
+          fprintf(stderr, "DRIVEBASE_CONFIG: %s\n", strerror(errno));
+          return 1;
+        }
+      return 0;
+    }
+
+  if (strcmp(verb, "straight") == 0)
+    {
+      if (argc < 3)
+        {
+          fprintf(stderr, "usage: drivebase straight <mm> [coast|brake|hold]\n");
+          close(dev); return 1;
+        }
+      struct drivebase_drive_straight_s a =
+        { .distance_mm = (int32_t)atoi(argv[2]),
+          .on_completion = DRIVEBASE_ON_COMPLETION_BRAKE };
+      if (argc >= 4)
+        {
+          if      (strcmp(argv[3], "coast") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_COAST;
+          else if (strcmp(argv[3], "brake") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+          else if (strcmp(argv[3], "hold")  == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_HOLD;
+        }
+      int rc = ioctl(dev, DRIVEBASE_DRIVE_STRAIGHT, (unsigned long)&a);
+      close(dev);
+      if (rc < 0) { fprintf(stderr, "DRIVE_STRAIGHT: %s\n", strerror(errno)); return 1; }
+      return 0;
+    }
+
+  if (strcmp(verb, "turn") == 0)
+    {
+      if (argc < 3)
+        {
+          fprintf(stderr, "usage: drivebase turn <deg>\n");
+          close(dev); return 1;
+        }
+      struct drivebase_turn_s a =
+        { .angle_deg = (int32_t)atoi(argv[2]),
+          .on_completion = DRIVEBASE_ON_COMPLETION_BRAKE };
+      int rc = ioctl(dev, DRIVEBASE_TURN, (unsigned long)&a);
+      close(dev);
+      if (rc < 0) { fprintf(stderr, "TURN: %s\n", strerror(errno)); return 1; }
+      return 0;
+    }
+
+  if (strcmp(verb, "forever") == 0)
+    {
+      if (argc < 4)
+        {
+          fprintf(stderr, "usage: drivebase forever <mmps> <dps>\n");
+          close(dev); return 1;
+        }
+      struct drivebase_drive_forever_s a =
+        { .speed_mmps    = (int32_t)atoi(argv[2]),
+          .turn_rate_dps = (int32_t)atoi(argv[3]) };
+      int rc = ioctl(dev, DRIVEBASE_DRIVE_FOREVER, (unsigned long)&a);
+      close(dev);
+      if (rc < 0) { fprintf(stderr, "DRIVE_FOREVER: %s\n", strerror(errno)); return 1; }
+      return 0;
+    }
+
+  if (strcmp(verb, "stop-motion") == 0)
+    {
+      uint8_t oc = DRIVEBASE_ON_COMPLETION_COAST;
+      if (argc >= 3)
+        {
+          if      (strcmp(argv[2], "coast") == 0) oc = DRIVEBASE_ON_COMPLETION_COAST;
+          else if (strcmp(argv[2], "brake") == 0) oc = DRIVEBASE_ON_COMPLETION_BRAKE;
+          else if (strcmp(argv[2], "hold")  == 0) oc = DRIVEBASE_ON_COMPLETION_HOLD;
+        }
+      struct drivebase_stop_s a = { .on_completion = oc };
+      int rc = ioctl(dev, DRIVEBASE_STOP, (unsigned long)&a);
+      close(dev);
+      if (rc < 0) { fprintf(stderr, "STOP: %s\n", strerror(errno)); return 1; }
+      return 0;
+    }
+
+  if (strcmp(verb, "get-state") == 0)
+    {
+      struct drivebase_state_s st;
+      int rc = ioctl(dev, DRIVEBASE_GET_STATE, (unsigned long)&st);
+      close(dev);
+      if (rc < 0) { fprintf(stderr, "GET_STATE: %s\n", strerror(errno)); return 1; }
+      printf("dist=%ld mm v=%ld mmps angle=%ld mdeg tr=%ld dps "
+             "done=%u stall=%u cmd=%u tick=%lu\n",
+             (long)st.distance_mm, (long)st.drive_speed_mmps,
+             (long)st.angle_mdeg, (long)st.turn_rate_dps,
+             st.is_done, st.is_stalled, st.active_command,
+             (unsigned long)st.tick_seq);
+      return 0;
+    }
+
+  if (strcmp(verb, "set-gyro") == 0)
+    {
+      if (argc < 3)
+        {
+          fprintf(stderr, "usage: drivebase set-gyro <none|1d|3d>\n");
+          close(dev); return 1;
+        }
+      uint8_t mode = DRIVEBASE_USE_GYRO_NONE;
+      if      (strcmp(argv[2], "none") == 0) mode = DRIVEBASE_USE_GYRO_NONE;
+      else if (strcmp(argv[2], "1d")   == 0) mode = DRIVEBASE_USE_GYRO_1D;
+      else if (strcmp(argv[2], "3d")   == 0) mode = DRIVEBASE_USE_GYRO_3D;
+      struct drivebase_set_use_gyro_s a = { .use_gyro = mode };
+      int rc = ioctl(dev, DRIVEBASE_SET_USE_GYRO, (unsigned long)&a);
+      close(dev);
+      if (rc < 0) { fprintf(stderr, "SET_USE_GYRO: %s\n", strerror(errno)); return 1; }
+      return 0;
+    }
+
+  if (strcmp(verb, "jitter") == 0)
+    {
+      struct drivebase_jitter_dump_s d;
+      int rc = ioctl(dev, DRIVEBASE_JITTER_DUMP, (unsigned long)&d);
+      close(dev);
+      if (rc < 0) { fprintf(stderr, "JITTER_DUMP: %s\n", strerror(errno)); return 1; }
+      printf("ticks=%lu max_lag=%lu us miss=%lu\n",
+             (unsigned long)d.total_ticks,
+             (unsigned long)d.max_lag_us,
+             (unsigned long)d.deadline_miss_count);
+      printf("hist <50/50-100/100-200/200-500/500-1k/1k-2k/2k-5k/5k+:\n"
+             "     %5lu %5lu %5lu %5lu %5lu %5lu %5lu %5lu\n",
+             (unsigned long)d.hist_us[0], (unsigned long)d.hist_us[1],
+             (unsigned long)d.hist_us[2], (unsigned long)d.hist_us[3],
+             (unsigned long)d.hist_us[4], (unsigned long)d.hist_us[5],
+             (unsigned long)d.hist_us[6], (unsigned long)d.hist_us[7]);
+      return 0;
     }
 
   fprintf(stderr, "drivebase: unknown verb '%s'\n", verb);
