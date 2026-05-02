@@ -42,6 +42,9 @@
 #include "drivebase_observer.h"
 #include "drivebase_control.h"
 #include "drivebase_angle.h"
+#include "drivebase_servo.h"
+
+#include <time.h>
 
 /****************************************************************************
  * Private Functions: hidden _motor test verbs (Issue #77 development only)
@@ -236,6 +239,173 @@ static int do_motor_subcmd(int argc, FAR char *argv[])
 out:
   drivebase_motor_deinit();
   return ret;
+}
+
+/****************************************************************************
+ * Private Functions: hidden _servo test verb (Issue #77 development only)
+ *
+ * Run a single side's closed loop standalone for a few seconds while
+ * the daemon FSM (commit #11) is being built up.  Each invocation
+ * does init+loop+deinit in one task; the loop drives the servo's
+ * 5 ms tick from a clock_nanosleep absolute-deadline ladder so we
+ * can observe steady-state behaviour without the full daemon yet.
+ ****************************************************************************/
+
+static uint64_t now_us(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+static int do_servo_run(enum db_side_e side, const char *target_kind,
+                        int32_t target, uint32_t duration_ms,
+                        uint8_t on_completion)
+{
+  int rc = drivebase_motor_init();
+  if (rc < 0)
+    {
+      fprintf(stderr, "drivebase_motor_init: %s\n", strerror(-rc));
+      return 1;
+    }
+
+  /* Select POS mode 2 on the side we drive so the encoder is signed
+   * int32 deg.
+   */
+
+  drivebase_motor_select_mode(side, 2);
+
+  /* Give the device ~30 ms to ack the SELECT and warm the subscriber
+   * cursor — at 1 kHz LUMP publish rate this is ~30 frames, plenty
+   * for the new mode to take effect.
+   */
+
+  usleep(30000);
+
+  struct db_servo_s servo;
+  db_servo_init(&servo, side);
+  rc = db_servo_reset(&servo, now_us());
+  if (rc < 0)
+    {
+      fprintf(stderr, "db_servo_reset: %s\n", strerror(-rc));
+      drivebase_motor_deinit();
+      return 1;
+    }
+
+  uint64_t t0 = now_us();
+  if (strcmp(target_kind, "position") == 0)
+    {
+      const struct db_traj_limits_s *dl = db_settings_distance_limits(56);
+      db_servo_position_relative(&servo, t0,
+                                 (int64_t)target * 1000,  /* deg→mdeg */
+                                 dl->v_max_mdegps,
+                                 dl->accel_mdegps2,
+                                 dl->decel_mdegps2,
+                                 on_completion);
+    }
+  else if (strcmp(target_kind, "forever") == 0)
+    {
+      const struct db_traj_limits_s *dl = db_settings_distance_limits(56);
+      db_servo_forever(&servo, t0,
+                       target * 1000 /* mdegps */,
+                       dl->accel_mdegps2);
+    }
+  else
+    {
+      db_servo_stop(&servo, t0, on_completion);
+    }
+
+  /* 5 ms tick loop.  clock_nanosleep absolute deadlines drift-free. */
+
+  struct timespec next;
+  clock_gettime(CLOCK_MONOTONIC, &next);
+  uint32_t total_ticks = duration_ms / 5;
+  uint32_t status_every = total_ticks / 10;
+  if (status_every == 0) status_every = 1;
+
+  for (uint32_t i = 0; i < total_ticks; i++)
+    {
+      next.tv_nsec += 5000000;
+      if (next.tv_nsec >= 1000000000)
+        {
+          next.tv_nsec -= 1000000000;
+          next.tv_sec  += 1;
+        }
+      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+
+      int ur = db_servo_update(&servo, now_us());
+      if (ur < 0)
+        {
+          fprintf(stderr, "tick %lu: update %s\n",
+                  (unsigned long)i, strerror(-ur));
+          break;
+        }
+
+      if ((i % status_every) == 0)
+        {
+          struct db_servo_status_s st;
+          db_servo_get_status(&servo, &st);
+          printf("t=%4lums ref_x=%lld act_x=%lld v=%ld duty=%ld "
+                 "act=%u done=%d stall=%d\n",
+                 (unsigned long)(i * 5),
+                 (long long)st.ref_x_mdeg,
+                 (long long)st.act_x_mdeg,
+                 (long)st.act_v_mdegps, (long)st.applied_duty,
+                 st.actuation, (int)st.done, (int)st.stalled);
+        }
+    }
+
+  /* Final stop unless caller wanted HOLD. */
+
+  db_servo_stop(&servo, now_us(), DRIVEBASE_ON_COMPLETION_COAST);
+  drivebase_motor_deinit();
+  return 0;
+}
+
+static int do_servo_subcmd(int argc, FAR char *argv[])
+{
+  if (argc < 1)
+    {
+      fprintf(stderr,
+              "usage: drivebase _servo {position|forever|stop} <l|r> "
+              "<value> [duration_ms] [coast|brake|hold|csmart|bsmart]\n"
+              "  position: value = relative deg target\n"
+              "  forever:  value = signed deg/s\n"
+              "  stop:     value ignored\n");
+      return 1;
+    }
+
+  if (argc < 3)
+    {
+      fprintf(stderr, "_servo %s: need <l|r> <value>\n", argv[0]);
+      return 1;
+    }
+
+  enum db_side_e side;
+  if (parse_side(argv[1], &side) < 0)
+    {
+      fprintf(stderr, "bad side: %s\n", argv[1]);
+      return 1;
+    }
+  int32_t value     = (int32_t)atol(argv[2]);
+  uint32_t duration = (argc >= 4) ? (uint32_t)atoi(argv[3]) : 1500;
+
+  uint8_t on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+  if (argc >= 5)
+    {
+      if (strcmp(argv[4], "coast") == 0)
+        on_completion = DRIVEBASE_ON_COMPLETION_COAST;
+      else if (strcmp(argv[4], "brake") == 0)
+        on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+      else if (strcmp(argv[4], "hold") == 0)
+        on_completion = DRIVEBASE_ON_COMPLETION_HOLD;
+      else if (strcmp(argv[4], "csmart") == 0)
+        on_completion = DRIVEBASE_ON_COMPLETION_COAST_SMART;
+      else if (strcmp(argv[4], "bsmart") == 0)
+        on_completion = DRIVEBASE_ON_COMPLETION_BRAKE_SMART;
+    }
+
+  return do_servo_run(side, argv[0], value, duration, on_completion);
 }
 
 /****************************************************************************
@@ -478,6 +648,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(verb, "_alg") == 0)
     {
       return do_alg_subcmd(argc - 2, &argv[2]);
+    }
+
+  if (strcmp(verb, "_servo") == 0)
+    {
+      return do_servo_subcmd(argc - 2, &argv[2]);
     }
 
   if (strcmp(verb, "help") == 0 ||

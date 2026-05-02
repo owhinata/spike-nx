@@ -22,13 +22,26 @@
  * for the same motor, which keeps anti-windup behaviour predictable.
  ****************************************************************************/
 
+/* Conservative seed for commit #6.  The 1-deg encoder resolution at
+ * 1 kHz publish makes per-tick (5 ms) Δposition either 0 or 1 deg —
+ * sample-to-sample velocity estimates jitter ±200 deg/s even under a
+ * steady physical motion of ~100 deg/s.  Enable the speed and D
+ * branches only after the observer is upgraded to a multi-sample
+ * window (commit #7 / commit #11 retune work).  For now run pure
+ * P-on-position so the closed loop converges deterministically inside
+ * the deadband without amplifying observer noise.
+ */
+
 static const struct db_servo_gains_s g_servo_gains =
 {
-  .kp_pos        = 8,        /* duty.01% per mdeg                       */
-  .ki_pos        = 5,        /* duty.01% per mdeg/s                     */
-  .kd_pos        = 60,       /* duty.01% per (mdeg/s)                   */
-  .kp_speed      = 25,       /* duty.01% per deg/s                      */
-  .ki_speed      = 15,       /* duty.01% per (deg/s)/s                  */
+  .kp_pos        = 50,       /* duty.01% per deg ; 90 deg err → 4500 = */
+                              /* 45 % PWM, comfortably above the SPIKE   */
+                              /* Medium Motor's static-friction floor of */
+                              /* ~6-8 % observed on the bench            */
+  .ki_pos        = 0,        /* TODO commit #7: re-enable once observer */
+  .kd_pos        = 0,        /*    settles                              */
+  .kp_speed      = 0,
+  .ki_speed      = 0,
   .deadband_mdeg = 1500,     /* ±1.5 deg around target                  */
   .out_min       = -10000,
   .out_max       =  10000,
