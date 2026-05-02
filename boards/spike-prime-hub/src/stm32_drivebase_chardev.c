@@ -466,8 +466,33 @@ static void db_detach_locked(FAR struct db_chardev_s *dev,
   dev->attach_filep        = NULL;
   dev->motor_l_port_idx    = DB_PORT_IDX_INVALID;
   dev->motor_r_port_idx    = DB_PORT_IDX_INVALID;
-  dev->status.daemon_attached = 0;
+
+  /* Clear status fields that describe a live daemon under the seqlock
+   * so a detached chardev reads as a zeroed snapshot.  Daemon-published
+   * fields (configured / motor_l_bound / motor_r_bound / imu_present /
+   * use_gyro / tick_*) become meaningless once we detach, and the
+   * publish/pickup timestamps stop advancing — clear them too so
+   * monitoring tools see a clean transition.  Only attach_generation
+   * (monotonic) and the cmd ring counters (queued user commands
+   * survive across re-attach) are preserved.
+   */
+
+  (void)atomic_fetch_add(&dev->status_seq, 1);             /* odd  */
+  dev->status.daemon_attached    = 0;
+  dev->status.configured         = 0;
+  dev->status.motor_l_bound      = 0;
+  dev->status.motor_r_bound      = 0;
+  dev->status.imu_present        = 0;
+  dev->status.use_gyro           = 0;
+  dev->status.tick_count         = 0;
+  dev->status.tick_overrun_count = 0;
+  dev->status.tick_max_lag_us    = 0;
+  dev->status.encoder_drop_count = 0;
+  dev->status.last_publish_us    = 0;
+  dev->status.last_pickup_us     = 0;
   dev->status.attach_generation++;
+  (void)atomic_fetch_add(&dev->status_seq, 1);             /* even */
+
   db_disarm_watchdog(dev);
 }
 
