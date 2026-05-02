@@ -21,5 +21,6 @@ CSRCS  += drivebase_servo.c
 CSRCS  += drivebase_drivebase.c
 CSRCS  += drivebase_rt.c
 CSRCS  += drivebase_chardev_handler.c
+CSRCS  += drivebase_imu.c
 
 include $(APPDIR)/Application.mk

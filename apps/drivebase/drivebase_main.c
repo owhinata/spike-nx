@@ -46,6 +46,7 @@
 #include "drivebase_drivebase.h"
 #include "drivebase_rt.h"
 #include "drivebase_chardev_handler.h"
+#include "drivebase_imu.h"
 
 #include <pthread.h>
 #include <time.h>
@@ -250,6 +251,96 @@ out:
  */
 
 static uint64_t now_us(void);
+
+/****************************************************************************
+ * Private Functions: hidden _imu test verb (Issue #77 development only)
+ *
+ * Open /dev/uorb/sensor_imu0, drain a few ticks, print bias / heading.
+ * Used to validate the integration math + bias estimator before the
+ * daemon FSM (commit #11) wires SET_USE_GYRO into the drivebase loop.
+ *
+ *   drivebase _imu calibrate          ~250 ms idle: bias should stabilise
+ *   drivebase _imu heading <ms>       integrate for <ms> and dump heading
+ ****************************************************************************/
+
+static int do_imu_subcmd(int argc, FAR char *argv[])
+{
+  if (argc < 1)
+    {
+      fprintf(stderr,
+              "usage: drivebase _imu {calibrate|heading <ms>}\n");
+      return 1;
+    }
+
+  struct db_imu_s im;
+  int rc = db_imu_open(&im);
+  if (rc < 0)
+    {
+      fprintf(stderr, "db_imu_open: %s\n", strerror(-rc));
+      return 1;
+    }
+
+  if (strcmp(argv[0], "calibrate") == 0)
+    {
+      printf("calibrating: keep robot still ~250 ms ...\n");
+      uint32_t total_ms = 250;
+      for (uint32_t t = 0; t < total_ms; t += 25)
+        {
+          usleep(25000);
+          db_imu_drain_and_update(&im, now_us());
+          printf("  t=%3lums bias_lsb=%ld samples=%lu cal=%d "
+                 "heading=%lld mdeg\n",
+                 (unsigned long)t,
+                 (long)db_imu_get_bias_z_lsb(&im),
+                 (unsigned long)im.sample_count,
+                 (int)db_imu_is_calibrated(&im),
+                 (long long)db_imu_get_heading_mdeg(&im));
+        }
+    }
+  else if (strcmp(argv[0], "heading") == 0)
+    {
+      uint32_t ms = (argc >= 2) ? (uint32_t)atoi(argv[1]) : 2000;
+
+      /* Calibrate first. */
+
+      printf("calibrating ~250 ms ...\n");
+      for (uint32_t t = 0; t < 250; t += 25)
+        {
+          usleep(25000);
+          db_imu_drain_and_update(&im, now_us());
+        }
+      printf("  bias_lsb=%ld cal=%d\n",
+             (long)db_imu_get_bias_z_lsb(&im),
+             (int)db_imu_is_calibrated(&im));
+
+      /* Reset heading after calibration so the post-cal integral
+       * starts from 0.
+       */
+
+      db_imu_set_heading_mdeg(&im, 0);
+
+      uint32_t step_ms = ms / 10;
+      if (step_ms < 25) step_ms = 25;
+      for (uint32_t t = 0; t < ms; t += step_ms)
+        {
+          usleep(step_ms * 1000);
+          db_imu_drain_and_update(&im, now_us());
+          printf("  t=%4lums heading=%lld mdeg samples=%lu\n",
+                 (unsigned long)t,
+                 (long long)db_imu_get_heading_mdeg(&im),
+                 (unsigned long)im.sample_count);
+        }
+    }
+  else
+    {
+      fprintf(stderr, "_imu: unknown subcommand '%s'\n", argv[0]);
+      db_imu_close(&im);
+      return 1;
+    }
+
+  db_imu_close(&im);
+  return 0;
+}
 
 /****************************************************************************
  * Private Functions: hidden _daemon test verb (Issue #77 development only)
@@ -1184,6 +1275,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(verb, "_daemon") == 0)
     {
       return do_daemon_subcmd(argc - 2, &argv[2]);
+    }
+
+  if (strcmp(verb, "_imu") == 0)
+    {
+      return do_imu_subcmd(argc - 2, &argv[2]);
     }
 
   if (strcmp(verb, "help") == 0 ||
