@@ -272,6 +272,16 @@ static int daemon_task_main(int argc, char *argv[])
   db_rt_stop(&d->rt, 100);
   drivebase_motor_coast(DB_SIDE_LEFT);
   drivebase_motor_coast(DB_SIDE_RIGHT);
+
+  /* Return motors to mode 0 so the per-port LUMP kthreads stop
+   * processing 1 kHz mode-2 encoder events.  Without this the
+   * lump-A / lump-B kthreads stay pinned at ~20 % CPU after every
+   * daemon stop and the scheduling pressure accumulates across
+   * multiple start/stop cycles, eventually destabilising the system.
+   */
+
+  drivebase_motor_select_mode(DB_SIDE_LEFT,  0);
+  drivebase_motor_select_mode(DB_SIDE_RIGHT, 0);
   if (d->imu_open) db_imu_close(&d->imu);
   db_chardev_handler_detach(&d->handler);
   drivebase_motor_deinit();
