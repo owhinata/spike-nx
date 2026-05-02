@@ -98,3 +98,20 @@ config LEGO_SENSOR
 		ioctls (`LEGOSENSOR_SELECT` / `LEGOSENSOR_SEND`) gated by
 		per-port `LEGOSENSOR_CLAIM` arbitration.
 
+config BOARD_DRIVEBASE_CHARDEV
+	bool "/dev/drivebase kernel chardev for the userspace drivebase daemon"
+	default n
+	depends on LEGO_PORT
+	depends on SCHED_LPWORK
+	---help---
+		Kernel-side thin shim that exposes /dev/drivebase to userspace
+		(Issue #77).  It owns the cmd_ring (MPSC kernel-resident SPSC
+		view from the daemon side), the state double-buffer, the status
+		seqlock, and the LPWORK stale-daemon watchdog that triggers an
+		emergency motor coast if the daemon stops publishing for >50 ms.
+
+		Enable this for boards that run the apps/drivebase daemon.  The
+		device node exists from boot regardless of daemon state — user
+		tools can poll DRIVEBASE_GET_STATUS at any time, while the
+		motion ioctls return -ENOTCONN until the daemon attaches.
+

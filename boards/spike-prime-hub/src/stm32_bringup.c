@@ -366,5 +366,15 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_BOARD_DRIVEBASE_CHARDEV
+  ret = stm32_drivebase_chardev_register();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "ERROR: stm32_drivebase_chardev_register() failed: %d\n",
+             ret);
+    }
+#endif
+
   return ret;
 }

@@ -324,6 +324,28 @@ int legosensor_uorb_register(void);
  */
 
 int stm32_legoport_pwm_initialize(void);
+
+/* Per-port H-bridge actuation primitives.  Used by board_legosensor.h
+ * dispatch (LEGOSENSOR_SET_PWM / LEGOSENSOR_MOTOR_*_{COAST,BRAKE}) and
+ * by the /dev/drivebase emergency-stop fast path (Issue #77).  `idx` is
+ * 0..5 (port A..F).
+ */
+
+int stm32_legoport_pwm_set_duty(int idx, int16_t duty);
+int stm32_legoport_pwm_coast(int idx);
+int stm32_legoport_pwm_brake(int idx);
+#endif
+
+#ifdef CONFIG_BOARD_DRIVEBASE_CHARDEV
+/* /dev/drivebase kernel-side thin chardev (Issue #77).  Registers the
+ * device node and brings up the cmd_ring / state_db / status / watchdog
+ * machinery used by the userspace drivebase daemon (apps/drivebase/).
+ * Daemon attach happens lazily through the DRIVEBASE_DAEMON_ATTACH
+ * ioctl after this returns; the chardev exists from board boot so user
+ * tools can poll DRIVEBASE_GET_STATUS while the daemon is offline.
+ */
+
+int stm32_drivebase_chardev_register(void);
 #endif
 
 #endif /* __ASSEMBLY__ */

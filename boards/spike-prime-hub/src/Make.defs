@@ -73,6 +73,10 @@ ifeq ($(CONFIG_LEGO_SENSOR),y)
 CSRCS += legosensor_uorb.c
 endif
 
+ifeq ($(CONFIG_BOARD_DRIVEBASE_CHARDEV),y)
+CSRCS += stm32_drivebase_chardev.c
+endif
+
 ifeq ($(CONFIG_SCHED_HPWORK),y)
 CSRCS += stm32_hpwork_softdog.c
 endif
