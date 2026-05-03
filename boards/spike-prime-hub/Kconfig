@@ -2,6 +2,18 @@
 # Board-specific Kconfig for SPIKE Prime Hub
 #
 
+config BOARD_SPIKE_PRIME_HUB
+	bool
+	default y
+	---help---
+		Always-on identifier for the SPIKE Prime Hub board.  The
+		upstream NuttX layout uses CONFIG_ARCH_BOARD_CUSTOM=y +
+		CONFIG_ARCH_BOARD_CUSTOM_NAME="spike-prime-hub" for this
+		board, which leaves no preprocessor-checkable symbol that
+		identifies the hub.  This bool fills that gap so stm32
+		common files (e.g. stm32_allocateheap.c, stm32_mpuinit.c)
+		can carry a guarded SPIKE Prime Hub code path.
+
 config SPIKE_SOUND_PCM_BUFSAMPLES
 	int "PCM DMA buffer size (uint16_t samples)"
 	default 1024

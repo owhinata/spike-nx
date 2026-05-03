@@ -24,20 +24,29 @@ Designed for SPIKE Prime Hub (STM32F413VG, 1.5 MB Flash / 320 KB RAM).
 
 `CONFIG_NUTTX_USERSPACE = 0x08080000`
 
-### SRAM (at 0x20000000, 320 KB)
+### SRAM (at 0x20000000, 320 KB) — post Issue #98
 
 | Region | Range | Size | Purpose |
 |---|---|---|---|
-| `ksram` | `0x20000000..0x20010000` | 64K | Kernel .data/.bss (linker only) |
-| `usram` | `0x20010000..0x20020000` | 64K | User .data/.bss (64K aligned) |
-| `xsram` | `0x20020000..0x20050000` | 192K | Runtime heap (kernel heap + user heap) |
+| `ksram` | `0x20000000..0x20010000` | 64K | Kernel .data/.bss + idle stack (linker only); ksram tail above `g_idle_topstack` is reused as kernel heap |
+| _kheap slot_ | `0x20010000..0x20020000` | 64K | Runtime kernel heap slot (NOT in the linker MEMORY block; `up_allocate_kheap` returns `g_idle_topstack..0x20020000` which merges the ksram tail with this slot into a single contiguous kernel heap) |
+| `usram` | `0x20020000..0x20040000` | 128K | User .data/.bss + heap tail. 128K-aligned. `stm32_mpuinitialize` exposes the full 128 KB as a single MPU region so the .bss / heap boundary can slide |
+| `xsram` | `0x20040000..0x20050000` | 64K | User heap top portion (64K-aligned MPU region added by `up_allocate_heap` so the user heap is one contiguous span from `us_bssend` to SRAM1_END) |
 
-`CONFIG_MM_KERNEL_HEAPSIZE = 32768` (lower bound; `stm32_allocateheap.c` partitions the remainder at runtime).
+`CONFIG_MM_KERNEL_HEAPSIZE = 32768` (lower bound; the dedicated 64 KB slot satisfies it even if the ksram tail were ever consumed entirely by the idle stack — asserted at compile time in `stm32_allocateheap.c`).
 
-`SRAM1_END = 0x20050000` is not a power-of-two boundary, so rounding the largest MPU-protectable user heap (128 K) down to the next 2^n boundary leaves roughly a 60 K **tail region** unused. The two settings below recover it (see [NuttX-side fixes](#required-nuttx-side-fixes) for details):
+Both heaps use **sliding boundaries**:
+
+- **Kernel heap** = `g_idle_topstack..0x20020000` (~96 KB). Dedicated 64 KB slot plus the ksram tail above the idle stack.
+- **User heap** = `us_bssend..0x20050000` (~136 KB at the current `.bss = 56 KB`). The MPU usram region (128 KB) covers the in-usram portion; the MPU xsram-top region (64 KB) covers the rest. Both regions are user RW, so single allocations crossing the `0x20040000` boundary are transparent.
+
+User `.data + .bss` budget is **128 KB** (was 64 KB before #98). Link-time `ASSERT(_ebss <= 0x20040000)` in `user-space.ld` enforces the boundary.
+
+Required CONFIGs:
 
 - `CONFIG_MM_REGIONS=2`
-- `CONFIG_STM32_CCMEXCLUDE=y` (the F413 has no CCM SRAM, but this declaration repurposes the second region slot for tail recovery)
+- `CONFIG_STM32_CCMEXCLUDE=y` (the F413 has no CCM SRAM)
+- `CONFIG_BOARD_SPIKE_PRIME_HUB=y` (always-on identifier injected into stm32 common code so the SPIKE-only heap path is selectable from a preprocessor symbol)
 
 ## Implementation files
 
@@ -76,13 +85,13 @@ CONFIG_SYSTEM_NSH_STACKSIZE=4096
 
 ## Required NuttX-side fixes
 
-The owhinata fork (`f413-support-12.13.0` branch) carries these three commits:
+The owhinata fork (`f413-support-12.13.0` branch) carries these commits:
 
 | Commit | Contents |
 |---|---|
 | `97716f5a2a` | `arch/armv7-m`: preserve the caller's `r11` across `arm_dispatch_syscall` (the BUILD_PROTECTED syscall path was breaking AAPCS) |
-| `b35c473a58` | `arch/stm32`: when `SRAM1_END` is not a power-of-two boundary, the MPU-aligned user heap loses its tail; recover it through an extra `arm_addregion()` (requires `CONFIG_MM_REGIONS>=2`) |
 | `7c116a6de2` | `arch/arm`: disable `fork()` support under BUILD_PROTECTED (kernel/user stacks cannot be shared across the boundary) |
+| Issue #98 (post-`a277a13`) | `arch/stm32` (this branch): SPIKE Prime Hub-specific heap path in `stm32_allocateheap.c` + `stm32_mpuinit.c` — pinned to `CONFIG_BOARD_SPIKE_PRIME_HUB`. The earlier `b35c473a58` (tail-region recovery via `arm_addregion`) is **superseded** by this path; the log2 alignment loop and the tail-add block are removed. The new path returns a single contiguous user heap from `us_bssend` to `SRAM1_END`, hardcodes a 128 KB MPU region for usram, and uses `g_idle_topstack` as the kernel heap base so the ksram tail is reclaimed. |
 
 ## Related changes
 
@@ -110,7 +119,18 @@ dfu-util -d 0694:0008 -a 0 -s 0x08008000 -D nuttx/nuttx.bin
 dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx/nuttx_user.bin
 ```
 
-## Hardware verification (2026-04-18, commit `55347a8`)
+## Hardware verification (2026-05-03, post Issue #98)
+
+| Item | Result |
+|---|---|
+| NSH boot (USB CDC) | ✅ `NuttShell (NSH) NuttX-12.13.0` prompt reached |
+| `free` Umem | ✅ 138 856 B (~136 K) — `us_bssend..0x20050000` sliding |
+| `free` Kmem | ✅ 98 648 B (~96 K) — `g_idle_topstack..0x20020000` sliding |
+| `heap 0x1f000` (124 KB single alloc, MPU boundary crossing) | ✅ allocator-served from one contiguous region |
+| LSM6DSL boot init (Issue #95 regression check) | ✅ no `-110 ETIMEDOUT` |
+| User `.data + .bss` budget | ✅ 128 KB usram (was 64 KB) — link-time `ASSERT(_ebss <= 0x20040000)` enforces the boundary |
+
+## Hardware verification (2026-04-18, commit `55347a8`, pre Issue #98)
 
 | Item | Result |
 |---|---|

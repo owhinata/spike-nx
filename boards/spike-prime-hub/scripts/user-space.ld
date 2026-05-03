@@ -111,3 +111,12 @@ SECTIONS
     .debug_pubnames 0 : { *(.debug_pubnames) }
     .debug_aranges 0 : { *(.debug_aranges) }
 }
+
+/* Issue #98: usram is 128 KB at 0x20020000..0x20040000.  Fail the link if
+ * .data/.bss escape that range so the runtime never has to deal with a
+ * us_bssend outside the MPU-exposed usram region.
+ */
+ASSERT(_sdata >= 0x20020000,
+       "user .data starts before usram base 0x20020000")
+ASSERT(_ebss  <= 0x20040000,
+       "user .data/.bss exceeds 128 KB usram (0x20020000..0x20040000)")

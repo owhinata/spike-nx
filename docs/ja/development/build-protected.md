@@ -24,20 +24,29 @@ SPIKE Prime Hub (STM32F413VG, Flash 1.5MB / RAM 320KB) 用に設計:
 
 `CONFIG_NUTTX_USERSPACE = 0x08080000`
 
-### SRAM (0x20000000, 320KB)
+### SRAM (0x20000000, 320KB) — Issue #98 後
 
 | 区画 | 範囲 | サイズ | 用途 |
 |---|---|---|---|
-| `ksram` | `0x20000000..0x20010000` | 64K | kernel .data/.bss (linker placement only) |
-| `usram` | `0x20010000..0x20020000` | 64K | user .data/.bss (64K 境界整列) |
-| `xsram` | `0x20020000..0x20050000` | 192K | runtime heap (kernel heap + user heap) |
+| `ksram` | `0x20000000..0x20010000` | 64K | kernel .data/.bss + idle stack (linker placement only)。`g_idle_topstack` より上の tail は kernel heap として再利用 |
+| _kheap slot_ | `0x20010000..0x20020000` | 64K | runtime kernel heap スロット (linker MEMORY ブロック非掲載)。`up_allocate_kheap` は `g_idle_topstack..0x20020000` を返し、ksram tail とこの slot を 1 つの連続 kernel heap として統合する |
+| `usram` | `0x20020000..0x20040000` | 128K | user .data/.bss + heap tail。128K 整列。`stm32_mpuinitialize` で全 128 KB を 1 個の MPU region として展開し、 .bss / heap 境界を sliding にできる |
+| `xsram` | `0x20040000..0x20050000` | 64K | user heap top portion (64K-aligned MPU region を `up_allocate_heap` で追加することで `us_bssend` から SRAM1_END まで 1 連続の user heap になる) |
 
-`CONFIG_MM_KERNEL_HEAPSIZE = 32768` (下限値; 実行時は `stm32_allocateheap.c` が残りを自動分割)
+`CONFIG_MM_KERNEL_HEAPSIZE = 32768` (下限値; 専用 64 KB スロット単独でこの floor を満たす — `stm32_allocateheap.c` で compile-time `#error` チェック)
 
-`SRAM1_END = 0x20050000` は 2^n 境界ではないため、MPU で保護できる最大 user heap 領域 (128K) を 2^n 境界に切り下げると 60K 程度の **末端 tail 領域** が宙に浮く。これを救済するために以下の 2 設定を有効化している (詳細は [NuttX 側の必須修正](#nuttx) 参照):
+両 heap が **sliding boundary** で動作:
+
+- **Kernel heap** = `g_idle_topstack..0x20020000` (~96 KB)。専用 64 KB スロット + idle stack 上の ksram tail。
+- **User heap** = `us_bssend..0x20050000` (現状 `.bss = 56 KB` 時 ~136 KB)。MPU usram region (128 KB) が usram 内部分を、 MPU xsram top region (64 KB) が残りをカバー。 両 region とも user RW なので `0x20040000` 境界跨ぎの単発 alloc も透過。
+
+User `.data + .bss` 予算は **128 KB** (Issue #98 前は 64 KB)。`user-space.ld` の link-time `ASSERT(_ebss <= 0x20040000)` で境界を強制。
+
+必須 CONFIG:
 
 - `CONFIG_MM_REGIONS=2`
-- `CONFIG_STM32_CCMEXCLUDE=y` (F413 に CCM SRAM は無いが、第 2 region を tail 救済に転用するため宣言)
+- `CONFIG_STM32_CCMEXCLUDE=y` (F413 に CCM SRAM は無い)
+- `CONFIG_BOARD_SPIKE_PRIME_HUB=y` (stm32 共通コードに injection する SPIKE 識別子。preprocessor から SPIKE 専用 heap 経路を選択するため)
 
 ## 実装ファイル
 
@@ -76,13 +85,13 @@ CONFIG_SYSTEM_NSH_STACKSIZE=4096
 
 ## NuttX 側の必須修正
 
-owhinata fork の `f413-support-12.13.0` ブランチに以下 3 commit を含む:
+owhinata fork の `f413-support-12.13.0` ブランチに以下を含む:
 
 | Commit | 内容 |
 |---|---|
 | `97716f5a2a` | `arch/armv7-m`: `arm_dispatch_syscall` で caller の r11 を保存 (BUILD_PROTECTED の syscall 経路で AAPCS が壊れていた) |
-| `b35c473a58` | `arch/stm32`: `SRAM1_END` が 2^n 境界でない場合に MPU-aligned user heap が末端を取りこぼす問題を `arm_addregion()` の追加 region で救済 (要 `CONFIG_MM_REGIONS>=2`) |
 | `7c116a6de2` | `arch/arm`: BUILD_PROTECTED 構成で fork サポートを無効化 (kernel/user 境界で stack 共有できないため) |
+| Issue #98 (post-`a277a13`) | `arch/stm32` (本 fork): `stm32_allocateheap.c` + `stm32_mpuinit.c` に SPIKE Prime Hub 専用 heap 経路を追加 (`CONFIG_BOARD_SPIKE_PRIME_HUB` 限定)。 旧 `b35c473a58` (`arm_addregion()` による tail 救済) は本経路に**置き換え済**で、 log2 alignment ループと tail-add ブロックは削除。 新経路は `us_bssend..SRAM1_END` を 1 連続 user heap として返し、 usram の MPU region を 128 KB 固定で発行、 kernel heap ベースを `g_idle_topstack` にして ksram tail を回収する。 |
 
 ## 移行に伴う他の変更
 
@@ -110,7 +119,18 @@ dfu-util -d 0694:0008 -a 0 -s 0x08008000 -D nuttx/nuttx.bin
 dfu-util -d 0694:0008 -a 0 -s 0x08080000:leave -D nuttx/nuttx_user.bin
 ```
 
-## 実機動作確認 (2026-04-18, commit `55347a8`)
+## 実機動作確認 (2026-05-03, Issue #98 後)
+
+| 項目 | 結果 |
+|---|---|
+| NSH 起動 (USB CDC) | ✅ `NuttShell (NSH) NuttX-12.13.0` プロンプト到達 |
+| `free` の Umem | ✅ 138 856 B (~136 K) — `us_bssend..0x20050000` sliding |
+| `free` の Kmem | ✅ 98 648 B (~96 K) — `g_idle_topstack..0x20020000` sliding |
+| `heap 0x1f000` (124 KB 単発 alloc、 MPU 境界跨ぎ) | ✅ allocator から 1 連続 region として serve |
+| LSM6DSL boot init (Issue #95 regression check) | ✅ `-110 ETIMEDOUT` 出ず |
+| User `.data + .bss` budget | ✅ 128 KB usram (旧 64 KB) — `user-space.ld` の link-time `ASSERT(_ebss <= 0x20040000)` で境界強制 |
+
+## 実機動作確認 (2026-04-18, commit `55347a8`, Issue #98 前)
 
 | 項目 | 結果 |
 |---|---|
