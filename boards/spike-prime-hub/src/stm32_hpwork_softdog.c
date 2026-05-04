@@ -110,18 +110,19 @@ static void hpwork_softdog_check(wdparm_t arg)
 
   if (age_ms > HPWORK_TIMEOUT_MS)
     {
-      /* HPWORK queue stuck.  Surface the diagnostic line, then panic.
+      /* HPWORK queue stuck.  Surface a brief diagnostic line, persist a
+       * BCRUMB so the next boot can identify the cause, then panic.
        * `syslog(LOG_EMERG, ...)` reaches RAMLOG (NONBLOCKING) without
-       * blocking on USB CDC, so the message is captured even when the
-       * console is wedged.  PANIC() then dumps the kernel state and
-       * resets per CONFIG_BOARD_RESET_ON_ASSERT.
+       * blocking on USB CDC.
        */
 
       syslog(LOG_EMERG,
-             "HPWORK softdog FIRE: hb=%lu, age=%lu ms (timeout=%lu ms)\n",
+             "HPWORK softdog FIRE: hb=%lu, age=%lu ms\n",
              (unsigned long)g_hb_count,
-             (unsigned long)age_ms,
-             (unsigned long)HPWORK_TIMEOUT_MS);
+             (unsigned long)age_ms);
+
+      stm32_bcrumb_set_pre_reason(BCRUMB_PRE_SOFTDOG, age_ms);
+      stm32_bcrumb_set_marker(0, g_hb_count);
       PANIC();
     }
 
