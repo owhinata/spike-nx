@@ -94,6 +94,19 @@ SECTIONS
         _ebss = ABSOLUTE(.);
     } > ksram
 
+    /* Persistent RAMLOG ring buffer.  NOLOAD = no flash image, so nothing
+     * is copied into this region at boot, and it is outside [_sbss, _ebss]
+     * so __start does not zero it.  RAMLOG itself only clears the buffer
+     * when the magic does not match (drivers/syslog/ramlog.c:379), which
+     * means the previous boot's syslog content survives MCU soft-reset
+     * (NVIC SystemReset / IWDG / HardFault → board_reset).  CONFIG_RAMLOG
+     * _BUFFER_SECTION places g_sysbuffer here via locate_data().
+     */
+
+    .ksram_ramlog (NOLOAD) : ALIGN(4) {
+        KEEP(*(.ksram_ramlog))
+    } > ksram_ramlog
+
     /* Stabs debugging sections. */
 
     .stab 0 : { *(.stab) }

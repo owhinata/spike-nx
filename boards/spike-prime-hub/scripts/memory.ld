@@ -56,6 +56,21 @@ MEMORY
   xflash (rx)      : ORIGIN = 0x08100000, LENGTH = 512K
 
   ksram (rwx)      : ORIGIN = 0x20000000, LENGTH = 64K
+
+  /* Persistent (NOLOAD, never zeroed) region for the RAMLOG ring buffer.
+   * Carved from the top of the dynamic kernel-heap-slot, just below the
+   * 64 byte breadcrumb area at 0x2001FFC0.  Issue #100 — lets `dmesg`
+   * after a soft-reset show the syslog lines emitted just before
+   * `PANIC()` (e.g. "HPWORK softdog FIRE: hb=… age=… ms" and the assert
+   * backtrace produced via `_alert()` → `syslog(LOG_ALERT, ...)`).
+   *   ksram_ramlog : 0x2001BFC0..0x2001FFC0  (16 KB)
+   *   bcrumb       : 0x2001FFC0..0x20020000  (   64 B, fixed-address access)
+   * up_allocate_kheap() subtracts 16448 B so the allocator never overwrites
+   * either region.
+   */
+
+  ksram_ramlog (rw): ORIGIN = 0x2001BFC0, LENGTH = 0x4000
+
   usram (rwx)      : ORIGIN = 0x20020000, LENGTH = 128K
   xsram (rwx)      : ORIGIN = 0x20040000, LENGTH = 64K
 }
