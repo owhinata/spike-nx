@@ -147,7 +147,7 @@ Compresses the pybricks **relative** priority order into the 0x80–0xE0 band (b
 
 | NVIC value | Level | Peripheral | pybricks mapping | Configured in |
 |---|---|---|---|---|
-| **0x60** | **6** | **LUMP UART (HIPRI direct vector)** | base=0/1 → preempt=2 | **Issue #100 case D, `stm32_bringup.c` (step 1.5)** |
+| **0x00** | **0** | **LUMP UART (HIPRI direct vector)** | base=0/1 → preempt=0 (matched) | **Issue #100 case D, `stm32_bringup.c` (step 1.5)** |
 | 0x80 | 8 | TIM9 tickless tick (OS only) | (pybricks SysTick 0xF0) | NuttX default (kept) |
 | ~~0x90~~ | ~~9~~ | ~~LUMP UART (legacy Issue #43 reservation)~~ | — | moved to 0x60 in Issue #100 case D |
 | **0xA0** | **10** | **Bluetooth UART (USART2 + DMA1 S6/S7)** | base=1 | **pending Issue #47** |

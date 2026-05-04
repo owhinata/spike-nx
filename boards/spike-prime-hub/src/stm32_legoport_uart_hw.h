@@ -123,7 +123,7 @@ int lump_uart_write(int port, const uint8_t *buf, size_t len,
 
 void lump_uart_flush_rx(int port);
 
-/* Issue #100 案D: install LUMP UART HIPRI direct vectors via
+/* Issue #100 case D: install LUMP UART HIPRI direct vectors via
  * arm_ramvec_attach().  MUST be called once from stm32_bringup() before
  * any port opens.  Returns 0 on success or a negative errno from
  * arm_ramvec_attach() on failure.

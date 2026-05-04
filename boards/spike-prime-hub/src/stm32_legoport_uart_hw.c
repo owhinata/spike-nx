@@ -48,7 +48,7 @@
 
 #ifdef CONFIG_LEGO_LUMP
 
-/* Issue #100 案D: this driver runs the LUMP UART ISRs at NVIC priority
+/* Issue #100 case D: this driver runs the LUMP UART ISRs at NVIC priority
  * NVIC_SYSH_HIGH_PRIORITY (= 0x60), above BASEPRI 0x80.  HIPRI ISRs
  * are NOT routed through arm_doirq() / irq_dispatch() — they MUST be
  * installed via arm_ramvec_attach() which requires CONFIG_ARCH_RAMVECTORS.
@@ -162,7 +162,7 @@ static inline uintptr_t lump_uart_reg(int port, uint32_t offset)
 }
 
 /****************************************************************************
- * HIPRI Direct-Vector ISRs (Issue #100 案D)
+ * HIPRI Direct-Vector ISRs (Issue #100 case D)
  ****************************************************************************/
 
 /* Per-port direct vector handler core.  Runs at NVIC priority
@@ -277,7 +277,7 @@ int lump_uart_open(int port, uint32_t baud)
 
   nxsem_init(&st->rx_sem, 0, 0);
 
-  /* Issue #100 案D: HIPRI direct vector is installed once at boot in
+  /* Issue #100 case D: HIPRI direct vector is installed once at boot in
    * lump_uart_hipri_init().  Per-port open() no longer touches
    * irq_attach() — only NVIC enable is needed.
    */
@@ -287,7 +287,7 @@ int lump_uart_open(int port, uint32_t baud)
   putreg32(USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE,
            d->usart_base + STM32_USART_CR1_OFFSET);
 
-  /* Issue #100 案D: HIPRI direct vector is permanent in the RAM vector
+  /* Issue #100 case D: HIPRI direct vector is permanent in the RAM vector
    * table.  Any stale USART RXNE/ORE latch from a previous close, or a
    * stale NVIC pending bit, would let the very next ISR push garbage
    * into the freshly-reset ring.  Drain SR/DR once and clear the NVIC
@@ -350,7 +350,7 @@ int lump_uart_set_baud(int port, uint32_t baud)
       return -EBADF;
     }
 
-  /* Issue #100 案D: HIPRI direct ISR is NOT blocked by BASEPRI
+  /* Issue #100 case D: HIPRI direct ISR is NOT blocked by BASEPRI
    * critical sections.  Mask the LUMP UART IRQ at NVIC ISER while the
    * UE/BRR/UE sequence runs, otherwise an in-flight ISR could observe
    * an inconsistent CR1/BRR pair or push a half-shifted byte into the
@@ -541,7 +541,7 @@ void lump_uart_flush_rx(int port)
   struct lump_uart_state_s     *st  = &g_lump_uart[port];
   const struct lump_uart_hw_desc_s *d = &g_lump_uart_hw_desc[port];
 
-  /* Issue #100 案D: HIPRI direct ISR vs. BASEPRI critical_section —
+  /* Issue #100 case D: HIPRI direct ISR vs. BASEPRI critical_section —
    * the latter does NOT mask priority 0x60.  Mask the UART IRQ at
    * NVIC ISER instead so the ring tail/head can be cleared atomically
    * with respect to the producer.

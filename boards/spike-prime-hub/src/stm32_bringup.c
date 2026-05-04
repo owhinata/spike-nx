@@ -83,26 +83,25 @@ int stm32_bringup(void)
   up_prioritize_irq(STM32_IRQ_SYSTICK, NVIC_SYSH_PRIORITY_MIN);
 
 #ifdef CONFIG_LEGO_LUMP
-  /* step 1.5: LUMP UART (Issue #43) — UART4/5/7/8/9/10 at 0x90, the
-   * reserved slot directly below the OS tick (0x80) and above
-   * Bluetooth (0xA0).  pybricks puts these IRQs at preempt=0 (highest)
-   * so RX byte servicing is not held off; we compress that into 0x90
-   * within the BASEPRI band so NuttX-API calls from these ISRs remain
-   * safe.  All six are co-equal — none preempts any other.
-   */
-  /* Issue #100 案D: HIPRI direct vectors (NVIC_SYSH_HIGH_PRIORITY = 0x60).
-   * Above BASEPRI 0x80 — these ISRs are NOT blocked by NuttX
-   * enter_critical_section().  Vectors are installed by
-   * lump_uart_hipri_init() below; the per-port handlers stay strictly
-   * OS-free (drain + ring push), so HIPRI safety is preserved.
+  /* step 1.5: LUMP UART (Issue #43, #100 case D) — UART4/5/7/8/9/10 at
+   * NVIC_SYSH_PRIORITY_MAX (= 0x00, preempt 0, the highest).  This
+   * matches pybricks, which also runs LUMP UART at preempt 0 so RX
+   * byte servicing is never held off.  All six ports are co-equal —
+   * none preempts any other.
+   *
+   * NuttX HIPRI direct vectors are installed by lump_uart_hipri_init()
+   * below.  The per-port handlers bypass arm_doirq() / irq_dispatch()
+   * and stay strictly OS-free (drain + ring push), so even though
+   * they sit above BASEPRI 0x80 — and above SVCall (0x70) — they
+   * cannot corrupt OS state.
    */
 
-  up_prioritize_irq(STM32_IRQ_UART4,  NVIC_SYSH_HIGH_PRIORITY);
-  up_prioritize_irq(STM32_IRQ_UART5,  NVIC_SYSH_HIGH_PRIORITY);
-  up_prioritize_irq(STM32_IRQ_UART7,  NVIC_SYSH_HIGH_PRIORITY);
-  up_prioritize_irq(STM32_IRQ_UART8,  NVIC_SYSH_HIGH_PRIORITY);
-  up_prioritize_irq(STM32_IRQ_UART9,  NVIC_SYSH_HIGH_PRIORITY);
-  up_prioritize_irq(STM32_IRQ_UART10, NVIC_SYSH_HIGH_PRIORITY);
+  up_prioritize_irq(STM32_IRQ_UART4,  NVIC_SYSH_PRIORITY_MAX);
+  up_prioritize_irq(STM32_IRQ_UART5,  NVIC_SYSH_PRIORITY_MAX);
+  up_prioritize_irq(STM32_IRQ_UART7,  NVIC_SYSH_PRIORITY_MAX);
+  up_prioritize_irq(STM32_IRQ_UART8,  NVIC_SYSH_PRIORITY_MAX);
+  up_prioritize_irq(STM32_IRQ_UART9,  NVIC_SYSH_PRIORITY_MAX);
+  up_prioritize_irq(STM32_IRQ_UART10, NVIC_SYSH_PRIORITY_MAX);
 
   ret = lump_uart_hipri_init();
   if (ret < 0)
