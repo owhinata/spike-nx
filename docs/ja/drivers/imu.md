@@ -106,10 +106,29 @@ boards/spike-prime-hub/include/board_lsm6dsl.h   - ボードローカル ioctl (
 ```
 CONFIG_STM32_I2C2=y
 CONFIG_I2C=y
+CONFIG_I2C_RESET=y
 CONFIG_SCHED_HPWORK=y
 CONFIG_SENSORS=y
 CONFIG_APP_IMU=y
 ```
+
+### 起動時の I2C バスリカバリ
+
+WDOG / assert / crash で MCU が soft-reset した直後、LSM6DS3TR-C が前回トランザクションの途中で残り SDA を low に握ったまま wedge することがある。SPIKE Prime Hub には IMU 専用の電源制御 GPIO が無く (LSM6DSL VDD/VDDIO は常時給電)、ハードウェア電源リセットは不可能なため、`stm32_lsm6dsl.c` で起動時に毎回 I2C2 のバスリカバリを実行している。
+
+シーケンス (1 attempt 分):
+
+1. `stm32_i2cbus_initialize(2)` で I2C2 ハンドル取得
+2. `I2C_RESET(i2c)` (NuttX `stm32_i2c_reset`) で SCL/SDA を一時 GPIO open-drain 化 → SCL を最大 10 clock toggle (SDA HIGH まで) → START + STOP で slave state machine リセット → I2C ペリフェラル再 init
+   - 失敗時 (SDA が解放されない / clock stretch が無限) は bus が deinit + GPIO 化のまま残るため、`stm32_i2cbus_uninitialize` → `stm32_i2cbus_initialize` で確実に復元する
+3. `lsm6dsl_register_uorb()` を呼び出し
+   - `lsm6dsl_hw_init()` 冒頭で WHO_AM_I (`0x0F` の値が `0x6A`) を pre-flight check し、不一致なら早期に `-ENODEV` を返してリトライへ早期遷移
+   - SW_RESET 後の poll は 50 回 (50 ms) 上限、完了後 10 ms の保守的 settle delay
+4. 失敗したら 10 ms sleep して 1. に戻る (最大 3 attempts)
+
+成功時は `IMU: LSM6DS3TR-C registered on I2C2 addr=0x6a (attempt N)` が syslog に出る (`N` は 0 オリジン、通常 0)。リトライ中の失敗は `snwarn`、3 attempts 全て失敗で `snerr` ログを残して諦め、`/dev/uorb/sensor_imu0` は登録されない。実機運用上、3 attempt 内で復旧しない場合は battery 完全 OFF が必要 (chip 内部 state も腐るケース)。
+
+参考: pybricks も同等の bus recovery を I2C2 init 時に毎回実行している (`HAL_I2C_MspInit()`、SCL 10 clock toggle)。NuttX 標準 `stm32_i2c_reset()` は open-drain 化と START/STOP まで自動で行うため、pybricks より丁寧な実装。
 
 ## 7. センサーフュージョン
 

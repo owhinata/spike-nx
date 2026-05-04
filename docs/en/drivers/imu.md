@@ -112,10 +112,29 @@ reconfiguring.
 ```
 CONFIG_STM32_I2C2=y
 CONFIG_I2C=y
+CONFIG_I2C_RESET=y
 CONFIG_SCHED_HPWORK=y
 CONFIG_SENSORS=y
 CONFIG_APP_IMU=y
 ```
+
+### Boot-time I2C bus recovery
+
+After a WDOG / assert / crash soft-reset of the MCU, the LSM6DS3TR-C may be left mid-transaction with SDA stuck low, wedging the I2C2 bus. The SPIKE Prime Hub has no IMU-specific power-control GPIO (LSM6DSL VDD/VDDIO is always powered), so a hardware power-cycle is not possible. Instead, `stm32_lsm6dsl.c` performs an I2C2 bus recovery on every boot.
+
+Sequence (one attempt):
+
+1. Acquire the I2C2 handle via `stm32_i2cbus_initialize(2)`.
+2. Call `I2C_RESET(i2c)` (NuttX `stm32_i2c_reset`) — temporarily reconfigures SCL/SDA as open-drain GPIO, toggles SCL up to 10 cycles until SDA goes high, generates START + STOP to reset the slave state machine, then re-initializes the I2C peripheral.
+   - On failure (SDA never released, or clock stretch never relaxes) the bus is left deinitialized with the pins still in GPIO mode. Restore it with `stm32_i2cbus_uninitialize` followed by `stm32_i2cbus_initialize` so the next attempt starts from a clean peripheral state.
+3. Call `lsm6dsl_register_uorb()`.
+   - `lsm6dsl_hw_init()` does a pre-flight WHO_AM_I read (register `0x0F`, expected `0x6A`) and returns `-ENODEV` early on mismatch so the retry kicks in quickly instead of timing out inside the SW_RESET poll.
+   - The SW_RESET completion poll is capped at 50 iterations (~50 ms), followed by a defensive 10 ms settle delay before the next register write.
+4. On failure, sleep 10 ms and loop back to step 1 (max 3 attempts).
+
+A successful registration logs `IMU: LSM6DS3TR-C registered on I2C2 addr=0x6a (attempt N)` (zero-origin, normally `N=0`). Retry-loop failures emit `snwarn`; giving up after 3 attempts emits `snerr` and `/dev/uorb/sensor_imu0` is not registered. In practice, if the chip cannot be revived within 3 attempts, the chip's internal state is also corrupted and a full battery cut-off is required.
+
+For reference, pybricks performs the same bus recovery on every I2C2 init in `HAL_I2C_MspInit()` (10 SCL clock toggles). NuttX's standard `stm32_i2c_reset()` is strictly more thorough — it adds open-drain pin reconfig and a START/STOP transition.
 
 ## 7. Sensor Fusion
 

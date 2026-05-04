@@ -727,6 +727,24 @@ static int lsm6dsl_hw_init(FAR struct lsm6dsl_dev_s *dev)
 {
   int err;
   uint8_t val;
+  int i;
+
+  /* Pre-flight WHO_AM_I read.  If the chip is wedged on the I2C bus
+   * (typically SDA stuck low after a soft-reset interrupted a transaction)
+   * fail fast with -ENODEV so the board-level retry can do bus recovery
+   * and try again, instead of blocking inside the SW_RESET poll below.
+   */
+
+  err = lsm6dsl_read_bytes(dev, WHO_AM_I, &val, 1);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  if (val != WHO_AM_I_VAL)
+    {
+      return -ENODEV;
+    }
 
   /* Software reset */
 
@@ -736,9 +754,12 @@ static int lsm6dsl_hw_init(FAR struct lsm6dsl_dev_s *dev)
       return err;
     }
 
-  /* Wait for reset to complete */
+  /* Wait for reset to complete.  Datasheet says SW_RESET typically clears
+   * within ~50 us; cap at 50 iterations (~50 ms) so a wedged bus cannot
+   * trap us here forever.
+   */
 
-  do
+  for (i = 0; i < 50; i++)
     {
       nxsig_usleep(1000);
       err = lsm6dsl_read_bytes(dev, CTRL3_C, &val, 1);
@@ -746,8 +767,21 @@ static int lsm6dsl_hw_init(FAR struct lsm6dsl_dev_s *dev)
         {
           return err;
         }
+
+      if ((val & BIT_SW_RESET) == 0)
+        {
+          break;
+        }
     }
-  while (val & BIT_SW_RESET);
+
+  if (val & BIT_SW_RESET)
+    {
+      return -ETIMEDOUT;
+    }
+
+  /* Defensive settle after SW_RESET before the next register write. */
+
+  nxsig_usleep(10 * 1000);
 
   /* Enable BDU (prevent data tearing) and IF_INC (auto-increment) */
 
