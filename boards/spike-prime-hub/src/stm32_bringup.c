@@ -38,6 +38,15 @@ int stm32_bringup(void)
 {
   int ret = OK;
 
+  /* Read out the previous boot's reset reason + breadcrumb (and decode
+   * RCC_CSR reset flags) BEFORE any other syslog so the BCRUMB lines are
+   * grouped near the top of dmesg.  Re-initializes the persistent struct
+   * for this boot's lifetime; future reset producers (softdog,
+   * board_reset) write into it.
+   */
+
+  stm32_bcrumb_initialize();
+
 #ifdef CONFIG_ARCH_IRQPRIO
   /* Issue #36 epsilon plan + Issue #50 refinement: board-wide NVIC
    * priority assignment.
@@ -172,10 +181,6 @@ int stm32_bringup(void)
 
 #ifdef CONFIG_SCHED_CPULOAD_EXTCLK
   stm32_cpuload_initialize();
-#endif
-
-#ifdef CONFIG_SYSLOG_REGISTER
-  panic_syslog_initialize();
 #endif
 
 #ifdef CONFIG_FS_PROCFS

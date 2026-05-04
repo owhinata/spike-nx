@@ -195,6 +195,33 @@ void stm32_cpuload_initialize(void);
 int stm32_hpwork_softdog_initialize(void);
 #endif
 
+/* Reset reason + breadcrumb persistence (stm32_bcrumb.c).  Carves the top
+ * 64 bytes of the kernel heap (0x2001FFC0..0x20020000) as a non-cleared
+ * struct that survives MCU soft-reset.  Call stm32_bcrumb_initialize()
+ * from stm32_bringup() before any other syslog so the BCRUMB lines lead
+ * dmesg.  Producer hooks below set the *first* cause only.
+ */
+
+#define BCRUMB_PRE_NONE          0u
+#define BCRUMB_PRE_SOFTDOG       1u   /* hpwork softdog timeout pre-PANIC */
+#define BCRUMB_PRE_USER_REBOOT   2u   /* NSH `reboot` */
+#define BCRUMB_PRE_POWER_BUTTON  3u   /* center button long-press */
+#define BCRUMB_PRE_ASSERT_HOOK   4u   /* future: assert.c hook */
+
+/* HPWORK worker tracking via stm32_bcrumb_worker_entry/exit() —
+ * caller passes any small uint8_t worker ID (0..255).  Encode as
+ * `(id << 24) | counter24` in marker[1]/[2] so a mismatch identifies
+ * which worker was inside HPWORK at stall time.  IDs are not predefined;
+ * each consumer chooses their own range when adding the hooks.
+ */
+
+void stm32_bcrumb_initialize(void);
+void stm32_bcrumb_set_pre_reason(uint32_t reason, uint32_t arg);
+void stm32_bcrumb_set_board_reset(int status);
+void stm32_bcrumb_set_marker(unsigned int slot, uint32_t value);
+void stm32_bcrumb_worker_entry(unsigned int worker_id);
+void stm32_bcrumb_worker_exit(unsigned int worker_id);
+
 int stm32_sound_initialize(void);
 int stm32_tone_register(void);
 int stm32_pcm_register(void);
