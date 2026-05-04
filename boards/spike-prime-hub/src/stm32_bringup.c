@@ -30,6 +30,10 @@
 #endif
 #include "spike_prime_hub.h"
 
+#ifdef CONFIG_LEGO_LUMP
+#  include "stm32_legoport_uart_hw.h"
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -86,18 +90,25 @@ int stm32_bringup(void)
    * within the BASEPRI band so NuttX-API calls from these ISRs remain
    * safe.  All six are co-equal — none preempts any other.
    */
-  up_prioritize_irq(STM32_IRQ_UART4,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
-  up_prioritize_irq(STM32_IRQ_UART5,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
-  up_prioritize_irq(STM32_IRQ_UART7,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
-  up_prioritize_irq(STM32_IRQ_UART8,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
-  up_prioritize_irq(STM32_IRQ_UART9,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
-  up_prioritize_irq(STM32_IRQ_UART10,
-                    NVIC_SYSH_PRIORITY_DEFAULT + 1 * NVIC_SYSH_PRIORITY_STEP);
+  /* Issue #100 案D: HIPRI direct vectors (NVIC_SYSH_HIGH_PRIORITY = 0x60).
+   * Above BASEPRI 0x80 — these ISRs are NOT blocked by NuttX
+   * enter_critical_section().  Vectors are installed by
+   * lump_uart_hipri_init() below; the per-port handlers stay strictly
+   * OS-free (drain + ring push), so HIPRI safety is preserved.
+   */
+
+  up_prioritize_irq(STM32_IRQ_UART4,  NVIC_SYSH_HIGH_PRIORITY);
+  up_prioritize_irq(STM32_IRQ_UART5,  NVIC_SYSH_HIGH_PRIORITY);
+  up_prioritize_irq(STM32_IRQ_UART7,  NVIC_SYSH_HIGH_PRIORITY);
+  up_prioritize_irq(STM32_IRQ_UART8,  NVIC_SYSH_HIGH_PRIORITY);
+  up_prioritize_irq(STM32_IRQ_UART9,  NVIC_SYSH_HIGH_PRIORITY);
+  up_prioritize_irq(STM32_IRQ_UART10, NVIC_SYSH_HIGH_PRIORITY);
+
+  ret = lump_uart_hipri_init();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "LUMP HIPRI init failed: %d\n", ret);
+    }
 #endif
 
   /* step 2: TLC5955 SPI1 + DMA (0xE0) */

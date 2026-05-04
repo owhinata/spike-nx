@@ -38,6 +38,7 @@
 #include <arch/board/board_legoport.h>
 
 #include "arm_internal.h"
+#include "ram_vectors.h"
 #include "stm32.h"
 #include "hardware/stm32f40xxx_uart.h"
 #include "hardware/stm32f40xxx_rcc.h"
@@ -46,6 +47,21 @@
 #include "stm32_legoport_uart_hw.h"
 
 #ifdef CONFIG_LEGO_LUMP
+
+/* Issue #100 案D: this driver runs the LUMP UART ISRs at NVIC priority
+ * NVIC_SYSH_HIGH_PRIORITY (= 0x60), above BASEPRI 0x80.  HIPRI ISRs
+ * are NOT routed through arm_doirq() / irq_dispatch() — they MUST be
+ * installed via arm_ramvec_attach() which requires CONFIG_ARCH_RAMVECTORS.
+ * BUILD_PROTECTED + HIPRI also requires CONFIG_ARCH_INTERRUPTSTACK >= 8.
+ */
+
+#ifndef CONFIG_ARCH_HIPRI_INTERRUPT
+#  error LUMP UART case D requires CONFIG_ARCH_HIPRI_INTERRUPT
+#endif
+
+#ifndef CONFIG_ARCH_RAMVECTORS
+#  error LUMP UART case D requires CONFIG_ARCH_RAMVECTORS
+#endif
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -67,6 +83,17 @@
 
 #define LUMP_UART_TX_FRAME_TIMEOUT_MIN_MS  50u
 
+/* RX polling interval (ms).  Issue #100 Option A: lump_uart_isr() no
+ * longer posts a wake sem per byte (that triggered watchdog-list churn
+ * under 2-port LUMP mode-2 traffic — Issue #100).  Instead the kthread
+ * caps each nxsem_tickwait() at this period and re-drains the ring on
+ * timeout.  2 ms is well under LUMP mode-2 frame interval (10 ms) so
+ * frame parsing is still timely; per-port wake rate ≒ 500 Hz, total
+ * ≒ 3 kHz across 6 ports — far below the 16 kHz wd churn that broke.
+ */
+
+#define LUMP_UART_RX_POLL_MS               2u
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
@@ -85,12 +112,11 @@ struct lump_uart_state_s
   volatile uint16_t rx_tail;   /* kthread consumer index */
   volatile uint8_t  ore_count; /* count of overrun events seen by ISR */
 
-  /* Wake coalescing — see plan "Wake coalescing" pseudocode */
-
-  volatile bool post_pending;
-
-  /* Wakeup sem.  Posted by ISR when ring crosses POST_THRESH OR by the
-   * LUMP engine for non-RX events (handoff, stall, fault recovery).
+  /* Wakeup sem.  Issue #100 Option A: this sem is no longer used for
+   * byte-arrival notification — the kthread polls the ring directly
+   * via lump_uart_read_byte() with a 2 ms tickwait timeout.  Kept in
+   * place so future non-RX wakes (engine fault recovery, baud change
+   * confirm, etc.) can still nudge the kthread out of its short sleep.
    */
 
   sem_t    rx_sem;
@@ -100,7 +126,6 @@ struct lump_uart_state_s
   const struct legoport_pin_s *pins;  /* cached on open() */
   uint32_t baud;
   bool     opened;
-  bool     irq_attached;
 };
 
 /****************************************************************************
@@ -137,34 +162,30 @@ static inline uintptr_t lump_uart_reg(int port, uint32_t offset)
 }
 
 /****************************************************************************
- * Interrupt Service Routine
+ * HIPRI Direct-Vector ISRs (Issue #100 案D)
  ****************************************************************************/
 
-/* RX ISR.  Runs at NVIC 0x90 (set in stm32_bringup.c).  Bounded work:
- *   - read SR + DR (DR read also clears RXNE / ORE on F4)
- *   - push byte to ring
- *   - on threshold or frame-end, post coalesced wake-up sem
+/* Per-port direct vector handler core.  Runs at NVIC priority
+ * NVIC_SYSH_HIGH_PRIORITY (= 0x60), above BASEPRI 0x80, so this ISR is
+ * NEVER blocked by enter_critical_section().  Installed via
+ * arm_ramvec_attach() in lump_uart_hipri_init() — bypasses arm_doirq()
+ * / irq_dispatch() entirely.
  *
- * Per the plan, this MUST NOT do per-byte sem_post; the `post_pending`
- * flag is set under critical section only when a wake is actually issued.
- * The flag is cleared by the kthread under the same critical section in
- * the `clear → drain → recheck → sleep` 3-step sequence so the kthread
- * never sleeps while bytes remain.
+ * Bounded work:
+ *   - read SR + DR (DR read also clears RXNE / ORE on F4)
+ *   - push byte to SPSC ring
+ *
+ * MUST stay strictly OS-free: NuttX kernel APIs, semaphores, work
+ * queues, syslog/printf, locks — all forbidden.  Only register/memory
+ * ops.  Wake notification is via the per-port LUMP kthread polling the
+ * ring (lump_uart_read_byte() with 2 ms tickwait cap).
  */
 
-static int lump_uart_isr(int irq, FAR void *context, FAR void *arg)
+static void lump_uart_isr_core(int port)
 {
-  int port = (int)(intptr_t)arg;
   struct lump_uart_state_s *st = &g_lump_uart[port];
   uintptr_t base = g_lump_uart_hw_desc[port].usart_base;
-
   uint32_t sr = getreg32(base + STM32_USART_SR_OFFSET);
-
-  /* Drain the 1-byte RDR.  Reading DR clears RXNE / ORE / FE / NE / PE
-   * latches per RM0430 §28.6.1.  Loop covers the case where multiple
-   * bytes accumulated while we were preempted (rare at LUMP rates but
-   * cheap to handle).
-   */
 
   while (sr & USART_SR_RXNE)
     {
@@ -173,11 +194,6 @@ static int lump_uart_isr(int irq, FAR void *context, FAR void *arg)
 
       if (sr & USART_SR_ORE)
         {
-          /* Overrun: a byte was lost between RXNE and our DR read.  Bump
-           * a counter for diagnostics; LUMP frame-checksum will catch
-           * the corruption downstream.
-           */
-
           if (st->ore_count != UINT8_MAX)
             {
               st->ore_count++;
@@ -196,25 +212,20 @@ static int lump_uart_isr(int irq, FAR void *context, FAR void *arg)
 
       sr = getreg32(base + STM32_USART_SR_OFFSET);
     }
-
-  /* Coalesced wake.  Use the ring level (head - tail) to gate the post.
-   * See plan pseudocode: wake on >= POST_THRESH OR on any byte if the
-   * threshold mode is "at least one byte" (we use the threshold for
-   * cadence, not correctness — a watchdog flush at 2 ms catches the
-   * tail).
-   */
-
-  uint16_t level = (st->rx_head - st->rx_tail) & LUMP_UART_RXRING_MASK;
-  if (level >= LUMP_UART_RXRING_POST_THRESH && !st->post_pending)
-    {
-      st->post_pending = true;
-      nxsem_post(&st->rx_sem);
-    }
-
-  UNUSED(irq);
-  UNUSED(context);
-  return OK;
 }
+
+/* Per-port direct vector thunks (signature `void(*)(void)`).
+ * port→UART map per stm32_legoport_lump_table.c:
+ *   port A=0 → UART7, B=1 → UART4, C=2 → UART8, D=3 → UART5,
+ *   E=4 → UART10, F=5 → UART9
+ */
+
+static void lump_uart_isr_port_a(void) { lump_uart_isr_core(0); }
+static void lump_uart_isr_port_b(void) { lump_uart_isr_core(1); }
+static void lump_uart_isr_port_c(void) { lump_uart_isr_core(2); }
+static void lump_uart_isr_port_d(void) { lump_uart_isr_core(3); }
+static void lump_uart_isr_port_e(void) { lump_uart_isr_core(4); }
+static void lump_uart_isr_port_f(void) { lump_uart_isr_core(5); }
 
 /****************************************************************************
  * Public Functions
@@ -260,31 +271,39 @@ int lump_uart_open(int port, uint32_t baud)
   st->rx_head      = 0;
   st->rx_tail      = 0;
   st->ore_count    = 0;
-  st->post_pending = false;
   st->baud         = baud;
 
   /* Initialise the wakeup sem (idempotent: nxsem_init resets value). */
 
   nxsem_init(&st->rx_sem, 0, 0);
 
-  /* Attach ISR.  `arg` carries the port index so a single function
-   * services all 6 IRQs.
+  /* Issue #100 案D: HIPRI direct vector is installed once at boot in
+   * lump_uart_hipri_init().  Per-port open() no longer touches
+   * irq_attach() — only NVIC enable is needed.
    */
-
-  if (!st->irq_attached)
-    {
-      irq_attach(d->irq, lump_uart_isr, (FAR void *)(intptr_t)port);
-      st->irq_attached = true;
-    }
 
   /* Enable CR1: 8N1, RX/TX/RXNEIE on, finally UE. */
 
   putreg32(USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE,
            d->usart_base + STM32_USART_CR1_OFFSET);
 
-  up_enable_irq(d->irq);
+  /* Issue #100 案D: HIPRI direct vector is permanent in the RAM vector
+   * table.  Any stale USART RXNE/ORE latch from a previous close, or a
+   * stale NVIC pending bit, would let the very next ISR push garbage
+   * into the freshly-reset ring.  Drain SR/DR once and clear the NVIC
+   * pending slot before enabling the IRQ.
+   */
+
+  (void)getreg32(d->usart_base + STM32_USART_SR_OFFSET);
+  (void)getreg32(d->usart_base + STM32_USART_DR_OFFSET);
+
+  {
+    int extirq = d->irq - STM32_IRQ_FIRST;
+    putreg32(1u << (extirq & 31), NVIC_IRQ_CLRPEND(extirq));
+  }
 
   st->opened = true;
+  up_enable_irq(d->irq);
   return OK;
 }
 
@@ -314,7 +333,6 @@ void lump_uart_close(int port)
   putreg32(0, d->usart_base + STM32_USART_CR1_OFFSET);
 
   st->opened       = false;
-  st->post_pending = false;
 }
 
 int lump_uart_set_baud(int port, uint32_t baud)
@@ -332,11 +350,34 @@ int lump_uart_set_baud(int port, uint32_t baud)
       return -EBADF;
     }
 
+  /* Issue #100 案D: HIPRI direct ISR is NOT blocked by BASEPRI
+   * critical sections.  Mask the LUMP UART IRQ at NVIC ISER while the
+   * UE/BRR/UE sequence runs, otherwise an in-flight ISR could observe
+   * an inconsistent CR1/BRR pair or push a half-shifted byte into the
+   * ring at the new baud.
+   */
+
+  up_disable_irq(d->irq);
+
   uint32_t cr1 = getreg32(d->usart_base + STM32_USART_CR1_OFFSET);
   putreg32(cr1 & ~USART_CR1_UE, d->usart_base + STM32_USART_CR1_OFFSET);
   putreg32(lump_uart_brr(d->apb_clk_hz, baud),
            d->usart_base + STM32_USART_BRR_OFFSET);
   putreg32(cr1 | USART_CR1_UE, d->usart_base + STM32_USART_CR1_OFFSET);
+
+  /* Drop any byte left in RDR + clear NVIC pending so the new baud
+   * starts with a clean slate (same logic as lump_uart_open()).
+   */
+
+  (void)getreg32(d->usart_base + STM32_USART_SR_OFFSET);
+  (void)getreg32(d->usart_base + STM32_USART_DR_OFFSET);
+
+  {
+    int extirq = d->irq - STM32_IRQ_FIRST;
+    putreg32(1u << (extirq & 31), NVIC_IRQ_CLRPEND(extirq));
+  }
+
+  up_enable_irq(d->irq);
 
   st->baud = baud;
   return OK;
@@ -362,12 +403,6 @@ int lump_uart_read_byte(int port, uint8_t *out, uint32_t timeout_ms)
     {
       irqstate_t flags = enter_critical_section();
 
-      /* Step 1: clear post_pending so a future ISR may re-post */
-
-      st->post_pending = false;
-
-      /* Step 2: drain attempt — pop one byte if available */
-
       if (st->rx_head != st->rx_tail)
         {
           *out = st->rxring[st->rx_tail];
@@ -378,9 +413,14 @@ int lump_uart_read_byte(int port, uint8_t *out, uint32_t timeout_ms)
 
       leave_critical_section(flags);
 
-      /* Step 3: race-check + sleep.  At this point post_pending is false;
-       * if the ISR fires before our nxsem_tickwait it will set it back
-       * true and post the sem, so we wake immediately on next iteration.
+      /* Issue #100 Option A: ISR no longer posts on byte arrival, so
+       * the kthread polls the ring with a short 2 ms tickwait.  If a
+       * byte lands during the sleep, we discover it on the next loop;
+       * worst-case latency = 2 ms (well under LUMP mode-2 frame interval
+       * 10 ms).  -ETIMEDOUT here is the normal "poll period elapsed"
+       * path — only the OUTER deadline check returns -ETIMEDOUT to the
+       * caller.  Removing the byte-rate nxsem_post() collapses the
+       * watchdog-list churn that triggered Issue #100.
        */
 
       sclock_t remaining = (sclock_t)(deadline - clock_systime_ticks());
@@ -389,16 +429,23 @@ int lump_uart_read_byte(int port, uint8_t *out, uint32_t timeout_ms)
           return -ETIMEDOUT;
         }
 
-      int ret = nxsem_tickwait(&st->rx_sem, (clock_t)remaining);
+      clock_t poll = MSEC2TICK(LUMP_UART_RX_POLL_MS);
+      clock_t wait = ((sclock_t)poll < remaining) ? poll : (clock_t)remaining;
+      if (wait == 0)
+        {
+          wait = 1;       /* never wait 0 ticks (busy-loop trap) */
+        }
+
+      int ret = nxsem_tickwait(&st->rx_sem, wait);
       if (ret == -ETIMEDOUT)
         {
-          return -ETIMEDOUT;
+          continue;       /* poll period elapsed — recheck ring */
         }
       if (ret == -EINTR)
         {
           return -EINTR;
         }
-      /* else: woke from a real post (or a stale post — loop and retry) */
+      /* else: woke on rx_sem post (rare, non-RX wakeup) — recheck ring */
     }
 }
 
@@ -494,9 +541,15 @@ void lump_uart_flush_rx(int port)
   struct lump_uart_state_s     *st  = &g_lump_uart[port];
   const struct lump_uart_hw_desc_s *d = &g_lump_uart_hw_desc[port];
 
-  irqstate_t flags = enter_critical_section();
-  st->rx_tail      = st->rx_head;
-  st->post_pending = false;
+  /* Issue #100 案D: HIPRI direct ISR vs. BASEPRI critical_section —
+   * the latter does NOT mask priority 0x60.  Mask the UART IRQ at
+   * NVIC ISER instead so the ring tail/head can be cleared atomically
+   * with respect to the producer.
+   */
+
+  up_disable_irq(d->irq);
+
+  st->rx_tail = st->rx_head;
 
   /* Read SR then DR to clear ORE / RXNE per RM0430 §28.6.1. */
 
@@ -506,7 +559,39 @@ void lump_uart_flush_rx(int port)
       (void)getreg32(d->usart_base + STM32_USART_DR_OFFSET);
     }
 
-  leave_critical_section(flags);
+  up_enable_irq(d->irq);
+}
+
+int lump_uart_hipri_init(void)
+{
+  static void (* const handlers[BOARD_LEGOPORT_COUNT])(void) =
+    {
+      lump_uart_isr_port_a,
+      lump_uart_isr_port_b,
+      lump_uart_isr_port_c,
+      lump_uart_isr_port_d,
+      lump_uart_isr_port_e,
+      lump_uart_isr_port_f,
+    };
+
+  /* Install HIPRI direct vectors for all 6 LUMP UART IRQs.  After this,
+   * NVIC dispatches them straight to the per-port handlers above —
+   * arm_doirq() / irq_dispatch() are bypassed.  IRQ numbers come from
+   * g_lump_uart_hw_desc[] (single source of truth, also used by
+   * lump_uart_open() / _close()).
+   */
+
+  for (int port = 0; port < BOARD_LEGOPORT_COUNT; port++)
+    {
+      int ret = arm_ramvec_attach(g_lump_uart_hw_desc[port].irq,
+                                  handlers[port]);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
+  return OK;
 }
 
 #ifdef CONFIG_LEGO_LUMP_DIAG

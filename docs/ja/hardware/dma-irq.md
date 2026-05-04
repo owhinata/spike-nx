@@ -147,8 +147,9 @@ pybricks の**相対優先順序**を 0x80–0xE0 の範囲 (BASEPRI 以下) に
 
 | NVIC 値 | レベル | ペリフェラル | pybricks 対応 | 設定箇所 |
 |---|---|---|---|---|
+| **0x60** | **6** | **LUMP UART (HIPRI direct vector)** | base=0/1 → preempt=2 | **Issue #100 案D、`stm32_bringup.c` (step 1.5)** |
 | 0x80 | 8 | TIM9 tickless tick (OS 専用) | (pybricks SysTick) | NuttX デフォルト (据置) |
-| **0x90** | **9** | **LUMP UART (将来予約)** | base=0/1 | **Issue #43 で設定予定** |
+| ~~0x90~~ | ~~9~~ | ~~LUMP UART (旧 Issue #43 予約)~~ | — | Issue #100 案D で 0x60 へ移動 |
 | **0xA0** | **10** | **Bluetooth UART (USART2 + DMA1 S6/S7)** | base=1 | **Issue #47 で設定予定** |
 | 0xB0 | 11 | IMU I2C2 EV/ER + EXTI4 | base=3 | `stm32_bringup.c` (step 6) |
 | 0xC0 | 12 | Sound DAC DMA1_S5 | base=4 (HIGH) | `stm32_bringup.c` (step 5) |
