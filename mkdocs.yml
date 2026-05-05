@@ -81,6 +81,7 @@ nav:
       - development/apps.md
       - development/build-protected.md
       - development/pc-receive-spp.md
+      - development/bt-nsh-shell.md
   - NuttX:
       - nuttx/f413-support.md
       - nuttx/tickless-timer.md
