@@ -182,15 +182,15 @@ int db_rt_start(struct db_rt_s *rt, int priority,
   rt->last_cb_error = 0;
   atomic_store(&rt->running, true);
 
-  /* Explicit 4 KB stack — CONFIG_PTHREAD_STACK_DEFAULT is 2 KB on
-   * this build, which is not enough for the RT loop's dispatch path
+  /* Explicit stack — CONFIG_PTHREAD_STACK_DEFAULT is 2 KB on this
+   * build, which is not enough for the RT loop's dispatch path
    * (encoder drain + observer + PID + motor ioctl + state publish
    * have nested call frames easily reaching 2-3 KB).
    */
 
   pthread_attr_t attr;
   pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 4096);
+  pthread_attr_setstacksize(&attr, CONFIG_APP_DRIVEBASE_RT_STACKSIZE);
 
   /* Promote to SCHED_FIFO at the requested priority via attr — calling
    * pthread_setschedparam from the thread itself accumulates internal

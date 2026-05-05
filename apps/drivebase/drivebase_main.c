@@ -1276,16 +1276,16 @@ static void usage(void)
           "usage:\n"
           "  drivebase                                   show this help\n"
           "  drivebase status                            DRIVEBASE_GET_STATUS snapshot\n"
-          "  drivebase start                             [commit #11] launch daemon\n"
-          "  drivebase stop                              [commit #11] teardown daemon\n"
-          "  drivebase config <wheel_mm> <axle_mm>       [commit #9]  DRIVEBASE_CONFIG\n"
-          "  drivebase straight <mm> [coast|brake|hold]  [commit #9]  DRIVE_STRAIGHT\n"
-          "  drivebase turn <deg>                        [commit #9]  TURN\n"
-          "  drivebase forever <speed_mmps> <turn_dps>   [commit #9]  DRIVE_FOREVER\n"
-          "  drivebase stop-motion <coast|brake|hold>    [commit #9]  STOP\n"
-          "  drivebase get-state                         [commit #9]  GET_STATE\n"
-          "  drivebase set-gyro <none|1d|3d>             [commit #10] SET_USE_GYRO\n"
-          "  drivebase jitter [reset]                    [commit #8]  JITTER_DUMP\n");
+          "  drivebase start                             launch daemon\n"
+          "  drivebase stop                              teardown daemon\n"
+          "  drivebase config <wheel_mm> <axle_mm>       DRIVEBASE_CONFIG\n"
+          "  drivebase straight <mm> [coast|brake|hold]  DRIVE_STRAIGHT\n"
+          "  drivebase turn <deg>                        TURN\n"
+          "  drivebase forever <speed_mmps> <turn_dps>   DRIVE_FOREVER\n"
+          "  drivebase stop-motion <coast|brake|hold>    STOP\n"
+          "  drivebase get-state                         GET_STATE\n"
+          "  drivebase set-gyro <none|1d|3d>             SET_USE_GYRO\n"
+          "  drivebase jitter [reset]                    JITTER_DUMP\n");
 }
 
 /****************************************************************************

@@ -59,7 +59,7 @@
 
 #define DAEMON_TASK_NAME        "dbase_daemon"
 #define DAEMON_TASK_PRIORITY    100
-#define DAEMON_TASK_STACK       8192    /* TLS_MAXSTACK = 1 << 13 = 8 KB */
+#define DAEMON_TASK_STACK       CONFIG_APP_DRIVEBASE_DAEMON_STACKSIZE
 
 #define DAEMON_STALL_LIMIT      5    /* tick deadline misses to trigger    */
                                      /* stall watchdog                     */
