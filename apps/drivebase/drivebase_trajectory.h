@@ -98,6 +98,30 @@ void db_trajectory_init_forever(struct db_trajectory_s *tr,
                                 int32_t v_target_mdegps,
                                 int32_t accel_mdegps2);
 
+/* Update an in-flight infinite trajectory's target velocity while
+ * keeping the reference state (`x_mdeg`, `v_mdegps`) continuous across
+ * the update.  `t0_us` and `x0_mdeg` are re-anchored so that the new
+ * ramp passes through the trajectory's current reference at `now_us`;
+ * caller does NOT need to reset the PID accumulators because the
+ * reference does not jump.
+ *
+ *   - If the new target is in the same direction and below the current
+ *     reference velocity, the new ramp is anchored to land in cruise
+ *     immediately at `now_us` (small step down in v).
+ *   - If the new target is in the same direction and above the current
+ *     reference velocity, the new ramp continues from the current ref
+ *     velocity toward the new peak.
+ *   - If the new target reverses direction, the trajectory restarts
+ *     from rest at the current ref position; ref velocity steps to 0.
+ *
+ * No-op if `tr->infinite` is false.
+ */
+
+void db_trajectory_retarget_forever(struct db_trajectory_s *tr,
+                                    uint64_t now_us,
+                                    int32_t v_target_mdegps,
+                                    int32_t accel_mdegps2);
+
 void db_trajectory_get_reference(const struct db_trajectory_s *tr,
                                  uint64_t t_us,
                                  struct db_trajectory_ref_s *ref);

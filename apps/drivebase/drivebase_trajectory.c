@@ -216,6 +216,76 @@ void db_trajectory_init_forever(struct db_trajectory_s *tr,
   tr->x_cruise_end_mdeg = tr->x_accel_end_mdeg;
 }
 
+void db_trajectory_retarget_forever(struct db_trajectory_s *tr,
+                                    uint64_t now_us,
+                                    int32_t v_target_mdegps,
+                                    int32_t accel_mdegps2)
+{
+  if (!tr->infinite)
+    {
+      return;
+    }
+
+  /* Snapshot current reference state so we can re-anchor (t0, x0)
+   * such that the new ramp passes through this point at now_us.
+   */
+
+  struct db_trajectory_ref_s ref;
+  db_trajectory_get_reference(tr, now_us, &ref);
+
+  int32_t  new_accel    = accel_mdegps2 > 0 ? accel_mdegps2 : 1;
+  int32_t  new_v_abs    = v_target_mdegps >= 0 ? v_target_mdegps :
+                                                 -v_target_mdegps;
+  int8_t   new_direction = (v_target_mdegps > 0) ? 1 :
+                           (v_target_mdegps < 0) ? -1 : 0;
+  uint64_t new_accel_dt = dt_to_reach_v(new_v_abs, new_accel);
+
+  uint64_t new_t0 = now_us;
+  int64_t  new_x0 = ref.x_mdeg;
+
+  if (new_direction != 0)
+    {
+      /* Project current signed velocity onto the new direction. */
+
+      int32_t v_in_new = ref.v_mdegps * (int32_t)new_direction;
+
+      if (v_in_new >= (int32_t)new_v_abs)
+        {
+          /* Already at or above target along the new direction —
+           * anchor so we land in cruise at now_us.
+           */
+
+          new_t0 = now_us - new_accel_dt;
+          int64_t dx_full = dx_from_a(new_accel, new_accel_dt);
+          new_x0 = ref.x_mdeg - (int64_t)new_direction * dx_full;
+        }
+      else if (v_in_new > 0)
+        {
+          /* In accel phase, currently at v_in_new along new direction —
+           * anchor so the ramp from rest passes through v_in_new at
+           * now_us, then continues toward the new peak.
+           */
+
+          uint64_t dt_into = dt_to_reach_v(v_in_new, new_accel);
+          new_t0 = now_us - dt_into;
+          int64_t dx_partial = dx_from_a(new_accel, dt_into);
+          new_x0 = ref.x_mdeg - (int64_t)new_direction * dx_partial;
+        }
+      /* else: wrong direction or zero — restart from rest at ref.x   */
+    }
+
+  tr->t0_us             = new_t0;
+  tr->x0_mdeg           = new_x0;
+  tr->accel_mdegps2     = new_accel;
+  tr->decel_mdegps2     = new_accel;
+  tr->v_peak_mdegps     = new_v_abs;
+  tr->direction         = new_direction;
+  tr->accel_dt_us       = new_accel_dt;
+  tr->x_accel_end_mdeg  = new_x0 + (int64_t)new_direction *
+                                   dx_from_a(new_accel, new_accel_dt);
+  tr->x_cruise_end_mdeg = tr->x_accel_end_mdeg;
+}
+
 void db_trajectory_get_reference(const struct db_trajectory_s *tr,
                                  uint64_t t_us,
                                  struct db_trajectory_ref_s *ref)

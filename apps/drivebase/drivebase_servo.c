@@ -141,6 +141,22 @@ int db_servo_forever(struct db_servo_s *s,
                      int32_t v_target_mdegps,
                      int32_t accel_mdegps2)
 {
+  /* If already running an infinite trajectory, update the target in
+   * flight: trajectory phase (t0/x0) and PID accumulators are kept so
+   * a 100 Hz user re-issue stream of DRIVE_FOREVER does not pin the
+   * trajectory at v=0 forever.  Re-init only on first arm (or after
+   * a non-infinite trajectory ran in between).
+   */
+
+  if (s->trajectory_active && s->trajectory.infinite)
+    {
+      db_trajectory_retarget_forever(&s->trajectory, now_us,
+                                     v_target_mdegps, accel_mdegps2);
+      s->prev_endpoint_valid = false;
+      s->on_completion       = DRIVEBASE_ON_COMPLETION_COAST;
+      return 0;
+    }
+
   db_trajectory_init_forever(&s->trajectory, now_us,
                              s->x_actual_mdeg,
                              v_target_mdegps, accel_mdegps2);
