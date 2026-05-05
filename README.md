@@ -130,3 +130,72 @@ $ md5sum file.bin                    # PC 側
 - `-e` (escape control chars) は **付けない** — 8-bit clean な USB CDC で escape は不要かつ ZNAK の原因になる
 
 詳細とトラブルシューティングは [docs/ja/development/file-transfer.md](docs/ja/development/file-transfer.md) と [docs/ja/usage/01-flash-storage.md](docs/ja/usage/01-flash-storage.md) を参照。
+
+### BT 経由 NSH シェル (Issue #108)
+
+USB ケーブルを外したまま (バッテリ駆動の走行ロボ等) PC から Hub の NSH を叩く。SPP RFCOMM 上で `MODE SHELL` / `MODE TELEMETRY` を排他切替する。
+
+#### 初回のみ — ペアリング (Linux + BlueZ)
+
+```bash
+sudo apt install bluez bluez-tools                # 必要なら
+```
+
+Hub 側 (USB NSH):
+
+```
+nsh> btsensor start                # daemon 起動 (LED 消灯のまま)
+nsh> btsensor bt on                # BT 可視化 (LED 青の slow-blink)
+```
+
+`dmesg` の `HCI working, BD_ADDR XX:XX:...` で Hub の BD アドレスを控える。
+
+PC 側:
+
+```bash
+bluetoothctl
+[bluetooth]# scan on
+[bluetooth]# pair E0:FF:F1:5A:30:35
+# Hub 側 dmesg に "SSP pairing with ... status 0x00" を確認
+[bluetooth]# trust E0:FF:F1:5A:30:35
+[bluetooth]# scan off
+[bluetooth]# quit
+```
+
+#### 接続 (端末 2 枚)
+
+**Terminal 1** — RFCOMM チャネル保持 (foreground):
+
+```bash
+sudo rfcomm connect 0 E0:FF:F1:5A:30:35 1
+```
+
+`Connected /dev/rfcomm0 to ...` のまま待機。`Ctrl-C` で切断。
+
+**Terminal 2** — picocom:
+
+```bash
+sudo picocom -l --echo --omap crlf --imap lfcrlf /dev/rfcomm0
+```
+
+picocom の入力で:
+
+```
+MODE SHELL <Enter>          ← Hub に "MODE SHELL\n" 送信
+OK                          ← 直後 NSH banner 表示
+nsh> ls /dev <Enter>
+nsh> dmesg <Enter>
+nsh> exit <Enter>
+READY                       ← telemetry mode 復帰
+```
+
+抜ける時: picocom 側 `Ctrl-A Ctrl-X` → Terminal 1 で `Ctrl-C`。
+
+#### 注意
+
+- `MODE SHELL` を送る前は telemetry mode (ASCII コマンド parser)。`MODE SHELL` 送信前のキー入力は `ERR unknown <cmd>` が返る。
+- `MODE SHELL` 受信時に IMU/SENSOR pump は OFF にされる (auto-resume なし)。telemetry を続行したい場合は `IMU ON\n` / `SENSOR ON\n` を再送。
+- Ctrl-C / job control なし (FIFO は tty 非対応)。長時間コマンドを止めたい時は RFCOMM 切断 (Terminal 1 の `Ctrl-C`)。
+- `btsensor stop` で Hub 側 in-RAM link key DB が消える。次回接続時に SSP authentication failure が出る場合は `bluetoothctl remove ...` + `btsensor unpair` の上で再ペア。
+
+プロトコル仕様・既知制約・トラブルシュートの詳細は [docs/ja/development/bt-nsh-shell.md](docs/ja/development/bt-nsh-shell.md)。SPP/RFCOMM ペアリング全般は [docs/ja/development/pc-receive-spp.md](docs/ja/development/pc-receive-spp.md)。
