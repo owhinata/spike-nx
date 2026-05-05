@@ -146,5 +146,15 @@ void lump_uart_hw_dump(void);
 
 uint8_t lump_uart_get_ore_count(int port);
 
+/* Snapshot the per-port HIPRI ISR DWT cycle accumulators (Issue #103).
+ * Both fields are uint32_t and wrap independently every ~44.7 s @ 96 MHz;
+ * callers compute deltas with modular subtraction.  The pair is read
+ * with PRIMASK held briefly so the snapshot is coherent against an ISR
+ * that may interrupt between the two volatile loads.  No-op (writes 0)
+ * if `port` is out of range.
+ */
+
+void lump_uart_get_isr_metrics(int port, uint32_t *cycles, uint32_t *count);
+
 #endif /* CONFIG_LEGO_LUMP */
 #endif /* __BOARDS_SPIKE_PRIME_HUB_SRC_STM32_LEGOPORT_UART_HW_H */

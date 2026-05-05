@@ -167,6 +167,13 @@ struct lump_status_full_s
                              * loop (-EBADMSG header / -EILSEQ checksum) */
   uint32_t stk_used;        /* kthread stack high-water in bytes */
   uint32_t stk_size;        /* configured kthread stack bytes */
+  uint32_t isr_pct_x10;     /* HIPRI ISR cycle occupancy in 0.1% units
+                             * (123 == 12.3 %), measured DWT-based across
+                             * the interval since the last GET_STATUS_EX.
+                             * 0 on the first call (snapshot still warming
+                             * up) and on any sub-microsecond sample. */
+  uint32_t isr_avg_ns;      /* HIPRI ISR average duration in ns across
+                             * the same interval. 0 on the first call. */
 };
 
 /* Callback invoked once on SYNCING -> DATA transition.  `info` is owned

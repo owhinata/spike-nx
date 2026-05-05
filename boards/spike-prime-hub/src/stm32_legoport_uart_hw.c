@@ -43,16 +43,22 @@
 #include "hardware/stm32f40xxx_uart.h"
 #include "hardware/stm32f40xxx_rcc.h"
 #include "nvic.h"
+#include "dwt.h"
 
 #include "stm32_legoport_uart_hw.h"
 
 #ifdef CONFIG_LEGO_LUMP
 
 /* Issue #100 case D: this driver runs the LUMP UART ISRs at NVIC priority
- * NVIC_SYSH_HIGH_PRIORITY (= 0x60), above BASEPRI 0x80.  HIPRI ISRs
- * are NOT routed through arm_doirq() / irq_dispatch() — they MUST be
- * installed via arm_ramvec_attach() which requires CONFIG_ARCH_RAMVECTORS.
+ * 0x00 (highest), above BASEPRI 0x80.  HIPRI ISRs are NOT routed through
+ * arm_doirq() / irq_dispatch() — they MUST be installed via
+ * arm_ramvec_attach() which requires CONFIG_ARCH_RAMVECTORS.
  * BUILD_PROTECTED + HIPRI also requires CONFIG_ARCH_INTERRUPTSTACK >= 8.
+ *
+ * Issue #103 instruments lump_uart_isr_core() with DWT cycle deltas so
+ * `port lump status` can show per-port HIPRI ISR occupancy — the ISR
+ * itself never reaches arm_doirq() so /proc/irqs / SCHED_IRQMONITOR
+ * can not see it.
  */
 
 #ifndef CONFIG_ARCH_HIPRI_INTERRUPT
@@ -112,6 +118,16 @@ struct lump_uart_state_s
   volatile uint16_t rx_tail;   /* kthread consumer index */
   volatile uint8_t  ore_count; /* count of overrun events seen by ISR */
 
+  /* HIPRI ISR cycle accounting (Issue #103).  Updated only by the ISR
+   * (single writer); read under PRIMASK by lump_uart_get_isr_metrics()
+   * to take a coherent snapshot of the (cycles, count) pair.  Both are
+   * uint32_t so they wrap independently every ~44.7 s @ 96 MHz; the
+   * caller computes diffs with modular subtraction.
+   */
+
+  volatile uint32_t isr_cycles;
+  volatile uint32_t isr_count;
+
   /* Wakeup sem.  Issue #100 Option A: this sem is no longer used for
    * byte-arrival notification — the kthread polls the ring directly
    * via lump_uart_read_byte() with a 2 ms tickwait timeout.  Kept in
@@ -165,11 +181,11 @@ static inline uintptr_t lump_uart_reg(int port, uint32_t offset)
  * HIPRI Direct-Vector ISRs (Issue #100 case D)
  ****************************************************************************/
 
-/* Per-port direct vector handler core.  Runs at NVIC priority
- * NVIC_SYSH_HIGH_PRIORITY (= 0x60), above BASEPRI 0x80, so this ISR is
- * NEVER blocked by enter_critical_section().  Installed via
- * arm_ramvec_attach() in lump_uart_hipri_init() — bypasses arm_doirq()
- * / irq_dispatch() entirely.
+/* Per-port direct vector handler core.  Runs at NVIC priority 0x00
+ * (highest), above BASEPRI 0x80, so this ISR is NEVER blocked by
+ * enter_critical_section().  Installed via arm_ramvec_attach() in
+ * lump_uart_hipri_init() — bypasses arm_doirq() / irq_dispatch()
+ * entirely.
  *
  * Bounded work:
  *   - read SR + DR (DR read also clears RXNE / ORE on F4)
@@ -179,13 +195,22 @@ static inline uintptr_t lump_uart_reg(int port, uint32_t offset)
  * queues, syslog/printf, locks — all forbidden.  Only register/memory
  * ops.  Wake notification is via the per-port LUMP kthread polling the
  * ring (lump_uart_read_byte() with 2 ms tickwait cap).
+ *
+ * Issue #103: bracket the body with DWT_CYCCNT reads so cycles spent
+ * in this ISR can be reported via lump_uart_get_isr_metrics().  The
+ * counter is a single LDR from PPB; wrap of the 32-bit difference is
+ * harmless because the accumulator itself is 32-bit modular.  Read
+ * DWT_CYCCNT directly via getreg32() rather than the non-inline
+ * up_perf_gettime() wrapper to avoid the call+return overhead inside
+ * a hot per-byte ISR (~16 cycles round trip × 2 calls saved).
  */
 
 static void lump_uart_isr_core(int port)
 {
   struct lump_uart_state_s *st = &g_lump_uart[port];
   uintptr_t base = g_lump_uart_hw_desc[port].usart_base;
-  uint32_t sr = getreg32(base + STM32_USART_SR_OFFSET);
+  uint32_t  t0   = getreg32(DWT_CYCCNT);
+  uint32_t  sr   = getreg32(base + STM32_USART_SR_OFFSET);
 
   while (sr & USART_SR_RXNE)
     {
@@ -212,6 +237,9 @@ static void lump_uart_isr_core(int port)
 
       sr = getreg32(base + STM32_USART_SR_OFFSET);
     }
+
+  st->isr_cycles += getreg32(DWT_CYCCNT) - t0;
+  st->isr_count  += 1u;
 }
 
 /* Per-port direct vector thunks (signature `void(*)(void)`).
@@ -529,6 +557,34 @@ uint8_t lump_uart_get_ore_count(int port)
       return 0;
     }
   return g_lump_uart[port].ore_count;
+}
+
+void lump_uart_get_isr_metrics(int port, uint32_t *cycles, uint32_t *count)
+{
+  if (cycles != NULL) *cycles = 0;
+  if (count  != NULL) *count  = 0;
+
+  if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
+    {
+      return;
+    }
+
+  /* Save-restore PRIMASK so this getter is callable from any context,
+   * including paths that already hold a critical section.  cpsid()
+   * blocks even the NVIC pri 0x00 HIPRI direct vectors, which is
+   * exactly what we need to avoid a torn snapshot of the
+   * (isr_cycles, isr_count) pair.  Window is two volatile loads —
+   * single-digit cycles, well below LUMP RX byte interval.
+   */
+
+  uint8_t saved = getprimask();
+  cpsid();
+  uint32_t c = g_lump_uart[port].isr_cycles;
+  uint32_t n = g_lump_uart[port].isr_count;
+  setprimask(saved);
+
+  if (cycles != NULL) *cycles = c;
+  if (count  != NULL) *count  = n;
 }
 
 void lump_uart_flush_rx(int port)

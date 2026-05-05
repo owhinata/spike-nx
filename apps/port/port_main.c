@@ -437,9 +437,9 @@ static int do_lump_status(void)
    */
 
   printf("Port  State    Type  Mode  Baud    RX(B)     TX(B)   "
-         "DqDrop  Err   BadMsg  Backoff  StkHWM\n");
+         "DqDrop  Err   BadMsg  Backoff  StkHWM      IsrPct  IsrAvgNs\n");
   printf("----  -------  ----  ----  ------  --------  ------  "
-         "------  ----  ------  -------  ----------\n");
+         "------  ----  ------  -------  ----------  ------  --------\n");
 
   for (int p = 0; p < BOARD_LEGOPORT_COUNT; p++)
     {
@@ -462,7 +462,7 @@ static int do_lump_status(void)
       close(fd);
 
       printf("  %c   %-7s  %3u   %3u   %6lu  %8lu  %6lu  "
-             "%6lu  %4lu  %6lu  %7lu  %4lu/%4lu\n",
+             "%6lu  %4lu  %6lu  %7lu  %4lu/%4lu  %3lu.%lu  %8lu\n",
              'A' + p,
              lump_state_name(s.state),
              s.type_id,
@@ -475,7 +475,10 @@ static int do_lump_status(void)
              (unsigned long)s.bad_msg_count,
              (unsigned long)s.backoff_step,
              (unsigned long)s.stk_used,
-             (unsigned long)s.stk_size);
+             (unsigned long)s.stk_size,
+             (unsigned long)(s.isr_pct_x10 / 10u),
+             (unsigned long)(s.isr_pct_x10 % 10u),
+             (unsigned long)s.isr_avg_ns);
     }
 
   return 0;

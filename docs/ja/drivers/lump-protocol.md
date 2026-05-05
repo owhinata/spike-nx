@@ -114,7 +114,7 @@ checksum: 0xFF XOR all preceding bytes
 struct lump_device_info_s    /* type_id, num_modes, baud, modes[8] */
 struct lump_mode_info_s      /* name, num_values, data_type, writable, raw/pct/si min/max, units */
 struct lump_data_frame_s     /* mode, len, data[32] — DATA frame snapshot */
-struct lump_status_full_s    /* state, type, mode, baud, rx/tx bytes, dq_dropped, err_count, bad_msg_count, backoff, stack high-water */
+struct lump_status_full_s    /* state, type, mode, baud, rx/tx bytes, dq_dropped, err_count, bad_msg_count, backoff, stack high-water, isr_pct_x10, isr_avg_ns */
 
 int lump_attach(int port, const struct lump_callbacks_s *cb);
 int lump_detach(int port);
@@ -139,6 +139,16 @@ int lump_get_status_full(int port, struct lump_status_full_s *out);
 すべて per-port kthread / API context で `cb_lock` を一旦解放してから fire するので、CB から `lump_get_info` / `lump_get_status` 等は安全に呼べる。同一ポート CB 内からの `lump_attach` / `lump_detach` / 別 CB 経路への再入は `-EDEADLK` で拒否される (`in_callback` flag)。
 
 `on_error` は **接続中だけでなく sync 失敗時にも発火** する点に注意 — 一度も `on_sync` を受けていない状態でも disconnect 通知が届きうる。コンシューマ側は idempotent (同じ disconnect を二度受け取っても安全) に書く。
+
+### 5.2 HIPRI ISR cycle 計測 (Issue #103)
+
+`lump_status_full_s.isr_pct_x10` と `isr_avg_ns` で、LUMP UART HIPRI direct vector ISR (NVIC priority 0x00、`lump_uart_hipri_init()` で `arm_ramvec_attach`) の per-port CPU 占有を露出する。これらの ISR は `arm_doirq()` / `irq_dispatch()` を経由しないので `/proc/irqs` / `SCHED_IRQMONITOR` / `ps` には現れず、本フィールドだけが計測手段になる。
+
+`lump_uart_isr_core()` 入口/出口で `up_perf_gettime()` (DWT CYCCNT、本ボードは 96 MHz → 10.42 ns/cycle) を 2 回読み、差分を per-port `volatile uint32_t` に累積。`lump_get_status_full()` が両カウンタを **PRIMASK 短時間 mask** で coherent snapshot (BASEPRI ベースの `up_irq_save()` では NVIC pri 0x00 を止められないため) し、前回 snapshot との差を **modular subtraction** で計算する。32-bit DWT は ~44.74 秒で wrap するので、それ以下の間隔で `port lump status` を polling することが前提。
+
+ブート直後の初回呼出 (および将来 epoch reset を追加したらその後) は `isr_pct_x10 = isr_avg_ns = 0` を返して snapshot だけ取る。「ブート以来の累積平均」のような合成値は出さず、常に「前回 snapshot 以降の interval 値」を意味する。
+
+`isr_pct_x10` は **DWT cycles 比であって wall-clock 比ではない** — `WFI` で CPU が halt 中は CYCCNT も止まるため、deep idle 時は active cycles 同士の比になり、wall-clock CPU% より高めに見える。「CPU が起きている時間の中でこの ISR に費やされた割合」と解釈する。
 
 ## 6. ioctl (`/dev/legoport[N]`)
 

@@ -296,9 +296,9 @@ static int do_status_one(const struct class_entry_s *c)
 static int do_list(void)
 {
   printf("Class        Port  State    Type  Mode  Baud    RX(B)     TX(B)   "
-         "DqDrop  Err   BadMsg  Backoff  StkHWM\n");
+         "DqDrop  Err   BadMsg  Backoff  StkHWM      IsrPct  IsrAvgNs\n");
   printf("-----------  ----  -------  ----  ----  ------  --------  ------  "
-         "------  ----  ------  -------  ----------\n");
+         "------  ----  ------  -------  ----------  ------  --------\n");
 
   for (int i = 0; i < CLASS_COUNT; i++)
     {
@@ -332,7 +332,7 @@ static int do_list(void)
         }
 
       printf("%-11s   %c    %-7s  %3u   %3u   %6lu  %8lu  %6lu  "
-             "%6lu  %4lu  %6lu  %7lu  %4lu/%4lu\n",
+             "%6lu  %4lu  %6lu  %7lu  %4lu/%4lu  %3lu.%lu  %8lu\n",
              c->name,
              ret_info == 0 ? 'A' + info_arg.port : '?',
              state_name(s.state),
@@ -341,7 +341,10 @@ static int do_list(void)
              (unsigned long)s.rx_bytes, (unsigned long)s.tx_bytes,
              (unsigned long)s.dq_dropped, (unsigned long)s.err_count,
              (unsigned long)s.bad_msg_count, (unsigned long)s.backoff_step,
-             (unsigned long)s.stk_used, (unsigned long)s.stk_size);
+             (unsigned long)s.stk_used, (unsigned long)s.stk_size,
+             (unsigned long)(s.isr_pct_x10 / 10u),
+             (unsigned long)(s.isr_pct_x10 % 10u),
+             (unsigned long)s.isr_avg_ns);
     }
 
   return 0;

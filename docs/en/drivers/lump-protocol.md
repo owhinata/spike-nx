@@ -118,7 +118,7 @@ The constants follow `pybricks/lib/lego/lego_uart.h` exactly (`LUMP_CMD_TYPE/MOD
 struct lump_device_info_s    /* type_id, num_modes, baud, modes[8] */
 struct lump_mode_info_s      /* name, num_values, data_type, writable, raw/pct/si min-max, units */
 struct lump_data_frame_s     /* mode, len, data[32] — DATA frame snapshot */
-struct lump_status_full_s    /* state, type, mode, baud, rx/tx bytes, dq_dropped, err_count, bad_msg_count, backoff, stack high-water */
+struct lump_status_full_s    /* state, type, mode, baud, rx/tx bytes, dq_dropped, err_count, bad_msg_count, backoff, stack high-water, isr_pct_x10, isr_avg_ns */
 
 int lump_attach(int port, const struct lump_callbacks_s *cb);
 int lump_detach(int port);
@@ -143,6 +143,16 @@ int lump_get_status_full(int port, struct lump_status_full_s *out);
 In all cases the engine drops `cb_lock` before invoking the callback, so it is safe to call back into `lump_get_info` / `lump_get_status` from inside.  Same-port re-entry into `lump_attach` / `lump_detach` (or a second callback path) is rejected with `-EDEADLK` via the `in_callback` flag.
 
 Note that `on_error` fires on **every session-ending transition**, including pure sync failures where `on_sync` never ran — consumers should be idempotent (receiving "disconnect" twice in a row must be a no-op).
+
+### 5.2 HIPRI ISR cycle accounting (Issue #103)
+
+`lump_status_full_s.isr_pct_x10` and `isr_avg_ns` expose how much CPU the LUMP UART HIPRI direct vector ISRs (NVIC priority 0x00, installed by `lump_uart_hipri_init()`) consume per port.  The ISRs bypass `arm_doirq()` / `irq_dispatch()`, so `/proc/irqs`, `SCHED_IRQMONITOR`, and `ps` cannot see them — the metric is the only window into their cost.
+
+`lump_uart_isr_core()` brackets its body with two `up_perf_gettime()` reads (DWT CYCCNT, 96 MHz on this board → 10.42 ns/cycle) and accumulates the difference into per-port `volatile uint32_t` cycle / call counters next to the ISR state.  `lump_get_status_full()` snapshots both counters under PRIMASK (the BASEPRI-based `up_irq_save()` cannot block a 0x00-priority direct vector) and computes the deltas with **modular subtraction** against the previous snapshot — wrap-safe as long as `port lump status` is polled more often than the 32-bit DWT wrap (~44.74 s @ 96 MHz).
+
+The first call after boot (and after each `LEGOPORT_LUMP_GET_STATUS_EX` epoch reset, if added later) reports `isr_pct_x10 = isr_avg_ns = 0` and just primes the snapshot — no synthetic "since boot" average is reported, so the value always means "across the interval since the last snapshot".
+
+`isr_pct_x10` is a ratio of DWT cycles consumed to DWT cycles elapsed, **not wall clock** — `WFI` halts CYCCNT, so during deep idle the ratio is computed against active cycles only and tends to read higher than a wall-clock CPU% would.  Treat it as a "fraction of CPU non-idle time spent in this ISR" rather than "fraction of real time".
 
 ## 6. ioctl on `/dev/legoport[N]`
 
