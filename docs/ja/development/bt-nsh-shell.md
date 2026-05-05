@@ -90,6 +90,7 @@ USB 側 `btsensor mode telemetry` は強制 teardown のエスケープハッチ
 - **Ctrl-C / job control なし**: FIFO は tty ではなく、`isctty=false` で spawn しているため `TIOCSCTTY` 発行なし。長時間実行コマンドの中断は RFCOMM 切断のみ。
 - **CRLF / ANSI 正規化なし**: peer terminal 設定で local-echo / CRLF 変換を行うこと (`screen` / `picocom` の `-c` 系オプション)。
 - **stdin overflow**: 大量貼り付けで FIFO 4096B が飽和すると drop。間欠的タイピングなら問題なし。drop は Hub の `syslog` warn にのみ記録 (peer 通知なし)。
+- **大量 stdout 出力 (`dmesg`/長い `help` 等) は信頼性が低い** (Issue #109): RFCOMM credit-based flow control の制約で、NSH が複数 line を短時間に書き出すと peer (Linux BlueZ) からの credit refresh が追いつかず、tx 側 coalescing buffer 満杯で reader が drop に入ります。出力は途中で抜けが出る可能性。Hub セッション自体は alive のまま (subsequent コマンドは送れる) なので、長い出力を取りたい時は **USB NSH (`/dev/ttyACM0`) を使うのが確実**。BT NSH は `ps` / `ls /dev` / `free` / `md5` 等の **短い対話コマンド向け** に最適化されています。
 - **複数 SPP client 並行不可**: 既存 RFCOMM 構成と同じく単一 channel。
 - **stdout overflow**: NSH 大量出力 (`dmesg` 等) で TX coalescing buffer (1024B 既定) が飽和した場合、reader は overflow 分を drop+warn する。
 - **shell 中の telemetry frame 同時送信なし**: 排他設計のため。BUNDLE が必要なら `MODE TELEMETRY` で戻ること。

@@ -111,6 +111,16 @@ useful if the BT peer wedged the shell.
 - **stdin overflow**: pasting more than the FIFO buffer (4096 B by
   default) drops the overflow.  Interactive typing is unaffected.
   Drops are logged in the Hub `syslog`; the peer is not notified.
+- **Large stdout commands (`dmesg`, long `help`) are unreliable**
+  (Issue #109): RFCOMM credit-based flow control combined with NSH's
+  line-by-line writes exhausts the peer's outgoing credit faster than
+  Linux BlueZ refreshes it.  The TX coalescing buffer fills, the
+  reader pthread starts dropping bytes, and the visible output gets
+  gaps.  The Hub-side session stays alive (subsequent short commands
+  still work) but you should not rely on `dmesg` over BT.  **For
+  large outputs, use the USB NSH on `/dev/ttyACM0` instead.**  BT NSH
+  is optimised for short interactive commands (`ps`, `ls /dev`,
+  `free`, `md5`, etc.).
 - **No concurrent SPP clients**: same as the rest of `btsensor` —
   one RFCOMM channel only.
 - **stdout overflow**: very chatty NSH output (`dmesg`, etc.) past

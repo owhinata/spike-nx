@@ -113,7 +113,18 @@ struct shell_state_s
   pthread_t            reader_tid;
   bool                 reader_running;
 
-  /* TX coalescing buffer for NSH stdout bytes en route to RFCOMM. */
+  /* TX coalescing buffer for NSH stdout bytes en route to RFCOMM.
+   * Reader pthread drops the tail of any read that does not fit
+   * (drop-on-overflow).  An earlier attempt at cond_var-based
+   * back-pressure (Issue #109 follow-up) introduced a worse
+   * deadlock when BT credit refresh stalls, because reader's
+   * cond_wait can only be unblocked by rfcomm_send success — which
+   * does not happen during credit-stall.  Drop-on-overflow keeps
+   * the NSH child unblocked and the shell session usable for
+   * subsequent commands even if the BT pipe is briefly stuck.  See
+   * docs/{ja,en}/development/bt-nsh-shell.md for the documented
+   * limitation on large-output commands like `dmesg`.
+   */
 
   pthread_mutex_t      tx_lock;
   uint8_t              tx_buf[CONFIG_APP_BTSENSOR_SHELL_TX_BUF];
@@ -133,6 +144,22 @@ struct shell_callback_ctx_s
 {
   uint32_t generation;
 };
+
+/* Inter-send throttle for the BT-side TX path (Issue #109 follow-up).
+ * NSH stdout writes line-by-line, each line ≈ 70 B.  Without throttle,
+ * each line triggers an immediate rfcomm_send, consuming one peer-side
+ * outgoing credit.  Linux BlueZ tends to credit-refresh slower than
+ * this rate, so a short burst (e.g. `ps` ~1.7 kB / 24 lines) exhausts
+ * credits and the channel deadlocks at ~500 B observed.  Re-arming
+ * `rfcomm_request_can_send_now_event` through a BTstack timer with a
+ * small delay gives the peer time to refresh credits AND allows tx_buf
+ * to coalesce multiple NSH writes into a larger single frame.
+ */
+
+#define BTNSH_TX_THROTTLE_MS  10
+
+static btstack_timer_source_t g_shell_pump_timer;
+static bool                   g_shell_pump_timer_armed;
 
 /****************************************************************************
  * Private Data
@@ -300,10 +327,17 @@ static void *reader_thread(void *arg)
               break;
             }
 
-          /* Append into the coalescing buffer, dropping overflow.  Then
-           * post the BTstack-thread pump action only if a request is
-           * not already in flight — the lock is released before the
-           * post call (Codex 1st review #7).
+          /* Append into the coalescing buffer, dropping any tail that
+           * does not fit.  See the struct comment above for why we
+           * use drop-on-overflow rather than back-pressure here.
+           *
+           * NB: do NOT syslog() the drop count here.  RAMLOG is read
+           * by `dmesg`, so a single drop emitted as a syslog warning
+           * would feed back into NSH's stdout, get re-dropped, log
+           * again, and self-amplify into an infinite loop that fills
+           * RAMLOG and burns CPU once the BT pipe is back-pressured.
+           * Drops are tracked silently; future work could expose a
+           * counter in `btsensor status`.
            */
 
           bool need_post = false;
@@ -315,9 +349,6 @@ static void *reader_thread(void *arg)
           if (copy > remaining)
             {
               copy = remaining;
-              syslog(LOG_WARNING,
-                     "btnsh: reader tx_buf overflow, dropped %zu bytes\n",
-                     (size_t)n - copy);
             }
 
           memcpy(g_shell.tx_buf + g_shell.tx_len, local, copy);
@@ -366,6 +397,53 @@ static void *reader_thread(void *arg)
  * Private Functions — BTstack thread callbacks
  ****************************************************************************/
 
+static void shell_pump_timer_handler(btstack_timer_source_t *ts)
+{
+  (void)ts;
+  g_shell_pump_timer_armed = false;
+
+  if (g_shell.mode != BTSENSOR_MODE_SHELL_STARTING &&
+      g_shell.mode != BTSENSOR_MODE_SHELL)
+    {
+      return;
+    }
+
+  uint16_t cid = btsensor_shell_get_rfcomm_cid();
+  if (cid == 0)
+    {
+      return;
+    }
+
+  /* Only request if there's data to send.  Otherwise this is a stale
+   * timer from a previous arm that's no longer needed.
+   */
+
+  bool has_data;
+  pthread_mutex_lock(&g_shell.tx_lock);
+  has_data = g_shell.tx_len > 0;
+  pthread_mutex_unlock(&g_shell.tx_lock);
+
+  if (has_data)
+    {
+      rfcomm_request_can_send_now_event(cid);
+    }
+}
+
+static void shell_arm_pump_timer(void)
+{
+  if (g_shell_pump_timer_armed)
+    {
+      return;
+    }
+
+  btstack_run_loop_remove_timer(&g_shell_pump_timer);
+  btstack_run_loop_set_timer_handler(&g_shell_pump_timer,
+                                     shell_pump_timer_handler);
+  btstack_run_loop_set_timer(&g_shell_pump_timer, BTNSH_TX_THROTTLE_MS);
+  btstack_run_loop_add_timer(&g_shell_pump_timer);
+  g_shell_pump_timer_armed = true;
+}
+
 static void shell_pump_action(void *ctx)
 {
   struct shell_callback_ctx_s *c = ctx;
@@ -386,13 +464,11 @@ static void shell_pump_action(void *ctx)
       return;                          /* no peer */
     }
 
-  /* Independent CAN_SEND_NOW request — not the TX arbiter's path.  The
-   * spp packet handler routes RFCOMM_EVENT_CAN_SEND_NOW to our
-   * btsensor_shell_on_can_send_now() while shell-active so the two
-   * channels stay separate.
+  /* Throttle the request so tx_buf coalesces multiple NSH line writes
+   * into a single frame and the peer has time to refresh credits.
    */
 
-  rfcomm_request_can_send_now_event(cid);
+  shell_arm_pump_timer();
 }
 
 static void shell_exit_action(void *ctx)
@@ -507,6 +583,14 @@ static void cleanup_active_shell(enum btsensor_shell_reason_e reason)
    */
 
   btsensor_tx_clear_post_drain_callback();
+
+  /* Cancel the inter-send throttle timer if armed. */
+
+  if (g_shell_pump_timer_armed)
+    {
+      btstack_run_loop_remove_timer(&g_shell_pump_timer);
+      g_shell_pump_timer_armed = false;
+    }
 
   do_kill_and_join();
 
@@ -921,73 +1005,107 @@ void btsensor_shell_on_can_send_now(void)
       return;
     }
 
-  /* Snapshot the coalescing buffer under lock, then send outside the
-   * lock so reader pthread is not blocked while RFCOMM is busy.
+  /* MTU must be respected: rfcomm_send returns RFCOMM_DATA_LEN_EXCEEDS_MTU
+   * (0x74) for any payload larger than the negotiated max frame size,
+   * and a synchronous re-arm of CAN_SEND_NOW with the same payload
+   * spins btstack hard enough to starve PendSV (= softdog reset on
+   * `ps`/`dmesg` style large output, Issue #109).  Chunk the snapshot
+   * at the current MTU instead.
    */
+
+  uint16_t mtu = rfcomm_get_max_frame_size(cid);
+  if (mtu == 0)
+    {
+      /* Channel not yet fully up.  Clear the pending flag so a future
+       * reader-side append re-posts; otherwise a stale
+       * tx_request_pending=true would silently block draining.
+       */
+
+      pthread_mutex_lock(&g_shell.tx_lock);
+      g_shell.tx_request_pending = false;
+      pthread_mutex_unlock(&g_shell.tx_lock);
+      return;
+    }
 
   uint8_t local[CONFIG_APP_BTSENSOR_SHELL_TX_BUF];
   size_t  send_len = 0;
-  bool    request_more;
+  bool    request_more = false;
+
+  /* Snapshot up to MTU bytes from the head of tx_buf.  Do NOT dequeue
+   * yet — only consume bytes after rfcomm_send succeeds.  This
+   * structurally eliminates the previous push-back / infinite-loop on
+   * MTU error.
+   */
 
   pthread_mutex_lock(&g_shell.tx_lock);
   if (g_shell.tx_len > 0)
     {
       send_len = g_shell.tx_len;
+      if (send_len > mtu)
+        {
+          send_len = mtu;
+        }
+
       memcpy(local, g_shell.tx_buf, send_len);
-      g_shell.tx_len = 0;
     }
 
   g_shell.tx_request_pending = false;
-  request_more = false;                /* set below if reader filled
-                                        * concurrently — actually no: we
-                                        * just cleared it above. */
   pthread_mutex_unlock(&g_shell.tx_lock);
 
-  if (send_len > 0)
+  if (send_len == 0)
     {
-      uint8_t err = rfcomm_send(cid, local, (uint16_t)send_len);
-      if (err != 0)
-        {
-          /* rfcomm_send rejected — typically because credit ran out
-           * synchronously.  Return data to the front of the buffer and
-           * re-arm the request.
-           */
-
-          pthread_mutex_lock(&g_shell.tx_lock);
-          /* Push back into the buffer at offset 0; if reader has
-           * already appended to the buffer, prefer the older bytes
-           * (stdout ordering).
-           */
-
-          if (g_shell.tx_len + send_len <= sizeof(g_shell.tx_buf))
-            {
-              memmove(g_shell.tx_buf + send_len,
-                      g_shell.tx_buf, g_shell.tx_len);
-              memcpy(g_shell.tx_buf, local, send_len);
-              g_shell.tx_len += send_len;
-            }
-          else
-            {
-              syslog(LOG_WARNING,
-                     "btnsh: rfcomm_send rc=%u, %zu bytes dropped\n",
-                     (unsigned)err, send_len);
-            }
-
-          if (g_shell.tx_len > 0 && !g_shell.tx_request_pending)
-            {
-              g_shell.tx_request_pending = true;
-              request_more = true;
-            }
-
-          pthread_mutex_unlock(&g_shell.tx_lock);
-        }
+      return;
     }
 
-  /* Reader may have appended bytes between our snapshot and now.
-   * Re-arm if tx_len is non-zero.
-   */
+  uint8_t err = rfcomm_send(cid, local, (uint16_t)send_len);
 
   pthread_mutex_lock(&g_shell.tx_lock);
+
+  if (err == 0)
+    {
+      /* Successfully sent — dequeue the consumed bytes.  Reader may
+       * have appended additional bytes at the tail while rfcomm_send
+       * was running; those stay queued for the next round.
+       */
+
+      if (g_shell.tx_len >= send_len)
+        {
+          memmove(g_shell.tx_buf,
+                  g_shell.tx_buf + send_len,
+                  g_shell.tx_len - send_len);
+          g_shell.tx_len -= send_len;
+        }
+      else
+        {
+          /* Defensive — should not happen because reader only appends. */
+
+          g_shell.tx_len = 0;
+        }
+    }
+  else if (err == RFCOMM_DATA_LEN_EXCEEDS_MTU)
+    {
+      /* Invariant violation: send_len was capped at mtu above.  This
+       * should never fire; if it does, the cap logic or btstack MTU
+       * accounting has changed.  Log loudly so future bisects can
+       * catch the regression.  Leave data in tx_buf untouched.
+       */
+
+      syslog(LOG_ERR,
+             "btnsh: rfcomm_send EXCEEDS_MTU (len=%zu mtu=%u) — "
+             "invariant broken\n",
+             send_len, (unsigned)mtu);
+    }
+  else
+    {
+      /* Transient failure (typically RFCOMM_NO_OUTGOING_CREDITS 0x72).
+       * Leave data in tx_buf and re-arm CAN_SEND_NOW; btstack defers
+       * the re-fire until credit returns, so no synchronous loop.
+       */
+
+      syslog(LOG_DEBUG, "btnsh: rfcomm_send rc=0x%02x, retrying\n",
+             (unsigned)err);
+    }
+
   if (g_shell.tx_len > 0 && !g_shell.tx_request_pending)
     {
       g_shell.tx_request_pending = true;
@@ -998,7 +1116,12 @@ void btsensor_shell_on_can_send_now(void)
 
   if (request_more)
     {
-      rfcomm_request_can_send_now_event(cid);
+      /* Throttled re-arm via the pump timer (Issue #109): give peer
+       * time to refresh outgoing credits between frames and let the
+       * reader coalesce more bytes into the next snapshot.
+       */
+
+      shell_arm_pump_timer();
     }
 }
 
