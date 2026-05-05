@@ -551,6 +551,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                      "btsensor: HCI working, BD_ADDR %s — adv off "
                      "(\"%s\" hidden until BT button)\n",
                      bd_addr_to_str(addr), BTSENSOR_SPP_LOCAL_NAME);
+              syslog(LOG_INFO,
+                     "btsensor: HCI ACL buf len=%u\n",
+                     (unsigned)hci_max_acl_data_packet_length());
             }
           else if (state == HCI_STATE_OFF &&
                    g_ts_state == TS_HCI_OFF_PENDING)
@@ -559,6 +562,30 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
             }
         }
         break;
+
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+      case HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS:
+        {
+          /* Sum all per-handle counts for the diag.  spike-nx Issue #109
+           * follow-up: lets `btsensor diag` show whether the peer is
+           * acking ACL packets.  We trust btstack's internal credit
+           * accounting and only mirror the numbers.
+           */
+
+          if (size < 3) break;
+          uint8_t num_handles = packet[2];
+          if (size < (uint16_t)(3 + num_handles * 4)) break;
+          uint16_t total_packets = 0;
+          for (uint8_t i = 0; i < num_handles; i++)
+            {
+              uint16_t n = little_endian_read_16(packet, 3 + i * 4 + 2);
+              total_packets += n;
+            }
+
+          btsensor_shell_on_hci_completed_packets(total_packets);
+        }
+        break;
+#endif
 
       default:
         break;
@@ -1101,6 +1128,23 @@ static int cmd_status(void)
     {
       printf("pid:        %d\n", pid);
       printf("bt:         %s\n", bt_state_name(g_bt_state));
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+      const char *mode_name;
+      switch (btsensor_shell_get_mode())
+        {
+          case BTSENSOR_MODE_SHELL_STARTING:
+            mode_name = "shell (starting)";
+            break;
+          case BTSENSOR_MODE_SHELL:
+            mode_name = "shell";
+            break;
+          case BTSENSOR_MODE_TELEMETRY:
+          default:
+            mode_name = "telemetry";
+            break;
+        }
+      printf("mode:       %s\n", mode_name);
+#endif
       printf("imu:        %s\n",
              bundle_emitter_is_imu_enabled() ? "on" : "off");
       printf("sensor:     %s\n",
@@ -1316,6 +1360,62 @@ static int cmd_mode_builtin(int argc, char **argv)
   print_action_result(dispatch_action(kind, 0));
   return 0;
 }
+
+static int cmd_diag(int argc, char **argv)
+{
+  bool reset_after = false;
+  for (int i = 2; i < argc; i++)
+    {
+      if (strcmp(argv[i], "reset") == 0)
+        {
+          reset_after = true;
+        }
+      else
+        {
+          printf("Usage: btsensor diag [reset]\n");
+          return 1;
+        }
+    }
+
+  struct btsensor_shell_diag_s d;
+  btsensor_shell_get_diag(&d);
+
+  printf("btnsh diag:\n");
+  printf("  reader: appends=%u drops=%u drop_bytes=%u tx_high_water=%u\n",
+         (unsigned)d.reader_appends, (unsigned)d.reader_drops,
+         (unsigned)d.drop_bytes_total, (unsigned)d.tx_buf_high_water);
+  printf("  send:   ok=%u no_credit=%u exceeds_mtu=%u other_err=%u "
+         "zero_mtu=%u\n",
+         (unsigned)d.send_ok, (unsigned)d.send_no_credit,
+         (unsigned)d.send_exceeds_mtu, (unsigned)d.send_other_err,
+         (unsigned)d.send_zero_mtu);
+  printf("  last:   err=0x%02x len=%u mtu=%u\n",
+         (unsigned)d.last_send_err, (unsigned)d.last_send_len,
+         (unsigned)d.last_send_mtu);
+  printf("  pump:   arms=%u fires=%u no_data=%u no_cid=%u csn=%u\n",
+         (unsigned)d.pump_arms, (unsigned)d.pump_fires,
+         (unsigned)d.pump_fires_no_data, (unsigned)d.pump_fires_no_cid,
+         (unsigned)d.can_send_now_calls);
+  printf("  hci:    blocked=%u now=%u acl_buf_len=%u acl_free=%u "
+         "rfcomm_mtu=%u\n",
+         (unsigned)d.probe_hci_blocked,
+         (unsigned)d.probe_last_hci_now,
+         (unsigned)d.probe_last_acl_buf_len,
+         (unsigned)d.probe_last_acl_free,
+         (unsigned)d.probe_last_rfcomm_mtu);
+  printf("  ack:    completed_events=%u packets=%u last=%u\n",
+         (unsigned)d.hci_completed_events,
+         (unsigned)d.hci_completed_packets,
+         (unsigned)d.hci_completed_last_count);
+
+  if (reset_after)
+    {
+      btsensor_shell_reset_diag();
+      printf("(counters reset)\n");
+    }
+
+  return 0;
+}
 #endif
 
 static int cmd_set(int argc, char **argv)
@@ -1373,6 +1473,7 @@ static void print_usage(void)
   printf("  set   gyro_fsr   <dps>      gyro FSR  125|250|500|1000|2000 (default 2000)\n");
 #ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
   printf("  mode  <shell|telemetry>     switch BT-side NSH shell mode (Issue #108)\n");
+  printf("  diag  [reset]               dump BT-NSH diagnostic counters (#109)\n");
 #endif
   printf("Note: bt/imu/sensor/dump/set require `start` first (dump can\n");
   printf("      auto-activate the driver standalone).  set * are\n");
@@ -1441,6 +1542,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "mode") == 0)
     {
       return cmd_mode_builtin(argc, argv);
+    }
+
+  if (strcmp(argv[1], "diag") == 0)
+    {
+      return cmd_diag(argc, argv);
     }
 #endif
 

@@ -111,21 +111,21 @@ useful if the BT peer wedged the shell.
 - **stdin overflow**: pasting more than the FIFO buffer (4096 B by
   default) drops the overflow.  Interactive typing is unaffected.
   Drops are logged in the Hub `syslog`; the peer is not notified.
-- **Large stdout commands (`dmesg`, long `help`) are unreliable**
-  (Issue #109): RFCOMM credit-based flow control combined with NSH's
-  line-by-line writes exhausts the peer's outgoing credit faster than
-  Linux BlueZ refreshes it.  The TX coalescing buffer fills, the
-  reader pthread starts dropping bytes, and the visible output gets
-  gaps.  The Hub-side session stays alive (subsequent short commands
-  still work) but you should not rely on `dmesg` over BT.  **For
-  large outputs, use the USB NSH on `/dev/ttyACM0` instead.**  BT NSH
-  is optimised for short interactive commands (`ps`, `ls /dev`,
-  `free`, `md5`, etc.).
+- **Large stdout snapshots (`dmesg`, long `help`) get truncated**
+  (Issue #109 follow-up): the CC2564C controller has a 4-slot ACL TX
+  queue (Issue #54).  Bursts of MTU-sized RFCOMM frames pegged that
+  queue and stalled the controller indefinitely; the original Issue
+  #109 fix mis-attributed this to RFCOMM credit refresh on the BlueZ
+  side.  The current shell pump caps each `rfcomm_send()` at 256 B
+  and paces successive frames through a 5 ms BTstack timer, which
+  keeps the controller queue cycling.  Output past the 4 KB TX
+  coalescing buffer (default) is dropped at the reader pthread, but
+  **the shell session itself stays usable** — `ps`/`ls /dev`/`free`
+  /`md5` still work after a truncated `dmesg`.  Bump
+  `CONFIG_APP_BTSENSOR_SHELL_TX_BUF` (e.g. to 16384 to match the
+  RAMLOG region) if you need to capture every byte.
 - **No concurrent SPP clients**: same as the rest of `btsensor` —
   one RFCOMM channel only.
-- **stdout overflow**: very chatty NSH output (`dmesg`, etc.) past
-  the TX coalescing buffer (1024 B default) is dropped by the
-  reader thread with a syslog warning.
 - **No simultaneous telemetry frames**: shell and BUNDLE telemetry
   are exclusive; switch back via `MODE TELEMETRY` (or `exit`) to
   resume telemetry.
@@ -137,7 +137,8 @@ useful if the BT peer wedged the shell.
 | No reply to `MODE SHELL` | IMU/SENSOR pump still on | Send `IMU OFF\n` / `SENSOR OFF\n` first |
 | `ERR shell_unavailable` | `mkfifo` failed at daemon init (CONFIG_PIPES / CONFIG_DEV_FIFO_SIZE missing) | Check defconfig; `btsensor stop` → `start` |
 | `OK\n` arrives but no NSH output | Child task spawn / stack starvation | `nsh> ps` to inspect `btnsh` task; raise `CONFIG_APP_BTSENSOR_SHELL_NSH_STACK` |
-| Large output truncated | TX coalescing buffer overflowed | Raise `CONFIG_APP_BTSENSOR_SHELL_TX_BUF` (2048/4096) |
+| Large output truncated | TX coalescing buffer overflowed | Raise `CONFIG_APP_BTSENSOR_SHELL_TX_BUF` (8192 / 16384) |
+| `btsensor diag` shows `hci blocked` rising | CC2564C ACL TX queue stall recurrence (Issue #54) | Raise `CONFIG_APP_BTSENSOR_SHELL_THROTTLE_MS` (10/20) or lower `CONFIG_APP_BTSENSOR_SHELL_TX_FRAME_BYTES` (128) |
 | No `READY\n` on exit | Exit happened via RFCOMM drop | Expected; reconnect and confirm telemetry by `IMU ON` |
 
 ## Related Kconfig
@@ -145,7 +146,22 @@ useful if the BT peer wedged the shell.
 | Config | Default | Purpose |
 |---|---|---|
 | `CONFIG_APP_BTSENSOR_SHELL_MODE` | `n` (`y` in usbnsh defconfig) | Enable shell mode |
-| `CONFIG_APP_BTSENSOR_SHELL_TX_BUF` | 1024 | NSH stdout coalescing buffer (B) |
+| `CONFIG_APP_BTSENSOR_SHELL_TX_BUF` | 4096 | NSH stdout coalescing buffer (B) |
+| `CONFIG_APP_BTSENSOR_SHELL_TX_FRAME_BYTES` | 256 | Per-call `rfcomm_send()` cap to dodge CC2564C ACL stall (Issue #54) |
+| `CONFIG_APP_BTSENSOR_SHELL_THROTTLE_MS` | 5 | Inter-send throttle pacing the controller queue |
 | `CONFIG_APP_BTSENSOR_SHELL_NSH_STACK` | 6144 | NSH child task stack (B) |
 | `CONFIG_APP_BTSENSOR_SHELL_READER_STACK` | 2048 | Reader pthread stack (B) |
 | `CONFIG_DEV_FIFO_SIZE` | 4096 (usbnsh defconfig) | FIFO buffer size (B) |
+
+## Diagnostics
+
+`btsensor diag` (USB NSH) reads live counters from the BT-side TX path
+without going through the BT link itself — useful when something looks
+stuck.  Key fields:
+
+| Field | What it tells you |
+|---|---|
+| `reader: drops / drop_bytes` | Output overran `SHELL_TX_BUF`; bump the buffer if you need full output |
+| `send: ok / no_credit / exceeds_mtu / other_err` | Per-result tally of `rfcomm_send()` |
+| `hci: blocked / now / acl_free` | `blocked` rising while `acl_free` stays low signals the Issue #54 controller stall coming back |
+| `ack: completed_events / packets` | Peer-side `Number_Of_Completed_Packets` events; flat over time = link is dead |

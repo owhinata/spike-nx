@@ -146,6 +146,78 @@ void btsensor_shell_transition_to_active(void *ctx);
 
 void btsensor_shell_drain_timeout(void *ctx);
 
+/* Diagnostic counters for the BT-side NSH shell TX path.  Read by
+ * `btsensor diag` from a separate USB-NSH task; written from the BTstack
+ * thread (send-side fields) and the reader pthread (drop-side fields).
+ * No locking on read — counters are word-aligned uint32_t so a torn
+ * read at most loses last update, which is acceptable for measurement.
+ *
+ * Originally added during #109 follow-up to localize a CC2564C ACL TX
+ * queue stall (Issue #54) — kept after fix as an operational health
+ * window into the shell-mode TX pipe.
+ */
+
+struct btsensor_shell_diag_s
+{
+  /* reader pthread → tx_buf */
+
+  uint32_t reader_appends;           /* successful append rounds */
+  uint32_t reader_drops;              /* rounds where copy < n */
+  uint32_t drop_bytes_total;          /* total bytes dropped (cumulative) */
+  uint32_t tx_buf_high_water;         /* peak tx_len observed */
+
+  /* on_can_send_now → rfcomm_send */
+
+  uint32_t can_send_now_calls;        /* btstack callback fires */
+  uint32_t send_ok;                   /* rfcomm_send returned 0 */
+  uint32_t send_no_credit;            /* returned 0x72 NO_OUTGOING_CREDITS */
+  uint32_t send_exceeds_mtu;          /* returned 0x74 (invariant break) */
+  uint32_t send_other_err;            /* any other non-zero rc */
+  uint32_t send_zero_mtu;             /* mtu==0 early return */
+  uint8_t  last_send_err;             /* last non-zero rc from rfcomm_send */
+  uint16_t last_send_len;             /* len of the last rfcomm_send attempt */
+  uint16_t last_send_mtu;             /* mtu observed at the last attempt */
+
+  /* pump timer */
+
+  uint32_t pump_arms;                 /* shell_arm_pump_timer entries */
+  uint32_t pump_fires;                /* timer handler fires */
+  uint32_t pump_fires_no_data;        /* fired but tx_len==0 */
+  uint32_t pump_fires_no_cid;         /* fired but cid==0 */
+
+  /* HCI / RFCOMM probe at each pump_timer fire with data pending.
+   * Surfaces an ACL-stall recurrence as `hci_blocked` rising while
+   * `acl_free` stays low.
+   */
+
+  uint32_t probe_hci_blocked;         /* hci_can_send_acl_classic_packet_now()==false */
+  uint8_t  probe_last_hci_now;        /* hci_can_send_acl_classic_packet_now at last probe */
+  uint16_t probe_last_acl_buf_len;    /* hci_max_acl_data_packet_length() */
+  uint16_t probe_last_acl_free;       /* hci_number_free_acl_slots_for_connection_type(ACL) */
+  uint16_t probe_last_rfcomm_mtu;     /* rfcomm_get_max_frame_size() */
+
+  /* peer-side ACK observation via HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS */
+
+  uint32_t hci_completed_events;      /* event-handler invocations */
+  uint32_t hci_completed_packets;     /* total packets reported completed */
+  uint32_t hci_completed_last_count;  /* the last per-event packet count */
+};
+
+/* btstack hci packet handler hook for the host-side
+ * HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS event.  Drives the
+ * `hci_completed_*` counters.  Called from the BTstack thread.
+ */
+
+void btsensor_shell_on_hci_completed_packets(uint16_t packets);
+
+void btsensor_shell_get_diag(struct btsensor_shell_diag_s *out);
+
+/* Reset counters.  Useful before a fresh reproduction run so the
+ * caller can see a clean delta.
+ */
+
+void btsensor_shell_reset_diag(void);
+
 #if defined __cplusplus
 }
 #endif

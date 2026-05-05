@@ -47,6 +47,7 @@
 
 #include "btstack_run_loop.h"
 #include "classic/rfcomm.h"
+#include "hci.h"
 
 #include "btsensor_shell.h"
 #include "btsensor_tx.h"
@@ -65,7 +66,15 @@
 #define BTNSH_DEVPATH_OUT    "/dev/btnsh_out"
 
 #ifndef CONFIG_APP_BTSENSOR_SHELL_TX_BUF
-#  define CONFIG_APP_BTSENSOR_SHELL_TX_BUF      1024
+#  define CONFIG_APP_BTSENSOR_SHELL_TX_BUF      16384
+#endif
+
+#ifndef CONFIG_APP_BTSENSOR_SHELL_TX_FRAME_BYTES
+#  define CONFIG_APP_BTSENSOR_SHELL_TX_FRAME_BYTES  256
+#endif
+
+#ifndef CONFIG_APP_BTSENSOR_SHELL_THROTTLE_MS
+#  define CONFIG_APP_BTSENSOR_SHELL_THROTTLE_MS  50
 #endif
 
 #ifndef CONFIG_APP_BTSENSOR_SHELL_NSH_STACK
@@ -146,20 +155,25 @@ struct shell_callback_ctx_s
 };
 
 /* Inter-send throttle for the BT-side TX path (Issue #109 follow-up).
- * NSH stdout writes line-by-line, each line ≈ 70 B.  Without throttle,
- * each line triggers an immediate rfcomm_send, consuming one peer-side
- * outgoing credit.  Linux BlueZ tends to credit-refresh slower than
- * this rate, so a short burst (e.g. `ps` ~1.7 kB / 24 lines) exhausts
- * credits and the channel deadlocks at ~500 B observed.  Re-arming
- * `rfcomm_request_can_send_now_event` through a BTstack timer with a
- * small delay gives the peer time to refresh credits AND allows tx_buf
- * to coalesce multiple NSH writes into a larger single frame.
+ *
+ * The original Issue #109 fix attributed the throttle to "BlueZ peer
+ * credit refresh", but #109 follow-up instrumentation (2026-05-06)
+ * showed the real bottleneck is the CC2564C controller's 4-slot ACL
+ * TX queue: bursting MTU-sized frames pegs HCI ACL credits and the
+ * controller stops draining until link supervision timeout (= same
+ * symptom as Issue #54).  Pacing rfcomm_request_can_send_now_event
+ * through a BTstack timer with a deliberate delay lets the controller
+ * radio-out and the peer ack one frame before we offer the next.
  */
 
-#define BTNSH_TX_THROTTLE_MS  10
+#define BTNSH_TX_THROTTLE_MS  CONFIG_APP_BTSENSOR_SHELL_THROTTLE_MS
 
 static btstack_timer_source_t g_shell_pump_timer;
 static bool                   g_shell_pump_timer_armed;
+
+/* Diagnostic counters (Issue #109 follow-up). */
+
+static struct btsensor_shell_diag_s g_diag;
 
 /****************************************************************************
  * Private Data
@@ -354,6 +368,18 @@ static void *reader_thread(void *arg)
           memcpy(g_shell.tx_buf + g_shell.tx_len, local, copy);
           g_shell.tx_len += copy;
 
+          g_diag.reader_appends += 1;
+          if (copy < (size_t)n)
+            {
+              g_diag.reader_drops += 1;
+              g_diag.drop_bytes_total += (uint32_t)((size_t)n - copy);
+            }
+
+          if (g_shell.tx_len > g_diag.tx_buf_high_water)
+            {
+              g_diag.tx_buf_high_water = (uint32_t)g_shell.tx_len;
+            }
+
           if (g_shell.tx_len > 0 && !g_shell.tx_request_pending)
             {
               g_shell.tx_request_pending = true;
@@ -401,6 +427,7 @@ static void shell_pump_timer_handler(btstack_timer_source_t *ts)
 {
   (void)ts;
   g_shell_pump_timer_armed = false;
+  g_diag.pump_fires += 1;
 
   if (g_shell.mode != BTSENSOR_MODE_SHELL_STARTING &&
       g_shell.mode != BTSENSOR_MODE_SHELL)
@@ -411,6 +438,7 @@ static void shell_pump_timer_handler(btstack_timer_source_t *ts)
   uint16_t cid = btsensor_shell_get_rfcomm_cid();
   if (cid == 0)
     {
+      g_diag.pump_fires_no_cid += 1;
       return;
     }
 
@@ -425,12 +453,36 @@ static void shell_pump_timer_handler(btstack_timer_source_t *ts)
 
   if (has_data)
     {
+      /* Probe HCI / RFCOMM right before asking btstack for a
+       * CAN_SEND_NOW.  Public-API only — the original deeper probe
+       * served its purpose during #109 root-causing and was removed.
+       * `probe_hci_blocked` rising while `probe_last_acl_free` stays
+       * low signals an ACL TX queue stall (Issue #54) coming back.
+       */
+
+      bool     hci_ok      = hci_can_send_acl_classic_packet_now();
+      uint16_t acl_buf_len = hci_max_acl_data_packet_length();
+      uint16_t rfcomm_mtu  = rfcomm_get_max_frame_size(cid);
+      uint16_t acl_free    =
+        hci_number_free_acl_slots_for_connection_type(BD_ADDR_TYPE_ACL);
+
+      g_diag.probe_last_hci_now     = hci_ok ? 1 : 0;
+      g_diag.probe_last_acl_buf_len = acl_buf_len;
+      g_diag.probe_last_rfcomm_mtu  = rfcomm_mtu;
+      g_diag.probe_last_acl_free    = acl_free;
+      if (!hci_ok) g_diag.probe_hci_blocked += 1;
+
       rfcomm_request_can_send_now_event(cid);
+    }
+  else
+    {
+      g_diag.pump_fires_no_data += 1;
     }
 }
 
 static void shell_arm_pump_timer(void)
 {
+  g_diag.pump_arms += 1;
   if (g_shell_pump_timer_armed)
     {
       return;
@@ -993,6 +1045,8 @@ void btsensor_shell_on_rfcomm_data(const uint8_t *data, uint16_t len)
 
 void btsensor_shell_on_can_send_now(void)
 {
+  g_diag.can_send_now_calls += 1;
+
   if (g_shell.mode != BTSENSOR_MODE_SHELL_STARTING &&
       g_shell.mode != BTSENSOR_MODE_SHELL)
     {
@@ -1021,18 +1075,26 @@ void btsensor_shell_on_can_send_now(void)
        * tx_request_pending=true would silently block draining.
        */
 
+      g_diag.send_zero_mtu += 1;
       pthread_mutex_lock(&g_shell.tx_lock);
       g_shell.tx_request_pending = false;
       pthread_mutex_unlock(&g_shell.tx_lock);
       return;
     }
 
-  uint8_t local[CONFIG_APP_BTSENSOR_SHELL_TX_BUF];
+  /* `local` is sized at the per-call cap, not the whole tx_buf.  With
+   * tx_buf grown to several KB (Issue #109 follow-up), a tx_buf-sized
+   * stack array would overflow the 4 KB BTstack thread stack.  send_len
+   * is clamped to CONFIG_APP_BTSENSOR_SHELL_TX_FRAME_BYTES below so
+   * the snapshot always fits.
+   */
+
+  uint8_t local[CONFIG_APP_BTSENSOR_SHELL_TX_FRAME_BYTES];
   size_t  send_len = 0;
   bool    request_more = false;
 
-  /* Snapshot up to MTU bytes from the head of tx_buf.  Do NOT dequeue
-   * yet — only consume bytes after rfcomm_send succeeds.  This
+  /* Snapshot up to per-call cap bytes from the head of tx_buf.  Do NOT
+   * dequeue yet — only consume bytes after rfcomm_send succeeds.  This
    * structurally eliminates the previous push-back / infinite-loop on
    * MTU error.
    */
@@ -1044,6 +1106,17 @@ void btsensor_shell_on_can_send_now(void)
       if (send_len > mtu)
         {
           send_len = mtu;
+        }
+
+      /* Cap below MTU to avoid the CC2564C ACL TX stall (Issue #54).
+       * Smaller frames keep the controller's 4 ACL slots cycling
+       * fast enough that the radio-out + peer-ack round trip can
+       * complete before we offer the next frame.
+       */
+
+      if (send_len > CONFIG_APP_BTSENSOR_SHELL_TX_FRAME_BYTES)
+        {
+          send_len = CONFIG_APP_BTSENSOR_SHELL_TX_FRAME_BYTES;
         }
 
       memcpy(local, g_shell.tx_buf, send_len);
@@ -1059,6 +1132,9 @@ void btsensor_shell_on_can_send_now(void)
 
   uint8_t err = rfcomm_send(cid, local, (uint16_t)send_len);
 
+  g_diag.last_send_len = (uint16_t)send_len;
+  g_diag.last_send_mtu = mtu;
+
   pthread_mutex_lock(&g_shell.tx_lock);
 
   if (err == 0)
@@ -1067,6 +1143,8 @@ void btsensor_shell_on_can_send_now(void)
        * have appended additional bytes at the tail while rfcomm_send
        * was running; those stay queued for the next round.
        */
+
+      g_diag.send_ok += 1;
 
       if (g_shell.tx_len >= send_len)
         {
@@ -1090,6 +1168,9 @@ void btsensor_shell_on_can_send_now(void)
        * catch the regression.  Leave data in tx_buf untouched.
        */
 
+      g_diag.send_exceeds_mtu += 1;
+      g_diag.last_send_err = err;
+
       syslog(LOG_ERR,
              "btnsh: rfcomm_send EXCEEDS_MTU (len=%zu mtu=%u) — "
              "invariant broken\n",
@@ -1102,8 +1183,20 @@ void btsensor_shell_on_can_send_now(void)
        * the re-fire until credit returns, so no synchronous loop.
        */
 
-      syslog(LOG_DEBUG, "btnsh: rfcomm_send rc=0x%02x, retrying\n",
-             (unsigned)err);
+      if (err == RFCOMM_NO_OUTGOING_CREDITS)
+        {
+          g_diag.send_no_credit += 1;
+        }
+      else
+        {
+          g_diag.send_other_err += 1;
+        }
+      g_diag.last_send_err = err;
+
+      /* No syslog here — would feed back into RAMLOG when dmesg
+       * runs (`#109` follow-up).  Counter above is the diagnostic
+       * channel; read via `btsensor diag` from USB NSH.
+       */
     }
 
   if (g_shell.tx_len > 0 && !g_shell.tx_request_pending)
@@ -1159,6 +1252,28 @@ void btsensor_shell_drain_timeout(void *ctx)
 
   syslog(LOG_WARNING, "btnsh: post-drain timeout, tearing down\n");
   cleanup_active_shell(BTSENSOR_SHELL_REASON_TX_DRAIN_TIMEOUT);
+}
+
+void btsensor_shell_get_diag(struct btsensor_shell_diag_s *out)
+{
+  if (out == NULL)
+    {
+      return;
+    }
+
+  *out = g_diag;
+}
+
+void btsensor_shell_reset_diag(void)
+{
+  memset(&g_diag, 0, sizeof(g_diag));
+}
+
+void btsensor_shell_on_hci_completed_packets(uint16_t packets)
+{
+  g_diag.hci_completed_events     += 1;
+  g_diag.hci_completed_packets    += packets;
+  g_diag.hci_completed_last_count  = packets;
 }
 
 #endif /* CONFIG_APP_BTSENSOR_SHELL_MODE */

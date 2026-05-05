@@ -90,9 +90,8 @@ USB 側 `btsensor mode telemetry` は強制 teardown のエスケープハッチ
 - **Ctrl-C / job control なし**: FIFO は tty ではなく、`isctty=false` で spawn しているため `TIOCSCTTY` 発行なし。長時間実行コマンドの中断は RFCOMM 切断のみ。
 - **CRLF / ANSI 正規化なし**: peer terminal 設定で local-echo / CRLF 変換を行うこと (`screen` / `picocom` の `-c` 系オプション)。
 - **stdin overflow**: 大量貼り付けで FIFO 4096B が飽和すると drop。間欠的タイピングなら問題なし。drop は Hub の `syslog` warn にのみ記録 (peer 通知なし)。
-- **大量 stdout 出力 (`dmesg`/長い `help` 等) は信頼性が低い** (Issue #109): RFCOMM credit-based flow control の制約で、NSH が複数 line を短時間に書き出すと peer (Linux BlueZ) からの credit refresh が追いつかず、tx 側 coalescing buffer 満杯で reader が drop に入ります。出力は途中で抜けが出る可能性。Hub セッション自体は alive のまま (subsequent コマンドは送れる) なので、長い出力を取りたい時は **USB NSH (`/dev/ttyACM0`) を使うのが確実**。BT NSH は `ps` / `ls /dev` / `free` / `md5` 等の **短い対話コマンド向け** に最適化されています。
+- **大量 stdout snapshot (`dmesg` / 長い `help` 等) は途中で truncate される** (Issue #109 follow-up): 真因は CC2564C controller の 4-slot ACL TX queue (Issue #54)。MTU いっぱいの RFCOMM frame を burst で投入すると controller queue が詰まり、永久 stall していた。Issue #109 close 時の "BlueZ credit refresh が遅い" 説明は誤り。現在の shell pump は `rfcomm_send()` を 256 B で cap し、5 ms BTstack timer で frame 間 throttle して controller queue を回し続ける。4 KB の TX coalescing buffer (default) を超えた分は reader pthread で drop されるが、**shell session 自体は生き続ける** — 切れた `dmesg` の後に `ps` / `ls /dev` / `free` / `md5` 等の短いコマンドはそのまま使える。1 byte も漏らしたくないなら `CONFIG_APP_BTSENSOR_SHELL_TX_BUF` を bump する (RAMLOG 16 KB に合わせるなら 16384)。
 - **複数 SPP client 並行不可**: 既存 RFCOMM 構成と同じく単一 channel。
-- **stdout overflow**: NSH 大量出力 (`dmesg` 等) で TX coalescing buffer (1024B 既定) が飽和した場合、reader は overflow 分を drop+warn する。
 - **shell 中の telemetry frame 同時送信なし**: 排他設計のため。BUNDLE が必要なら `MODE TELEMETRY` で戻ること。
 
 ## トラブルシュート
@@ -102,7 +101,8 @@ USB 側 `btsensor mode telemetry` は強制 teardown のエスケープハッチ
 | `MODE SHELL` を送ったあと反応なし | telemetry pump (IMU/SENSOR) ON のまま | 先に `IMU OFF\n` / `SENSOR OFF\n` を送る |
 | `ERR shell_unavailable` | daemon 起動時 mkfifo 失敗 (`CONFIG_PIPES`/`CONFIG_DEV_FIFO_SIZE` 未設定) | defconfig 確認、`btsensor stop` → `start` 再試行 |
 | `OK\n` の後に NSH 出力が来ない | `nsh_session` の起動失敗 / 子タスクスタック不足 | `nsh> ps` で `btnsh` task の Stack used 確認、`CONFIG_APP_BTSENSOR_SHELL_NSH_STACK` を増やす |
-| 大きな出力が途切れる | TX coalescing buffer overflow | `CONFIG_APP_BTSENSOR_SHELL_TX_BUF` を 2048/4096 に拡大 |
+| 大きな出力が途切れる | TX coalescing buffer overflow | `CONFIG_APP_BTSENSOR_SHELL_TX_BUF` を 8192 / 16384 に拡大 |
+| `btsensor diag` で `hci blocked` が増える | CC2564C ACL TX queue stall 再発 (Issue #54) | `CONFIG_APP_BTSENSOR_SHELL_THROTTLE_MS` を 10/20 に上げる、または `CONFIG_APP_BTSENSOR_SHELL_TX_FRAME_BYTES` を 128 に下げる |
 | 終了時に `READY\n` が来ない | RFCOMM 切断経由で抜けた | これは仕様。再接続後 `IMU ON` 等で telemetry mode 動作確認 |
 
 ## 関連設定 (Kconfig)
@@ -110,7 +110,20 @@ USB 側 `btsensor mode telemetry` は強制 teardown のエスケープハッチ
 | Config | 既定 | 役割 |
 |---|---|---|
 | `CONFIG_APP_BTSENSOR_SHELL_MODE` | `n` (usbnsh defconfig は `y`) | shell mode 機能の有効化 |
-| `CONFIG_APP_BTSENSOR_SHELL_TX_BUF` | 1024 | NSH stdout coalescing buffer (B) |
+| `CONFIG_APP_BTSENSOR_SHELL_TX_BUF` | 4096 | NSH stdout coalescing buffer (B) |
+| `CONFIG_APP_BTSENSOR_SHELL_TX_FRAME_BYTES` | 256 | `rfcomm_send()` per-call cap (Issue #54 ACL stall 回避) |
+| `CONFIG_APP_BTSENSOR_SHELL_THROTTLE_MS` | 5 | controller queue を回すための frame 間 throttle |
 | `CONFIG_APP_BTSENSOR_SHELL_NSH_STACK` | 6144 | NSH 子タスクのスタック (B) |
 | `CONFIG_APP_BTSENSOR_SHELL_READER_STACK` | 2048 | reader pthread のスタック (B) |
 | `CONFIG_DEV_FIFO_SIZE` | 4096 (usbnsh defconfig) | FIFO バッファサイズ (B) |
+
+## 診断 (`btsensor diag`)
+
+USB NSH 側で `btsensor diag` を叩くと、BT 経由を通さずに hub 内部の TX path counters を読める。詰まった時の切り分けに使う。
+
+| フィールド | 意味 |
+|---|---|
+| `reader: drops / drop_bytes` | `SHELL_TX_BUF` 越え。すべての出力が必要なら buffer を拡大 |
+| `send: ok / no_credit / exceeds_mtu / other_err` | `rfcomm_send()` の戻り値別カウント |
+| `hci: blocked / now / acl_free` | `blocked` が増え `acl_free` 低い → Issue #54 controller stall 再発のサイン |
+| `ack: completed_events / packets` | peer 側の `Number_Of_Completed_Packets` event 受信数。経時で増えていなければ link 死亡 |

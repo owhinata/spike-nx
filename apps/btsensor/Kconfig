@@ -94,14 +94,46 @@ if APP_BTSENSOR_SHELL_MODE
 
 config APP_BTSENSOR_SHELL_TX_BUF
 	int "Shell TX coalescing buffer (bytes)"
-	default 1024
-	range 256 4096
+	default 4096
+	range 256 32768
 	---help---
 		Size of the coalescing buffer that holds NSH stdout bytes
 		between the reader pthread and the BTstack thread that
-		drives rfcomm_send().  Larger values reduce can-send-now
-		round-trips for bursty output (`dmesg`, `ls /dev`); cost
-		is BSS in the user image.
+		drives rfcomm_send().  4096 covers everyday short-output
+		commands.  Larger snapshots (a full RAMLOG `dmesg`) over-run
+		this buffer and the reader drops the tail, but the shell
+		session itself stays usable — bump only if you need to
+		capture every byte of a large dump.  TX throttle and the
+		frame-size cap below pace the actual radio output to avoid
+		the CC2564C ACL TX queue stall (Issue #54 / #109).
+
+config APP_BTSENSOR_SHELL_TX_FRAME_BYTES
+	int "Shell rfcomm_send frame size cap (bytes)"
+	default 256
+	range 64 1016
+	---help---
+		Per-call upper bound on the byte count handed to
+		rfcomm_send() from the shell pump.  RFCOMM negotiates
+		up to 1016 B per frame, but the CC2564C controller has
+		only HC_Total_Num_ACL_Data_Packets=4 ACL TX slots and a
+		burst of MTU-sized frames stalls the controller until
+		link supervision timeout (Issue #54 / #109 root cause).
+		Smaller frames trade per-byte overhead for shorter slot
+		occupancy and better resilience against the stall.  256 B
+		gives ~4 frames per slot turnover for `dmesg`-class
+		output without hitting the stall trigger.
+
+config APP_BTSENSOR_SHELL_THROTTLE_MS
+	int "Shell pump timer interval (ms)"
+	default 5
+	range 1 500
+	---help---
+		Inter-send delay between successive RFCOMM_REQUEST_CAN_SEND_NOW
+		fires from the shell TX pump.  Throttling gives the
+		controller a window to drain the previous ACL packet before
+		the next one is offered, avoiding the CC2564C ACL TX queue
+		stall (Issue #54).  Combined with the 256 B frame cap, 5 ms
+		is enough headroom on a 4-slot controller queue.
 
 config APP_BTSENSOR_SHELL_NSH_STACK
 	int "NSH child task stack (bytes)"
