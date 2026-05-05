@@ -39,6 +39,7 @@
 
 #include <arch/board/board_sound.h>
 
+#include "board_usercheck.h"
 #include "spike_prime_hub.h"
 #include "stm32_sound.h"
 
@@ -511,6 +512,11 @@ static ssize_t tone_write(FAR struct file *filep,
       return 0;
     }
 
+  if (!board_user_in_ok(ubuf, nbytes))
+    {
+      return -EFAULT;
+    }
+
   struct tune_parser_s parser;
   struct parsed_note_s note;
   ssize_t              ret = (ssize_t)nbytes;
@@ -634,6 +640,11 @@ static int tone_ioctl(FAR struct file *filep, int cmd, unsigned long arg)
           if (out == NULL)
             {
               return -EINVAL;
+            }
+
+          if (!board_user_out_ok(out, sizeof(*out)))
+            {
+              return -EFAULT;
             }
 
           *out = (int)stm32_sound_get_volume();

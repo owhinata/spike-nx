@@ -24,6 +24,7 @@
 
 #include <arch/board/board_legoport.h>
 
+#include "board_usercheck.h"
 #include "spike_prime_hub.h"
 
 #ifdef CONFIG_LEGO_LUMP_DIAG
@@ -211,16 +212,17 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
               return -EINVAL;
             }
 
+          if (!board_user_out_ok(user, sizeof(*user)))
+            {
+              return -EFAULT;
+            }
+
           ret = stm32_legoport_get_info(priv->port, &info);
           if (ret < 0)
             {
               return ret;
             }
 
-          /* memcpy through a kernel-stack copy is sufficient bounds
-           * hardening for #42 under BUILD_PROTECTED — Issue #41 covers
-           * the broader user-pointer sweep across all ioctl handlers.
-           */
           memcpy(user, &info.device_type, sizeof(uint8_t));
           return OK;
         }
@@ -234,6 +236,11 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
           if (user == NULL)
             {
               return -EINVAL;
+            }
+
+          if (!board_user_out_ok(user, sizeof(*user)))
+            {
+              return -EFAULT;
             }
 
           ret = stm32_legoport_get_info(priv->port, &info);
@@ -318,6 +325,11 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
               return -EINVAL;
             }
 
+          if (!board_user_out_ok(user, sizeof(*user)))
+            {
+              return -EFAULT;
+            }
+
           stm32_legoport_get_stats(&stats);
           memcpy(user, &stats, sizeof(stats));
           return OK;
@@ -345,6 +357,11 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
               return -EINVAL;
             }
 
+          if (!board_user_out_ok(user, sizeof(*user)))
+            {
+              return -EFAULT;
+            }
+
           int rc = lump_get_info(priv->port, &info);
           if (rc < 0)
             {
@@ -361,15 +378,32 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
         {
           FAR struct legoport_lump_send_arg_s *user =
               (FAR struct legoport_lump_send_arg_s *)arg;
+          struct legoport_lump_send_arg_s send_kern;
 
-          if (user == NULL || user->len == 0 ||
-              user->len > sizeof(user->data))
+          if (user == NULL)
             {
               return -EINVAL;
             }
 
-          return lump_send_data(priv->port, user->mode,
-                                user->data, user->len);
+          if (!board_user_in_ok(user, sizeof(*user)))
+            {
+              return -EFAULT;
+            }
+
+          /* Copy into kernel-local before validating len so a concurrent
+           * user-side mutation cannot bypass the bound on data[].
+           */
+
+          memcpy(&send_kern, user, sizeof(send_kern));
+
+          if (send_kern.len == 0 ||
+              send_kern.len > sizeof(send_kern.data))
+            {
+              return -EINVAL;
+            }
+
+          return lump_send_data(priv->port, send_kern.mode,
+                                send_kern.data, send_kern.len);
         }
 
       case LEGOPORT_LUMP_POLL_DATA:
@@ -381,6 +415,11 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
           if (user == NULL)
             {
               return -EINVAL;
+            }
+
+          if (!board_user_out_ok(user, sizeof(*user)))
+            {
+              return -EFAULT;
             }
 
           int rc = lump_pop_data_frame(priv->port, &frame);
@@ -401,6 +440,11 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
           if (user == NULL)
             {
               return -EINVAL;
+            }
+
+          if (!board_user_out_ok(user, sizeof(*user)))
+            {
+              return -EFAULT;
             }
 
           int rc = lump_get_status_full(priv->port, &status);
@@ -452,6 +496,11 @@ static int legoport_cdev_ioctl(FAR struct file *filep, int cmd,
           if (user == NULL)
             {
               return -EINVAL;
+            }
+
+          if (!board_user_out_ok(user, sizeof(*user)))
+            {
+              return -EFAULT;
             }
 
           int rc = stm32_legoport_pwm_get_status(priv->port, &status);

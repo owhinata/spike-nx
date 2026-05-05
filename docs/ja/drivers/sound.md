@@ -164,7 +164,7 @@ struct pcm_write_hdr_s
 7. `payload_bytes == nbytes - hdr_size` ... `-EINVAL`
 8. `payload_bytes <= CONFIG_SPIKE_SOUND_PCM_BUFSAMPLES * 2` ... `-E2BIG`
 
-検証から `memcpy` → `stm32_sound_play_pcm` → `owner = filep` までが `g_sound.lock` 配下で atomic に実行される。ユーザ空間ポインタは FLAT build 前提で `memcpy` する。PROTECTED build に移行する場合は `copyin()` 相当が必要。
+検証から `memcpy` → `stm32_sound_play_pcm` → `owner = filep` までが `g_sound.lock` 配下で atomic に実行される。`CONFIG_BUILD_PROTECTED` では `boards/spike-prime-hub/src/board_usercheck.h` の `board_user_in_ok(ubuf, nbytes)` で user buffer 全域を user-readable 範囲 (usram/xsram + uflash) に収まることを検証してから、header を kernel-local struct にコピー (TOCTOU 対策) → field 検証 → payload を kernel BSS バッファ `g_pcm_buf` に `memcpy` する流れ。`CONFIG_BUILD_FLAT` では範囲チェックは no-op に縮退する。
 
 ### ループ再生前提
 
@@ -238,7 +238,7 @@ struct pcm_write_hdr_s
 | `beep()` のノンブロッキング補助 | `pb_type_Speaker_beep_test_completion` による非同期完了検知で協調マルチタスクに統合 | `write()` + `usleep` ベースの同期実装のみ (Ctrl-C / ioctl で中断は可) |
 | `play_notes()` の Python イテレータ | 実行時に `notes_generator` として継続、別タスクと並行動作可 | `/dev/tone0` への write は単一呼出ブロッキング |
 | タイマ常時動作 | `pbdrv_sound_init` で TIM6 を起動後、以降は停止せず循環 | 再生のたびに `TIM6.CEN` を 0→1 トグル |
-| DMA バッファのゼロコピー | caller バッファ (MicroPython 側の静的 16 サンプル) をそのまま DMA に渡す | `/dev/pcm0` では user ポインタを kernel BSS に `memcpy` (NuttX の FLAT/PROTECTED セーフティ) |
+| DMA バッファのゼロコピー | caller バッファ (MicroPython 側の静的 16 サンプル) をそのまま DMA に渡す | `/dev/pcm0` では user ポインタを kernel BSS に `memcpy` (BUILD_PROTECTED 下では `board_user_in_ok` で範囲検証してからコピー) |
 
 ### 互換性の保ち方
 
@@ -248,7 +248,6 @@ struct pcm_write_hdr_s
 
 ## 既知の制約
 
-- **FLAT build のみ対応**。`CONFIG_BUILD_PROTECTED` では user pointer 直接 `memcpy` が不可なので `copyin()` 相当が必要。
 - **PCM バッファは 1 周期ループ再生専用**。任意長 WAV を順次ストリームする用途は非サポート。
 - **音量変更は次音から反映**。現在鳴っている音は変更前の振幅で鳴り続ける (pybricks と同じ)。
 - **中断精度は約 20 ms スライス**。`stop_flag` ポーリングの粒度。

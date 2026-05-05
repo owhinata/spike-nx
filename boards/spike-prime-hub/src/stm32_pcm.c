@@ -10,9 +10,12 @@
  * sample rate so there is no order dependency between separate ioctls.
  *
  * Validation is performed inside g_sound.lock so that the race window
- * against concurrent close()/ioctl()/tone_write() is closed.  The current
- * build targets CONFIG_BUILD_FLAT; if CONFIG_BUILD_PROTECTED support is
- * added later, the memcpy below will need to use a copyin() helper.
+ * against concurrent close()/ioctl()/tone_write() is closed.  Under
+ * CONFIG_BUILD_PROTECTED the user pointer is range-checked via
+ * board_usercheck.h before any dereference, and the header is copied
+ * into a kernel-local struct before validation to close the TOCTOU
+ * window against user-side mutation between the magic/size/count
+ * checks and the payload memcpy.
  ****************************************************************************/
 
 /****************************************************************************
@@ -34,6 +37,7 @@
 
 #include <arch/board/board_sound.h>
 
+#include "board_usercheck.h"
 #include "spike_prime_hub.h"
 #include "stm32_sound.h"
 
@@ -94,73 +98,84 @@ static int pcm_close(FAR struct file *filep)
 static ssize_t pcm_write(FAR struct file *filep,
                          FAR const char *ubuf, size_t nbytes)
 {
+  struct pcm_write_hdr_s hdr;
+  size_t payload_bytes;
+  int ret;
+
   if (ubuf == NULL)
     {
       return -EINVAL;
     }
 
+  /* 1. minimum header size — bound the user range before any deref */
+
+  if (nbytes < sizeof(hdr))
+    {
+      return -EINVAL;
+    }
+
+  /* 2. validate the entire user buffer is in user-readable memory */
+
+  if (!board_user_in_ok(ubuf, nbytes))
+    {
+      return -EFAULT;
+    }
+
   nxmutex_lock(&g_sound.lock);
 
-  /* 1. minimum header size */
+  /* 3. copy header into kernel-local first to close TOCTOU */
 
-  if (nbytes < sizeof(struct pcm_write_hdr_s))
+  memcpy(&hdr, ubuf, sizeof(hdr));
+
+  /* 4. forward-compatible version gate */
+
+  if (hdr.version > PCM_WRITE_VERSION)
     {
       nxmutex_unlock(&g_sound.lock);
       return -EINVAL;
     }
 
-  FAR const struct pcm_write_hdr_s *h =
-    (FAR const struct pcm_write_hdr_s *)ubuf;
+  /* 5. magic */
 
-  /* 2. forward-compatible version gate */
-
-  if (h->version > PCM_WRITE_VERSION)
+  if (hdr.magic != PCM_WRITE_MAGIC)
     {
       nxmutex_unlock(&g_sound.lock);
       return -EINVAL;
     }
 
-  /* 3. magic */
+  /* 6. hdr_size / sample_rate range */
 
-  if (h->magic != PCM_WRITE_MAGIC)
+  if (hdr.hdr_size < sizeof(hdr) || hdr.hdr_size > nbytes)
     {
       nxmutex_unlock(&g_sound.lock);
       return -EINVAL;
     }
 
-  /* 4. hdr_size / sample_rate range */
-
-  if (h->hdr_size < sizeof(struct pcm_write_hdr_s) || h->hdr_size > nbytes)
+  if (hdr.sample_rate < 1000 || hdr.sample_rate > 100000)
     {
       nxmutex_unlock(&g_sound.lock);
       return -EINVAL;
     }
 
-  if (h->sample_rate < 1000 || h->sample_rate > 100000)
-    {
-      nxmutex_unlock(&g_sound.lock);
-      return -EINVAL;
-    }
+  /* 7. overflow check on sample_count * 2 */
 
-  /* 5. overflow check on sample_count * 2 */
-
-  if (h->sample_count > (UINT32_MAX / 2))
+  if (hdr.sample_count > (UINT32_MAX / 2))
     {
       nxmutex_unlock(&g_sound.lock);
       return -EOVERFLOW;
     }
 
-  size_t payload_bytes = (size_t)h->sample_count * sizeof(uint16_t);
+  payload_bytes = (size_t)hdr.sample_count * sizeof(uint16_t);
 
-  /* 6. total bytes consistency */
+  /* 8. total bytes consistency */
 
-  if (payload_bytes != (nbytes - h->hdr_size))
+  if (payload_bytes != (nbytes - hdr.hdr_size))
     {
       nxmutex_unlock(&g_sound.lock);
       return -EINVAL;
     }
 
-  /* 7. kernel buffer capacity */
+  /* 9. kernel buffer capacity */
 
   if (payload_bytes > sizeof(g_pcm_buf))
     {
@@ -173,13 +188,15 @@ static ssize_t pcm_write(FAR struct file *filep,
   atomic_store_explicit(&g_sound.stop_flag, true, memory_order_relaxed);
   stm32_sound_stop_pcm();
 
-  /* 8. copy payload and start playback.  FLAT build: memcpy is safe.
-   *    TODO: switch to copyin() helper when CONFIG_BUILD_PROTECTED is used.
+  /* 10. copy payload into kernel buffer.  Whole ubuf was range-checked
+   *     above so this slice is in-range; user-side mutation between the
+   *     header copy and this memcpy can only corrupt the audio output,
+   *     not escape into kernel memory.
    */
 
-  memcpy(g_pcm_buf, (const uint8_t *)ubuf + h->hdr_size, payload_bytes);
+  memcpy(g_pcm_buf, (const uint8_t *)ubuf + hdr.hdr_size, payload_bytes);
 
-  int ret = stm32_sound_play_pcm(g_pcm_buf, h->sample_count, h->sample_rate);
+  ret = stm32_sound_play_pcm(g_pcm_buf, hdr.sample_count, hdr.sample_rate);
   if (ret >= 0)
     {
       g_sound.owner = filep;
@@ -212,6 +229,11 @@ static int pcm_ioctl(FAR struct file *filep, int cmd, unsigned long arg)
           if (out == NULL)
             {
               return -EINVAL;
+            }
+
+          if (!board_user_out_ok(out, sizeof(*out)))
+            {
+              return -EFAULT;
             }
 
           *out = (int)stm32_sound_get_volume();

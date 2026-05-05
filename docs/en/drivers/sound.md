@@ -162,7 +162,7 @@ struct pcm_write_hdr_s
 7. `payload_bytes == nbytes - hdr_size` → `-EINVAL`.
 8. `payload_bytes <= CONFIG_SPIKE_SOUND_PCM_BUFSAMPLES * 2` → `-E2BIG`.
 
-Validation, `memcpy` into the kernel BSS buffer, `stm32_sound_play_pcm`, and the `owner = filep` update all run atomically under `g_sound.lock`.  User pointers are copied with `memcpy` on FLAT builds; `CONFIG_BUILD_PROTECTED` would need a `copyin()` helper.
+Validation, `memcpy` into the kernel BSS buffer, `stm32_sound_play_pcm`, and the `owner = filep` update all run atomically under `g_sound.lock`.  Under `CONFIG_BUILD_PROTECTED` the entire user buffer is range-checked with `board_user_in_ok(ubuf, nbytes)` (from `boards/spike-prime-hub/src/board_usercheck.h`) before any dereference, then the header is copied into a kernel-local struct (closes the TOCTOU window between the magic/size/count checks and the payload copy), then the payload is `memcpy`'d into the kernel BSS buffer `g_pcm_buf`.  Under `CONFIG_BUILD_FLAT` the range check degenerates to `true`.
 
 ### Cyclic playback
 
@@ -236,7 +236,7 @@ The low-level layer of this driver is a 1:1 equivalent of pybricks `pbdrv_sound_
 | Non-blocking beep completion | `pb_type_Speaker_beep_test_completion` integrates with the cooperative scheduler | `write()` + `usleep` is synchronous (Ctrl-C and ioctl still interrupt) |
 | Python `play_notes()` generator | Runs as a `notes_generator` and can continue alongside other tasks | `/dev/tone0` write is a single blocking call |
 | Always-on sample timer | `pbdrv_sound_init` starts TIM6 once and leaves it running | `TIM6.CEN` is toggled 0→1 for every playback |
-| DMA zero-copy buffer | The caller's buffer is handed straight to the DMA engine | `/dev/pcm0` copies the user payload into a kernel BSS buffer (FLAT/PROTECTED safety) |
+| DMA zero-copy buffer | The caller's buffer is handed straight to the DMA engine | `/dev/pcm0` copies the user payload into a kernel BSS buffer (under BUILD_PROTECTED the user range is validated by `board_user_in_ok` before the copy) |
 
 ### Keeping compatibility in mind
 
@@ -246,7 +246,6 @@ The low-level layer of this driver is a 1:1 equivalent of pybricks `pbdrv_sound_
 
 ## Known limitations
 
-- **FLAT build only**.  `CONFIG_BUILD_PROTECTED` would need a `copyin()` helper for user pointers.
 - **PCM buffer plays one period on loop**.  Streaming arbitrary-length WAV content is not supported.
 - **Volume changes apply on the next note**.  The currently playing waveform keeps the old amplitude (same as pybricks).
 - **Interruption granularity is ~20 ms** — the slice size of the `stop_flag` polling loop.

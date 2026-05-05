@@ -48,6 +48,8 @@
 
 #include <arch/board/board_lsm6dsl.h>
 
+#include "board_usercheck.h"
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -630,6 +632,15 @@ static int lsm6dsl_get_info(FAR struct sensor_lowerhalf_s *lower,
   FAR struct lsm6dsl_dev_s *dev =
       container_of(lower, struct lsm6dsl_dev_s, imu_lower);
 
+  /* nuttx/drivers/sensors/sensor.c forwards arg as a raw user pointer;
+   * validate the destination range before any write under BUILD_PROTECTED.
+   */
+
+  if (!board_user_out_ok(info, sizeof(*info)))
+    {
+      return -EFAULT;
+    }
+
   memset(info, 0, sizeof(*info));
   info->power      = 0.55f;
   info->resolution = 1.0f;        /* Raw LSB */
@@ -675,6 +686,12 @@ static int lsm6dsl_control(FAR struct sensor_lowerhalf_s *lower,
         if (id == NULL)
           {
             err = -EINVAL;
+            break;
+          }
+
+        if (!board_user_out_ok(id, sizeof(*id)))
+          {
+            err = -EFAULT;
             break;
           }
 

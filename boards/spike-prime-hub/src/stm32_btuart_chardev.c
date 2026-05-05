@@ -29,6 +29,7 @@
 
 #include <arch/board/board_btuart.h>
 
+#include "board_usercheck.h"
 #include "spike_prime_hub.h"
 
 #ifdef CONFIG_STM32_USART2
@@ -172,6 +173,11 @@ static ssize_t btuart_cdev_read(FAR struct file *filep, FAR char *buffer,
       return 0;
     }
 
+  if (!board_user_out_ok(buffer, buflen))
+    {
+      return -EFAULT;
+    }
+
   /* One-shot loop: try a read; if empty and blocking, wait for rxsem. */
 
   for (; ; )
@@ -203,6 +209,11 @@ static ssize_t btuart_cdev_write(FAR struct file *filep,
   if (buflen == 0)
     {
       return 0;
+    }
+
+  if (!board_user_in_ok(buffer, buflen))
+    {
+      return -EFAULT;
     }
 
   return priv->lower->write(priv->lower, (FAR const uint8_t *)buffer,

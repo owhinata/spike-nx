@@ -56,6 +56,8 @@
 #include <arch/board/board_legosensor.h>
 #include <arch/board/board_lump.h>
 
+#include "board_usercheck.h"
+
 /* Forward declaration from stm32_legoport_pwm.c — motor SET_PWM
  * (LEGOSENSOR_CLASS_MOTOR_*) is plumbed straight through to the
  * H-bridge driver shipped in Issue #80.
@@ -839,6 +841,11 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
               return -EINVAL;
             }
 
+          if (!board_user_out_ok(out, sizeof(*out)))
+            {
+              return -EFAULT;
+            }
+
           if (bound_port < 0)
             {
               return -ENODEV;
@@ -859,6 +866,11 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
           if (out == NULL)
             {
               return -EINVAL;
+            }
+
+          if (!board_user_out_ok(out, sizeof(*out)))
+            {
+              return -EFAULT;
             }
 
           if (bound_port < 0)
@@ -928,6 +940,7 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
         {
           FAR const struct legosensor_select_arg_s *sel =
               (FAR const struct legosensor_select_arg_s *)(uintptr_t)arg;
+          struct legosensor_select_arg_s sel_kern;
           FAR struct legosensor_port_s *p;
           uint8_t mode;
           int port_to_use = -1;
@@ -936,7 +949,14 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
             {
               return -EINVAL;
             }
-          mode = sel->mode;
+
+          if (!board_user_in_ok(sel, sizeof(*sel)))
+            {
+              return -EFAULT;
+            }
+
+          memcpy(&sel_kern, sel, sizeof(sel_kern));
+          mode = sel_kern.mode;
 
           ret = legosensor_check_write_claim(cs, filep, &port_to_use);
           if (ret < 0)
@@ -972,6 +992,7 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
         {
           FAR const struct legosensor_send_arg_s *snd =
               (FAR const struct legosensor_send_arg_s *)(uintptr_t)arg;
+          struct legosensor_send_arg_s snd_kern;
           int port_to_use = -1;
 
           if (snd == NULL)
@@ -979,7 +1000,19 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
               return -EINVAL;
             }
 
-          if (snd->len == 0 || snd->len > LUMP_MAX_PAYLOAD)
+          if (!board_user_in_ok(snd, sizeof(*snd)))
+            {
+              return -EFAULT;
+            }
+
+          /* Copy into kernel-local before validating len: a concurrent
+           * user-side mutation between the len check and lump_send_data
+           * could otherwise let len exceed the validated bound.
+           */
+
+          memcpy(&snd_kern, snd, sizeof(snd_kern));
+
+          if (snd_kern.len == 0 || snd_kern.len > LUMP_MAX_PAYLOAD)
             {
               return -EINVAL;
             }
@@ -990,19 +1023,32 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
               return ret;
             }
 
-          return lump_send_data(port_to_use, snd->mode, snd->data, snd->len);
+          return lump_send_data(port_to_use, snd_kern.mode,
+                                snd_kern.data, snd_kern.len);
         }
 
       case LEGOSENSOR_SET_PWM:
         {
           FAR const struct legosensor_pwm_arg_s *pwm =
               (FAR const struct legosensor_pwm_arg_s *)(uintptr_t)arg;
+          struct legosensor_pwm_arg_s pwm_kern;
           int port_to_use = -1;
 
           if (pwm == NULL)
             {
               return -EINVAL;
             }
+
+          if (!board_user_in_ok(pwm, sizeof(*pwm)))
+            {
+              return -EFAULT;
+            }
+
+          /* Copy into kernel-local so num_channels / channels[] cannot
+           * be mutated from user mode after the validation below.
+           */
+
+          memcpy(&pwm_kern, pwm, sizeof(pwm_kern));
 
           /* SET_PWM is reserved for **H-bridge physical PWM**, i.e. the
            * MOTOR_* classes routed through `stm32_legoport_pwm_set_duty`
@@ -1024,11 +1070,12 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
                  * `stm32_legoport_pwm_set_duty(idx, int16_t)` ABI.
                  */
 
-                if (pwm->num_channels != 1)
+                if (pwm_kern.num_channels != 1)
                   {
                     return -EINVAL;
                   }
-                if (pwm->channels[0] < -10000 || pwm->channels[0] > 10000)
+                if (pwm_kern.channels[0] < -10000 ||
+                    pwm_kern.channels[0] > 10000)
                   {
                     return -EINVAL;
                   }
@@ -1046,7 +1093,7 @@ static int legosensor_control(FAR struct sensor_lowerhalf_s *lower,
                  */
 
                 return stm32_legoport_pwm_set_duty(port_to_use,
-                                                   pwm->channels[0]);
+                                                   pwm_kern.channels[0]);
 
               case LEGOSENSOR_CLASS_COLOR:
               case LEGOSENSOR_CLASS_ULTRASONIC:

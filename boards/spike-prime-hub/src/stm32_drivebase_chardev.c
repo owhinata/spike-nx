@@ -55,6 +55,7 @@
 
 #include <arch/board/board_drivebase.h>
 
+#include "board_usercheck.h"
 #include "spike_prime_hub.h"
 
 #ifdef CONFIG_BOARD_DRIVEBASE_CHARDEV
@@ -333,6 +334,11 @@ static int db_pop_envelope(FAR struct db_chardev_s *dev,
   uint32_t tail = atomic_load(&dev->cmd_tail);
   uint32_t head;
 
+  if (!board_user_out_ok(out, sizeof(*out)))
+    {
+      return -EFAULT;
+    }
+
   /* Re-read head under producer_lock for a consistent snapshot — the
    * producer touches both head and the slot we are about to read.
    */
@@ -364,28 +370,48 @@ static int db_pop_envelope(FAR struct db_chardev_s *dev,
  * Private Functions — state / status publish
  ****************************************************************************/
 
-static void db_publish_state(FAR struct db_chardev_s *dev,
-                             FAR const struct drivebase_state_s *st)
+static int db_publish_state(FAR struct db_chardev_s *dev,
+                            FAR const struct drivebase_state_s *st)
 {
   unsigned int active   = atomic_load(&dev->state_active);
   unsigned int inactive = active ^ 1u;
+
+  if (!board_user_in_ok(st, sizeof(*st)))
+    {
+      return -EFAULT;
+    }
+
+  /* Single struct copy from user into kernel-side double buffer; the
+   * compiler may decompose this into multiple loads, but any user-side
+   * mutation between them only corrupts the published snapshot, which
+   * the daemon owns by contract.
+   */
+
   dev->state_db[inactive] = *st;
   atomic_store(&dev->state_active, inactive);
 
   dev->last_publish_ticks    = clock_systime_ticks();
   dev->status.last_publish_us =
     (uint32_t)TICK2USEC(dev->last_publish_ticks);
+  return OK;
 }
 
-static void db_read_state(FAR struct db_chardev_s *dev,
-                          FAR struct drivebase_state_s *out)
+static int db_read_state(FAR struct db_chardev_s *dev,
+                         FAR struct drivebase_state_s *out)
 {
   unsigned int active = atomic_load(&dev->state_active);
+
+  if (!board_user_out_ok(out, sizeof(*out)))
+    {
+      return -EFAULT;
+    }
+
   *out = dev->state_db[active];
+  return OK;
 }
 
-static void db_publish_status(FAR struct db_chardev_s *dev,
-                              FAR const struct drivebase_status_s *src)
+static int db_publish_status(FAR struct db_chardev_s *dev,
+                             FAR const struct drivebase_status_s *src)
 {
   /* Writer-side seqlock: bump to odd, copy, bump to even.  Status fields
    * the kernel maintains itself (cmd_ring_depth / cmd_drop_count /
@@ -394,27 +420,48 @@ static void db_publish_status(FAR struct db_chardev_s *dev,
    * them.
    */
 
-  unsigned int seq = atomic_fetch_add(&dev->status_seq, 1) + 1;  /* odd  */
+  struct drivebase_status_s src_kern;
+  unsigned int seq;
+
+  if (!board_user_in_ok(src, sizeof(*src)))
+    {
+      return -EFAULT;
+    }
+
+  /* Snapshot the user struct into kernel memory before per-field reads
+   * so concurrent user-side mutation cannot make the seqlock'd publish
+   * inconsistent with itself.
+   */
+
+  memcpy(&src_kern, src, sizeof(src_kern));
+
+  seq = atomic_fetch_add(&dev->status_seq, 1) + 1;  /* odd  */
   (void)seq;
 
-  dev->status.configured        = src->configured;
-  dev->status.motor_l_bound     = src->motor_l_bound;
-  dev->status.motor_r_bound     = src->motor_r_bound;
-  dev->status.imu_present       = src->imu_present;
-  dev->status.use_gyro          = src->use_gyro;
-  dev->status.tick_count        = src->tick_count;
-  dev->status.tick_overrun_count = src->tick_overrun_count;
-  dev->status.tick_max_lag_us    = src->tick_max_lag_us;
-  dev->status.encoder_drop_count = src->encoder_drop_count;
+  dev->status.configured        = src_kern.configured;
+  dev->status.motor_l_bound     = src_kern.motor_l_bound;
+  dev->status.motor_r_bound     = src_kern.motor_r_bound;
+  dev->status.imu_present       = src_kern.imu_present;
+  dev->status.use_gyro          = src_kern.use_gyro;
+  dev->status.tick_count        = src_kern.tick_count;
+  dev->status.tick_overrun_count = src_kern.tick_overrun_count;
+  dev->status.tick_max_lag_us    = src_kern.tick_max_lag_us;
+  dev->status.encoder_drop_count = src_kern.encoder_drop_count;
 
   atomic_fetch_add(&dev->status_seq, 1);                          /* even */
+  return OK;
 }
 
-static void db_read_status(FAR struct db_chardev_s *dev,
-                           FAR struct drivebase_status_s *out)
+static int db_read_status(FAR struct db_chardev_s *dev,
+                          FAR struct drivebase_status_s *out)
 {
   unsigned int s1;
   unsigned int s2 = ~0u;
+
+  if (!board_user_out_ok(out, sizeof(*out)))
+    {
+      return -EFAULT;
+    }
 
   do
     {
@@ -428,6 +475,7 @@ static void db_read_status(FAR struct db_chardev_s *dev,
       s2   = atomic_load(&dev->status_seq);
     }
   while (s1 != s2);
+  return OK;
 }
 
 /****************************************************************************
@@ -566,11 +614,25 @@ static int db_handle_daemon_attach(FAR struct db_chardev_s *dev,
                                    FAR struct file *filep,
                                    FAR const struct drivebase_attach_s *att)
 {
+  struct drivebase_attach_s att_kern;
+
   if (att == NULL)
     {
       return -EINVAL;
     }
-  if (att->motor_l_port_idx >= 6 || att->motor_r_port_idx >= 6)
+
+  if (!board_user_in_ok(att, sizeof(*att)))
+    {
+      return -EFAULT;
+    }
+
+  /* Snapshot before per-field reads so concurrent user-side mutation
+   * cannot bypass the port-index validation below.
+   */
+
+  memcpy(&att_kern, att, sizeof(att_kern));
+
+  if (att_kern.motor_l_port_idx >= 6 || att_kern.motor_r_port_idx >= 6)
     {
       return -EINVAL;
     }
@@ -584,9 +646,9 @@ static int db_handle_daemon_attach(FAR struct db_chardev_s *dev,
 
   dev->attached              = true;
   dev->attach_filep          = filep;
-  dev->motor_l_port_idx      = att->motor_l_port_idx;
-  dev->motor_r_port_idx      = att->motor_r_port_idx;
-  dev->default_on_completion = att->default_on_completion;
+  dev->motor_l_port_idx      = att_kern.motor_l_port_idx;
+  dev->motor_r_port_idx      = att_kern.motor_r_port_idx;
+  dev->default_on_completion = att_kern.default_on_completion;
   dev->last_publish_ticks    = clock_systime_ticks();
   dev->status.daemon_attached = 1;
   dev->status.attach_generation++;
@@ -609,6 +671,10 @@ static int db_handle_user_drive(FAR struct db_chardev_s *dev,
     {
       return -EINVAL;
     }
+
+  /* The per-cmd payload size is computed below; range-check after that
+   * and before db_push_envelope's memcpy reads the user buffer.
+   */
 
   switch (cmd)
     {
@@ -653,6 +719,11 @@ static int db_handle_user_drive(FAR struct db_chardev_s *dev,
         return -ENOTTY;
     }
 
+  if (!board_user_in_ok(arg, payload_len))
+    {
+      return -EFAULT;
+    }
+
   uint32_t epoch = atomic_load(&dev->output_epoch);
   return db_push_envelope(dev, (uint32_t)cmd, epoch, arg, payload_len);
 }
@@ -660,6 +731,8 @@ static int db_handle_user_drive(FAR struct db_chardev_s *dev,
 static int db_handle_stop(FAR struct db_chardev_s *dev,
                           FAR const struct drivebase_stop_s *stp)
 {
+  struct drivebase_stop_s stp_kern;
+
   if (!dev->attached)
     {
       return -ENOTCONN;
@@ -668,6 +741,17 @@ static int db_handle_stop(FAR struct db_chardev_s *dev,
     {
       return -EINVAL;
     }
+
+  if (!board_user_in_ok(stp, sizeof(*stp)))
+    {
+      return -EFAULT;
+    }
+
+  /* Snapshot once so the on_completion read inside the lock cannot be
+   * mutated from user mode after the kernel-side actuation begins.
+   */
+
+  memcpy(&stp_kern, stp, sizeof(stp_kern));
 
   /* (i) bump output_epoch so any envelope still queued from before this
    *     STOP is recognised as superseded by the daemon, (ii) latch the
@@ -681,12 +765,12 @@ static int db_handle_stop(FAR struct db_chardev_s *dev,
   uint32_t new_epoch = atomic_fetch_add(&dev->output_epoch, 1) + 1;
 
   nxmutex_lock(&dev->producer_lock);
-  dev->default_on_completion = stp->on_completion;
-  db_emergency_actuate(dev, stp->on_completion);
+  dev->default_on_completion = stp_kern.on_completion;
+  db_emergency_actuate(dev, stp_kern.on_completion);
   nxmutex_unlock(&dev->producer_lock);
 
   return db_push_envelope(dev, DRIVEBASE_STOP, new_epoch,
-                          stp, sizeof(*stp));
+                          &stp_kern, sizeof(stp_kern));
 }
 
 static int db_chardev_ioctl(FAR struct file *filep, int cmd,
@@ -733,8 +817,7 @@ static int db_chardev_ioctl(FAR struct file *filep, int cmd,
           {
             return -ENOTCONN;
           }
-        db_publish_state(dev, argp);
-        return OK;
+        return db_publish_state(dev, argp);
 
       case DRIVEBASE_DAEMON_PUBLISH_STATUS:
         if (argp == NULL)
@@ -745,8 +828,7 @@ static int db_chardev_ioctl(FAR struct file *filep, int cmd,
           {
             return -ENOTCONN;
           }
-        db_publish_status(dev, argp);
-        return OK;
+        return db_publish_status(dev, argp);
 
       case DRIVEBASE_DAEMON_PUBLISH_JITTER:
         if (argp == NULL)
@@ -756,6 +838,10 @@ static int db_chardev_ioctl(FAR struct file *filep, int cmd,
         if (!dev->attached || dev->attach_filep != filep)
           {
             return -ENOTCONN;
+          }
+        if (!board_user_in_ok(argp, sizeof(struct drivebase_jitter_dump_s)))
+          {
+            return -EFAULT;
           }
         nxmutex_lock(&dev->jitter_lock);
         dev->jitter = *(FAR const struct drivebase_jitter_dump_s *)argp;
@@ -778,16 +864,14 @@ static int db_chardev_ioctl(FAR struct file *filep, int cmd,
           {
             return -ENOTCONN;
           }
-        db_read_state(dev, argp);
-        return OK;
+        return db_read_state(dev, argp);
 
       case DRIVEBASE_GET_STATUS:
         if (argp == NULL)
           {
             return -EINVAL;
           }
-        db_read_status(dev, argp);   /* always available, even detached */
-        return OK;
+        return db_read_status(dev, argp); /* always available, even detached */
 
       case DRIVEBASE_JITTER_DUMP:
         if (argp == NULL)
@@ -797,6 +881,10 @@ static int db_chardev_ioctl(FAR struct file *filep, int cmd,
         if (!dev->attached)
           {
             return -ENOTCONN;
+          }
+        if (!board_user_out_ok(argp, sizeof(struct drivebase_jitter_dump_s)))
+          {
+            return -EFAULT;
           }
         nxmutex_lock(&dev->jitter_lock);
         *(FAR struct drivebase_jitter_dump_s *)argp = dev->jitter;
