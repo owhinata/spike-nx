@@ -1,0 +1,17 @@
+config APP_LINETRACE
+	tristate "Drivebase line trace user-space PID app"
+	default n
+	depends on APP_DRIVEBASE
+	depends on LEGO_SENSOR
+	---help---
+		User-space NSH builtin that follows a line by issuing
+		DRIVEBASE_DRIVE_FOREVER continuously while reading reflected-
+		light samples from /dev/uorb/sensor_color (mode 1, REFLT,
+		INT8 0..100).  Modeled on the pybricks
+		`tests/motors/drivebase_line.py` pattern: a tight user-side
+		`err = target - reflection(); drive(speed, err * Kp); wait(...)`
+		loop.
+
+		Subcommands:
+		  linetrace cal              3 s sweep, prints black/white/midpoint
+		  linetrace run <speed> <kp> [target] [--max-turn dps] [--hz N]
