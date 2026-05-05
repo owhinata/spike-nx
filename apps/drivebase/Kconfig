@@ -64,4 +64,20 @@ config APP_DRIVEBASE_JITTER_RING_DEPTH
 		DRIVEBASE_JITTER_DUMP ioctl.  Larger rings cost RAM
 		(8 B / sample) but capture longer load windows.
 
+config APP_DRIVEBASE_INVERT_LEFT
+	bool "Invert L motor direction (Issue #105)"
+	default y
+	---help---
+		On the SPIKE Prime Hub reference chassis the L motor is
+		physically mounted opposite to the R motor, so a positive
+		duty on both ports spins the chassis instead of driving it
+		forward.  Enable this to negate both the duty value sent to
+		the L motor and the encoder reading drained from it, so the
+		pybricks sign convention ("positive distance = forward")
+		holds with the standard wiring.
+
+		Set =n if you wire the L motor in the same orientation as
+		the R motor (custom chassis), in which case no inversion is
+		needed.
+
 endif

@@ -34,6 +34,25 @@
 
 #define DB_DRAIN_BATCH                   16
 
+/* Per-side sign override.  On the SPIKE Prime Hub reference chassis the
+ * L motor is physically mounted opposite to the R motor (Issue #105),
+ * so a +duty on both ports spins the chassis instead of driving it
+ * forward.  Negate both the duty and the encoder reading for the
+ * affected side so the rest of the stack can stay in pybricks sign
+ * convention.  See apps/drivebase/Kconfig — APP_DRIVEBASE_INVERT_LEFT.
+ */
+
+#ifdef CONFIG_APP_DRIVEBASE_INVERT_LEFT
+#  define DB_LEFT_SIGN  (-1)
+#else
+#  define DB_LEFT_SIGN  ( 1)
+#endif
+
+static inline int db_side_sign(enum db_side_e side)
+{
+  return side == DB_SIDE_LEFT ? DB_LEFT_SIGN : 1;
+}
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
@@ -269,6 +288,12 @@ int drivebase_motor_drain(enum db_side_e side,
         break;
     }
 
+  /* Apply the per-side sign convention so the upper layers see L and R
+   * encoder counts increasing in the same direction for forward motion.
+   */
+
+  out->raw_value *= db_side_sign(side);
+
   m->last_consumed_seq = latest->seq;
   m->have_last_seq     = true;
   return 0;
@@ -281,10 +306,20 @@ int drivebase_motor_set_duty(enum db_side_e side, int16_t duty)
       return -ENODEV;
     }
 
+  /* Mirror the encoder negation in drivebase_motor_drain so a +duty
+   * from the upper layer always means "forward" regardless of how the
+   * physical motor is mounted.  Clamp before negation to keep the
+   * inverted value inside int16_t.
+   */
+
+  int32_t signed_duty = (int32_t)duty * db_side_sign(side);
+  if (signed_duty >  10000) signed_duty =  10000;
+  if (signed_duty < -10000) signed_duty = -10000;
+
   struct legosensor_pwm_arg_s arg;
   memset(&arg, 0, sizeof(arg));
   arg.num_channels = 1;
-  arg.channels[0]  = duty;
+  arg.channels[0]  = (int16_t)signed_duty;
 
   int ret = ioctl(g_motor[side].fd, LEGOSENSOR_SET_PWM, (unsigned long)&arg);
   return ret < 0 ? -errno : 0;
