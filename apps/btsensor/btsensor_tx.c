@@ -33,6 +33,7 @@
 #include <string.h>
 #include <syslog.h>
 
+#include "btstack_run_loop.h"
 #include "classic/rfcomm.h"
 
 #include "btsensor_tx.h"
@@ -94,6 +95,20 @@ static uint32_t g_frames_sent;
 static uint32_t g_frames_dropped_oldest;
 static uint32_t g_frames_dropped_full;
 
+/* Post-drain single-shot callback (Issue #108).  When `g_drain_cb` is
+ * non-NULL and both queues are empty + no can-send pending at the end
+ * of btsensor_tx_on_can_send_now(), the callback is cleared and invoked
+ * exactly once.  `g_drain_timeout_cb` is the safety-net path armed via
+ * the BTstack timer below; it fires if the drain has not completed in
+ * the requested window (typically because RFCOMM credit is stalled).
+ */
+
+static btsensor_tx_drain_cb_t g_drain_cb;
+static btsensor_tx_drain_cb_t g_drain_timeout_cb;
+static void                   *g_drain_ctx;
+static btstack_timer_source_t  g_drain_timer;
+static bool                    g_drain_timer_armed;
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -116,6 +131,58 @@ static inline bool resp_empty(void)
 static inline bool resp_full(uint8_t next_head)
 {
   return next_head == g_resp_tail;
+}
+
+static void drain_timer_handler(btstack_timer_source_t *ts)
+{
+  (void)ts;
+  g_drain_timer_armed = false;
+
+  /* Snapshot + clear before firing callback so the callback can re-arm
+   * if it wants to (idempotent against re-entry).
+   */
+
+  btsensor_tx_drain_cb_t cb = g_drain_timeout_cb;
+  void *ctx = g_drain_ctx;
+
+  g_drain_cb         = NULL;
+  g_drain_timeout_cb = NULL;
+  g_drain_ctx        = NULL;
+
+  if (cb != NULL)
+    {
+      cb(ctx);
+    }
+}
+
+static void drain_check_and_fire(void)
+{
+  if (g_drain_cb == NULL)
+    {
+      return;
+    }
+
+  if (!resp_empty() || !ring_empty() || g_can_send_pending)
+    {
+      return;
+    }
+
+  /* Conditions met: snapshot + clear, then invoke. */
+
+  btsensor_tx_drain_cb_t cb = g_drain_cb;
+  void *ctx = g_drain_ctx;
+
+  g_drain_cb         = NULL;
+  g_drain_timeout_cb = NULL;
+  g_drain_ctx        = NULL;
+
+  if (g_drain_timer_armed)
+    {
+      btstack_run_loop_remove_timer(&g_drain_timer);
+      g_drain_timer_armed = false;
+    }
+
+  cb(ctx);
 }
 
 static void request_send_if_needed(void)
@@ -160,6 +227,10 @@ int btsensor_tx_init(void)
   g_frames_sent          = 0;
   g_frames_dropped_oldest = 0;
   g_frames_dropped_full   = 0;
+  g_drain_cb         = NULL;
+  g_drain_timeout_cb = NULL;
+  g_drain_ctx        = NULL;
+  g_drain_timer_armed = false;
   return 0;
 }
 
@@ -176,6 +247,18 @@ void btsensor_tx_deinit(void)
   g_resp_tail        = 0;
   g_rfcomm_cid       = 0;
   g_can_send_pending = false;
+
+  /* Clear any armed post-drain hook so it does not fire after deinit. */
+
+  if (g_drain_timer_armed)
+    {
+      btstack_run_loop_remove_timer(&g_drain_timer);
+      g_drain_timer_armed = false;
+    }
+
+  g_drain_cb         = NULL;
+  g_drain_timeout_cb = NULL;
+  g_drain_ctx        = NULL;
 }
 
 void btsensor_tx_set_rfcomm_cid(uint16_t cid)
@@ -278,12 +361,88 @@ void btsensor_tx_on_can_send_now(void)
         }
     }
 
+  /* End-of-drain hook: invoked exactly once when both queues are empty
+   * AND no further can-send-now request is pending.  Used by the shell
+   * mode to flip into MODE_SHELL only after the `OK\n` reply has been
+   * physically dispatched (Issue #108).
+   */
+
+  drain_check_and_fire();
+
   request_send_if_needed();
+}
+
+bool btsensor_tx_response_queue_empty(void)
+{
+  return resp_empty();
+}
+
+bool btsensor_tx_frame_ring_empty(void)
+{
+  return ring_empty();
+}
+
+int btsensor_tx_arm_post_drain_callback(btsensor_tx_drain_cb_t cb,
+                                        btsensor_tx_drain_cb_t timeout_cb,
+                                        void *ctx,
+                                        uint32_t timeout_ms)
+{
+  if (cb == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (g_drain_cb != NULL)
+    {
+      return -EBUSY;
+    }
+
+  g_drain_cb         = cb;
+  g_drain_timeout_cb = timeout_cb;
+  g_drain_ctx        = ctx;
+
+  if (timeout_ms > 0 && timeout_cb != NULL)
+    {
+      btstack_run_loop_set_timer_handler(&g_drain_timer, drain_timer_handler);
+      btstack_run_loop_set_timer(&g_drain_timer, timeout_ms);
+      btstack_run_loop_add_timer(&g_drain_timer);
+      g_drain_timer_armed = true;
+    }
+
+  /* If queues are already empty, fire immediately — the typical caller
+   * issues `enqueue_response("OK\n")` then arm.  enqueue_response()
+   * already triggers request_send_if_needed(); the actual drain
+   * happens when CAN_SEND_NOW fires.  But if RFCOMM credit is
+   * available right now, btstack may have completed the send
+   * synchronously inside enqueue_response itself, in which case
+   * drain_check_and_fire() must run here too.
+   */
+
+  drain_check_and_fire();
+  return 0;
+}
+
+void btsensor_tx_clear_post_drain_callback(void)
+{
+  if (g_drain_timer_armed)
+    {
+      btstack_run_loop_remove_timer(&g_drain_timer);
+      g_drain_timer_armed = false;
+    }
+
+  g_drain_cb         = NULL;
+  g_drain_timeout_cb = NULL;
+  g_drain_ctx        = NULL;
 }
 
 bool btsensor_tx_has_consumer(void)
 {
   return g_rfcomm_cid != 0;
+}
+
+uint16_t btsensor_tx_get_rfcomm_cid(void)
+{
+  return g_rfcomm_cid;
 }
 
 void btsensor_tx_get_stats(uint32_t *frames_sent,

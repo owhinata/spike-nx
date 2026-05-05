@@ -12,6 +12,7 @@
 #ifndef __APPS_BTSENSOR_BTSENSOR_TX_H
 #define __APPS_BTSENSOR_BTSENSOR_TX_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -72,6 +73,54 @@ void btsensor_tx_on_can_send_now(void);
  */
 
 bool btsensor_tx_has_consumer(void);
+
+/* Return the active RFCOMM cid (0 if no consumer).  Used by the shell
+ * module so it can issue rfcomm_request_can_send_now_event() and
+ * rfcomm_send() against the current channel without duplicating cid
+ * tracking.
+ */
+
+uint16_t btsensor_tx_get_rfcomm_cid(void);
+
+/* True iff the response queue currently holds zero pending entries.
+ * Used by the shell-mode post-drain callback machinery to detect when
+ * `OK\n` has physically been sent before flipping into MODE_SHELL.
+ */
+
+bool btsensor_tx_response_queue_empty(void);
+
+/* True iff the telemetry frame ring currently holds zero pending entries. */
+
+bool btsensor_tx_frame_ring_empty(void);
+
+/* Post-drain single-shot callback.
+ *
+ * Stores `cb(ctx)` to fire once both the response queue and the frame
+ * ring are empty AND no can-send-now request is pending.  The hook is
+ * checked at the end of every btsensor_tx_on_can_send_now() invocation;
+ * if the conditions are satisfied the registered callback is cleared
+ * and invoked exactly once.
+ *
+ * Additionally, an optional 500 ms BTstack timeout fires `timeout_cb(ctx)`
+ * if the drain has not completed in that window.  The timeout firing
+ * also clears the registration.  Pass NULL for `timeout_cb` to disable
+ * the safety net.
+ *
+ * `btsensor_tx_clear_post_drain_callback()` cancels both the drain hook
+ * and the timer (e.g. on RFCOMM CHANNEL_CLOSED, shell exit, deinit).
+ *
+ * All functions must run on the BTstack main thread.  Returns 0 on
+ * success or -EBUSY if a callback is already armed.
+ */
+
+typedef void (*btsensor_tx_drain_cb_t)(void *ctx);
+
+int  btsensor_tx_arm_post_drain_callback(btsensor_tx_drain_cb_t cb,
+                                         btsensor_tx_drain_cb_t timeout_cb,
+                                         void *ctx,
+                                         uint32_t timeout_ms);
+
+void btsensor_tx_clear_post_drain_callback(void);
 
 /* Telemetry counters.  Pass NULL for any counter you don't need.
  * - frames_sent:          successful rfcomm_send() completions

@@ -65,6 +65,10 @@
 #include "imu_sampler.h"
 #include "sensor_sampler.h"
 
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+#  include "btsensor_shell.h"
+#endif
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -228,6 +232,17 @@ static void teardown_rfcomm_closed(void)
 static void teardown_sampler_off(void)
 {
   g_ts_state = TS_SAMPLER_DEINIT;
+
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+  /* Force-exit any active shell BEFORE tearing down btsensor_tx — the
+   * shell relies on btsensor_tx machinery for its post_drain callback
+   * and rfcomm_send path.  btsensor_shell_deinit() also unlinks the
+   * FIFOs so the next start begins from a clean slate.
+   */
+
+  btsensor_shell_deinit();
+#endif
+
   btsensor_button_deinit();
   btsensor_led_deinit();
 
@@ -633,6 +648,20 @@ static int btsensor_daemon(int argc, char **argv)
   btsensor_tx_init();
   btsensor_cmd_init();
 
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+  /* mkfifo(/dev/btnsh_in / /dev/btnsh_out) once at daemon start; the
+   * shell module itself stays inactive until MODE SHELL is received.
+   * If FIFO creation fails the shell becomes "unavailable" but the
+   * daemon proceeds normally.
+   */
+
+  if (btsensor_shell_init() < 0)
+    {
+      syslog(LOG_WARNING,
+             "btsensor: shell-mode FIFOs unavailable, MODE SHELL disabled\n");
+    }
+#endif
+
   if (imu_sampler_init() != 0)
     {
       syslog(LOG_ERR, "btsensor: imu sampler init failed, "
@@ -777,6 +806,10 @@ enum btsensor_action_kind
   ACTION_SET_ACCEL_FSR,
   ACTION_SET_GYRO_FSR,
   ACTION_UNPAIR_ALL,
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+  ACTION_MODE_SHELL,
+  ACTION_MODE_TELEMETRY,
+#endif
 };
 
 /* Heap-allocated action struct with explicit ownership transfer
@@ -851,6 +884,42 @@ static void action_runner(void *ctx)
         gap_delete_all_link_keys();
         a->rc = 0;
         break;
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+      case ACTION_MODE_SHELL:
+        /* USB-NSH escape hatch into shell mode.  Refuses if pumps are
+         * on (the user should disable them first), if a shell is
+         * already active, or if the FIFOs are unavailable.
+         */
+
+        if (bundle_emitter_is_imu_enabled() ||
+            bundle_emitter_is_sensor_enabled())
+          {
+            a->rc = -EBUSY;
+            break;
+          }
+
+        a->rc = btsensor_shell_enter();
+        if (a->rc == 0)
+          {
+            /* No OK\n / drain-callback path here — USB-NSH does not
+             * need the SPP-side OK acknowledgement.  Skip directly to
+             * MODE_SHELL once started; the SHELL_STARTING window only
+             * matters for synchronising the SPP peer's stdin send.
+             */
+
+            btsensor_shell_transition_to_active(NULL);
+          }
+        break;
+
+      case ACTION_MODE_TELEMETRY:
+        if (btsensor_shell_is_active())
+          {
+            btsensor_shell_exit_async(BTSENSOR_SHELL_REASON_USB_REQUEST);
+          }
+
+        a->rc = 0;
+        break;
+#endif
       default:
         a->rc = -ENOSYS;
         break;
@@ -1219,6 +1288,36 @@ static int cmd_unpair(int argc, char **argv)
   return 0;
 }
 
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+static int cmd_mode_builtin(int argc, char **argv)
+{
+  if (argc < 3)
+    {
+      printf("Usage: btsensor mode <shell|telemetry>\n");
+      return 1;
+    }
+
+  enum btsensor_action_kind kind;
+  if (strcmp(argv[2], "shell") == 0)
+    {
+      kind = ACTION_MODE_SHELL;
+    }
+  else if (strcmp(argv[2], "telemetry") == 0)
+    {
+      kind = ACTION_MODE_TELEMETRY;
+    }
+  else
+    {
+      printf("btsensor: invalid mode '%s' (expected shell|telemetry)\n",
+             argv[2]);
+      return 1;
+    }
+
+  print_action_result(dispatch_action(kind, 0));
+  return 0;
+}
+#endif
+
 static int cmd_set(int argc, char **argv)
 {
   if (argc < 4)
@@ -1272,6 +1371,9 @@ static void print_usage(void)
   printf("  set   odr        <hz>       ODR  13|26|52|104|208|416|833 (default 833, capped)\n");
   printf("  set   accel_fsr  <g>        accel FSR 2|4|8|16 (default 8)\n");
   printf("  set   gyro_fsr   <dps>      gyro FSR  125|250|500|1000|2000 (default 2000)\n");
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+  printf("  mode  <shell|telemetry>     switch BT-side NSH shell mode (Issue #108)\n");
+#endif
   printf("Note: bt/imu/sensor/dump/set require `start` first (dump can\n");
   printf("      auto-activate the driver standalone).  set * are\n");
   printf("      rejected with `ERR busy` while imu is on.\n");
@@ -1334,6 +1436,13 @@ int main(int argc, FAR char *argv[])
     {
       return cmd_dump(argc, argv);
     }
+
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+  if (strcmp(argv[1], "mode") == 0)
+    {
+      return cmd_mode_builtin(argc, argv);
+    }
+#endif
 
   print_usage();
   return 1;

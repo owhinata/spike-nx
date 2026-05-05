@@ -32,6 +32,10 @@
 #include "btsensor_tx.h"
 #include "imu_sampler.h"
 
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+#  include "btsensor_shell.h"
+#endif
+
 /* Defined in btsensor_main.c — let the daemon's teardown FSM and BT
  * state machine observe RFCOMM open/close + SSP pairing completion.
  * Forward-declared instead of pulled into a public header to keep the
@@ -141,10 +145,16 @@ static void spp_packet_handler(uint8_t packet_type, uint16_t channel,
               g_rfcomm_cid = 0;
               imu_sampler_set_rfcomm_cid(0, 0);
               btsensor_set_rfcomm_cid(0);
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+              btsensor_shell_on_rfcomm_closed();
+#endif
               break;
 
             case RFCOMM_EVENT_CAN_SEND_NOW:
               btsensor_tx_on_can_send_now();
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+              btsensor_shell_on_can_send_now();
+#endif
               break;
 
             default:
@@ -153,7 +163,30 @@ static void spp_packet_handler(uint8_t packet_type, uint16_t channel,
         break;
 
       case RFCOMM_DATA_PACKET:
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+        switch (btsensor_shell_get_mode())
+          {
+            case BTSENSOR_MODE_TELEMETRY:
+              btsensor_cmd_feed(packet, size);
+              break;
+
+            case BTSENSOR_MODE_SHELL_STARTING:
+              /* Defensive drop — peer is contractually not allowed to
+               * send stdin bytes before OK\n.  Codex 3rd review Q5.
+               */
+
+              syslog(LOG_WARNING,
+                     "btsensor: RFCOMM RX dropped during STARTING (%u bytes)\n",
+                     (unsigned)size);
+              break;
+
+            case BTSENSOR_MODE_SHELL:
+              btsensor_shell_on_rfcomm_data(packet, size);
+              break;
+          }
+#else
         btsensor_cmd_feed(packet, size);
+#endif
         break;
 
       default:

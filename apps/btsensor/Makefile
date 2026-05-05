@@ -30,6 +30,14 @@ CSRCS  += btsensor_button.c btsensor_led.c
 # PC -> Hub ASCII command parser — Issue #56 Commit D.
 CSRCS  += btsensor_cmd.c
 
+# BT-side NSH shell mode (Issue #108).  Optional.
+ifeq ($(CONFIG_APP_BTSENSOR_SHELL_MODE),y)
+CSRCS  += btsensor_shell.c btnsh_main.c
+# nshlib internal headers (nsh.h, nsh_console.h) are not on the default
+# nuttx-apps include path; pull them in for btnsh_main only.
+CFLAGS += -I$(APPDIR)/nshlib
+endif
+
 # Pulled-in chipset init script (TI v1.4 service pack, eHCILL disabled —
 # originally from pybricks, see apps/btsensor/chipset/cc256x_init_script.c).
 CSRCS  += chipset/cc256x_init_script.c

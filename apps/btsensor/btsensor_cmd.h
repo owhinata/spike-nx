@@ -32,6 +32,12 @@ extern "C" {
 
 void btsensor_cmd_init(void);
 
+/* Discard the pending line buffer.  Used by shell-mode transitions to
+ * make sure no half-line bytes leak across mode changes.
+ */
+
+void btsensor_cmd_reset_rx_buffer(void);
+
 /* Feed bytes received over RFCOMM.  Splits on '\n', dispatches each
  * line, queues a reply via btsensor_tx_enqueue_response().  Must run
  * on the BTstack main thread (the spp_packet_handler does).

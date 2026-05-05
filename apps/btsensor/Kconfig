@@ -77,4 +77,49 @@ config APP_BTSENSOR_LED_FAIL_BLINKS
 		Number of short blue blinks emitted when SSP pairing
 		fails before the LED returns to off.
 
+config APP_BTSENSOR_SHELL_MODE
+	bool "BT-side NSH shell over SPP (Issue #108)"
+	default n
+	select PIPES
+	---help---
+		Mutually exclusive `MODE SHELL` / `MODE TELEMETRY` switch
+		on the existing SPP/RFCOMM channel.  When the peer sends
+		`MODE SHELL\n` the daemon stops the IMU/SENSOR pumps and
+		bridges the byte stream to a freshly-spawned NSH child via
+		FIFOs (/dev/btnsh_in, /dev/btnsh_out).  Returns to
+		telemetry mode on `exit` from the shell or RFCOMM peer
+		drop.  USB-side NSH (/dev/console) is unaffected.
+
+if APP_BTSENSOR_SHELL_MODE
+
+config APP_BTSENSOR_SHELL_TX_BUF
+	int "Shell TX coalescing buffer (bytes)"
+	default 1024
+	range 256 4096
+	---help---
+		Size of the coalescing buffer that holds NSH stdout bytes
+		between the reader pthread and the BTstack thread that
+		drives rfcomm_send().  Larger values reduce can-send-now
+		round-trips for bursty output (`dmesg`, `ls /dev`); cost
+		is BSS in the user image.
+
+config APP_BTSENSOR_SHELL_NSH_STACK
+	int "NSH child task stack (bytes)"
+	default 6144
+	range 4096 16384
+	---help---
+		Stack size for the spawned NSH child task that runs the
+		BT-side shell.  Tune with `nsh> ps` Stack used after
+		exercising commands like `dmesg` or builtin apps.
+
+config APP_BTSENSOR_SHELL_READER_STACK
+	int "Shell reader pthread stack (bytes)"
+	default 2048
+	range 1024 8192
+	---help---
+		Stack size for the reader pthread that drains NSH
+		stdout into the shell TX buffer.
+
+endif # APP_BTSENSOR_SHELL_MODE
+
 endif

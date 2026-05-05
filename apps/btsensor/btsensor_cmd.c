@@ -39,6 +39,10 @@
 #include "imu_sampler.h"
 #include "sensor_sampler.h"
 
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+#  include "btsensor_shell.h"
+#endif
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -407,6 +411,91 @@ static void cmd_set(char *what, char *value_str)
   reply(buf);
 }
 
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+static void cmd_mode(char *arg)
+{
+  if (arg == NULL)
+    {
+      reply("ERR invalid MODE\n");
+      return;
+    }
+
+  if (strcasecmp(arg, "SHELL") == 0)
+    {
+      if (btsensor_shell_is_active())
+        {
+          reply("ERR already_shell\n");
+          return;
+        }
+
+      /* Pump auto-OFF (Codex 3rd review Q4 — does not auto-resume on
+       * exit; user re-enables explicitly).  Both calls are idempotent.
+       */
+
+      (void)bundle_emitter_set_imu_enabled(false);
+      (void)bundle_emitter_set_sensor_enabled(false);
+
+      int rc = btsensor_shell_enter();
+      if (rc < 0)
+        {
+          char buf[BTSENSOR_CMD_MAX_LINE];
+          snprintf(buf, sizeof(buf), "ERR shell_enter %d\n", -rc);
+          reply(buf);
+          return;
+        }
+
+      /* Enqueue OK\n while still in MODE_SHELL_STARTING — the
+       * post_drain_callback hook below flips into MODE_SHELL only
+       * after the response has been physically dispatched.
+       */
+
+      int qrc = btsensor_tx_enqueue_response("OK\n");
+      if (qrc != 0)
+        {
+          /* TX queue full (ENOSPC) — tear shell down so the system is
+           * back in TELEMETRY before sending the failure reply.
+           */
+
+          btsensor_shell_exit_async(BTSENSOR_SHELL_REASON_DAEMON_STOP);
+          reply("ERR shell_no_buffer\n");
+          return;
+        }
+
+      int arc = btsensor_tx_arm_post_drain_callback(
+                    btsensor_shell_transition_to_active,
+                    btsensor_shell_drain_timeout,
+                    NULL, 500);
+      if (arc < 0)
+        {
+          syslog(LOG_WARNING,
+                 "btsensor: arm_post_drain_callback rc=%d\n", arc);
+        }
+
+      /* Drop any remaining bytes from the same RFCOMM packet — the peer
+       * is contractually not allowed to send anything after MODE SHELL
+       * until OK\n is received (Codex 3rd review Q8).
+       */
+
+      btsensor_cmd_reset_rx_buffer();
+      return;
+    }
+
+  if (strcasecmp(arg, "TELEMETRY") == 0)
+    {
+      /* If we got here we are by definition in TELEMETRY mode (cmd
+       * parser is bypassed in SHELL_STARTING/SHELL).  No-op + OK.
+       */
+
+      reply("OK\n");
+      return;
+    }
+
+  char buf[BTSENSOR_CMD_MAX_LINE];
+  snprintf(buf, sizeof(buf), "ERR invalid MODE %s\n", arg);
+  reply(buf);
+}
+#endif /* CONFIG_APP_BTSENSOR_SHELL_MODE */
+
 static void process_line(char *line)
 {
   syslog(LOG_INFO, "btsensor_cmd: %s\n", line);
@@ -438,6 +527,14 @@ static void process_line(char *line)
       return;
     }
 
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+  if (strcasecmp(cmd, "MODE") == 0)
+    {
+      cmd_mode(strtok_r(NULL, " ", &save));
+      return;
+    }
+#endif
+
   char buf[BTSENSOR_CMD_MAX_LINE];
   snprintf(buf, sizeof(buf), "ERR unknown %s\n", cmd);
   reply(buf);
@@ -449,6 +546,17 @@ static void process_line(char *line)
 
 void btsensor_cmd_init(void)
 {
+  g_line_len   = 0;
+  g_overflowed = false;
+}
+
+void btsensor_cmd_reset_rx_buffer(void)
+{
+  /* Used by the shell module on STARTING transition and on shell exit
+   * cleanup to make sure no half-line bytes leak across mode changes
+   * (Codex 3rd review Q5/Q8).
+   */
+
   g_line_len   = 0;
   g_overflowed = false;
 }
@@ -478,6 +586,20 @@ void btsensor_cmd_feed(const uint8_t *data, uint16_t len)
             }
 
           g_line_len = 0;
+
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+          /* If process_line() flipped us into shell-active state (e.g.
+           * via MODE SHELL), discard any remaining bytes from the
+           * current RFCOMM packet — the peer is contractually
+           * forbidden from sending shell stdin until OK\n arrives
+           * (Codex 3rd review Q8).
+           */
+
+          if (btsensor_shell_is_active())
+            {
+              return;
+            }
+#endif
           continue;
         }
 
