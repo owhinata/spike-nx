@@ -115,10 +115,10 @@ static const char *dtype_name(uint8_t dt)
 {
   switch (dt)
     {
-      case LUMP_DATA_INT8:  return "I8";
-      case LUMP_DATA_INT16: return "I16";
-      case LUMP_DATA_INT32: return "I32";
-      case LUMP_DATA_FLOAT: return "F32";
+      case LUMP_DATA_INT8:  return "INT8";
+      case LUMP_DATA_INT16: return "INT16";
+      case LUMP_DATA_INT32: return "INT32";
+      case LUMP_DATA_FLOAT: return "FLOAT";
       default:              return "?";
     }
 }
@@ -231,7 +231,12 @@ static void print_sample(const struct lump_sample_s *s)
  * Private Functions — subcommands
  ****************************************************************************/
 
-static int do_status_one(const struct class_entry_s *c, bool short_form)
+/* Multi-line `key : value` snapshot used by `sensor <class>` (no verb)
+ * and `sensor <class> status`.  Mirrors the old long-form output that
+ * existed before the Issue #106 unification.
+ */
+
+static int do_status_one(const struct class_entry_s *c)
 {
   int fd = open(c->path, O_RDONLY | O_NONBLOCK);
   if (fd < 0)
@@ -261,49 +266,92 @@ static int do_status_one(const struct class_entry_s *c, bool short_form)
       return -errno;
     }
 
-  if (short_form)
+  printf("class       : %s\n", c->name);
+  if (ret_info == 0)
     {
-      printf("%-11s  port=%c type=%-3u state=%-7s mode=%u rx=%" PRIu32
-             " tx=%" PRIu32 "\n",
-             c->name,
-             ret_info == 0 ? 'A' + info_arg.port : '?',
-             st.type_id, state_name(st.state),
-             st.current_mode, st.rx_bytes, st.tx_bytes);
+      printf("bound port  : %c\n", 'A' + info_arg.port);
     }
-  else
-    {
-      printf("class       : %s\n", c->name);
-      if (ret_info == 0)
-        {
-          printf("bound port  : %c\n", 'A' + info_arg.port);
-        }
-      printf("type_id     : %u\n", st.type_id);
-      printf("state       : %s\n", state_name(st.state));
-      printf("current_mode: %u\n", st.current_mode);
-      printf("baud        : %" PRIu32 "\n", st.baud);
-      printf("rx / tx     : %" PRIu32 " / %" PRIu32 " bytes\n",
-             st.rx_bytes, st.tx_bytes);
-      printf("flags       : 0x%02x%s%s%s\n", st.flags,
-             (st.flags & LUMP_FLAG_SYNCED)  ? " SYNCED"  : "",
-             (st.flags & LUMP_FLAG_DATA_OK) ? " DATA_OK" : "",
-             (st.flags & LUMP_FLAG_ERROR)   ? " ERROR"   : "");
-      printf("dq_dropped  : %" PRIu32 "\n", st.dq_dropped);
-      printf("stack used  : %" PRIu32 " / %" PRIu32 "\n",
-             st.stk_used, st.stk_size);
-    }
+  printf("type_id     : %u\n", st.type_id);
+  printf("state       : %s\n", state_name(st.state));
+  printf("current_mode: %u\n", st.current_mode);
+  printf("baud        : %" PRIu32 "\n", st.baud);
+  printf("rx / tx     : %" PRIu32 " / %" PRIu32 " bytes\n",
+         st.rx_bytes, st.tx_bytes);
+  printf("flags       : 0x%02x%s%s%s\n", st.flags,
+         (st.flags & LUMP_FLAG_SYNCED)  ? " SYNCED"  : "",
+         (st.flags & LUMP_FLAG_DATA_OK) ? " DATA_OK" : "",
+         (st.flags & LUMP_FLAG_ERROR)   ? " ERROR"   : "");
+  printf("dq_dropped  : %" PRIu32 "\n", st.dq_dropped);
+  printf("stack used  : %" PRIu32 " / %" PRIu32 "\n",
+         st.stk_used, st.stk_size);
 
   return 0;
 }
+
+/* Class-axis tabular layout matching `port lump status` (Issue #106).
+ * The first column is the class name; the rest of the row mirrors the
+ * port-side table 1:1 so the two views can be read side-by-side.
+ */
 
 static int do_list(void)
 {
+  printf("Class        Port  State    Type  Mode  Baud    RX(B)     TX(B)   "
+         "DqDrop  Err   BadMsg  Backoff  StkHWM\n");
+  printf("-----------  ----  -------  ----  ----  ------  --------  ------  "
+         "------  ----  ------  -------  ----------\n");
+
   for (int i = 0; i < CLASS_COUNT; i++)
     {
-      do_status_one(&g_class_table[i], true);
+      const struct class_entry_s *c = &g_class_table[i];
+
+      int fd = open(c->path, O_RDONLY | O_NONBLOCK);
+      if (fd < 0)
+        {
+          printf("%-11s  <open: %d>\n", c->name, errno);
+          continue;
+        }
+
+      struct lump_status_full_s s;
+      memset(&s, 0, sizeof(s));
+      int ret = ioctl(fd, LEGOSENSOR_GET_STATUS, (unsigned long)&s);
+
+      struct legosensor_info_arg_s info_arg;
+      memset(&info_arg, 0, sizeof(info_arg));
+      int ret_info = ioctl(fd, LEGOSENSOR_GET_INFO, (unsigned long)&info_arg);
+      close(fd);
+
+      if (ret < 0 && errno == ENODEV)
+        {
+          printf("%-11s   --   <unbound>\n", c->name);
+          continue;
+        }
+      if (ret < 0)
+        {
+          printf("%-11s  <ioctl: %d>\n", c->name, errno);
+          continue;
+        }
+
+      printf("%-11s   %c    %-7s  %3u   %3u   %6lu  %8lu  %6lu  "
+             "%6lu  %4lu  %6lu  %7lu  %4lu/%4lu\n",
+             c->name,
+             ret_info == 0 ? 'A' + info_arg.port : '?',
+             state_name(s.state),
+             s.type_id, s.current_mode,
+             (unsigned long)s.baud,
+             (unsigned long)s.rx_bytes, (unsigned long)s.tx_bytes,
+             (unsigned long)s.dq_dropped, (unsigned long)s.err_count,
+             (unsigned long)s.bad_msg_count, (unsigned long)s.backoff_step,
+             (unsigned long)s.stk_used, (unsigned long)s.stk_size);
     }
 
   return 0;
 }
+
+/* Port-style indented `key:` info dump (Issue #106 — same layout as
+ * `port lump <P> info` so the two views can be read interchangeably).
+ * Header line carries the class + bound port; body and mode rows are
+ * 1:1 with the port-side print code in apps/port/port_main.c.
+ */
 
 static int do_info(const struct class_entry_s *c)
 {
@@ -327,19 +375,16 @@ static int do_info(const struct class_entry_s *c)
 
   const struct lump_device_info_s *info = &arg.info;
 
-  printf("class       : %s\n", c->name);
-  printf("bound port  : %c\n", 'A' + arg.port);
-  printf("type_id     : %u\n", info->type_id);
-  printf("num_modes   : %u\n", info->num_modes);
-  printf("current_mode: %u\n", info->current_mode);
-  printf("baud        : %" PRIu32 "\n", info->baud);
-  printf("fw / hw     : 0x%08" PRIx32 " / 0x%08" PRIx32 "\n",
-         info->fw_version, info->hw_version);
-  printf("flags       : 0x%02x%s%s%s\n", info->flags,
-         (info->flags & LUMP_FLAG_SYNCED)  ? " SYNCED"  : "",
-         (info->flags & LUMP_FLAG_DATA_OK) ? " DATA_OK" : "",
-         (info->flags & LUMP_FLAG_ERROR)   ? " ERROR"   : "");
-  printf("capability  : 0x%02x", info->capability_flags);
+  printf("Sensor %s (bound port %c) info:\n", c->name, 'A' + arg.port);
+  printf("  type_id:      %u\n", info->type_id);
+  printf("  num_modes:    %u\n", info->num_modes);
+  printf("  current_mode: %u\n", info->current_mode);
+  printf("  flags:        0x%02x %s%s%s\n",
+         info->flags,
+         (info->flags & LUMP_FLAG_SYNCED)  ? "[SYNCED]"  : "",
+         (info->flags & LUMP_FLAG_DATA_OK) ? "[DATA_OK]" : "",
+         (info->flags & LUMP_FLAG_ERROR)   ? "[ERROR]"   : "");
+  printf("  capability:   0x%02x", info->capability_flags);
   if (info->capability_flags & LUMP_CAP_MOTOR)              printf(" MOTOR");
   if (info->capability_flags & LUMP_CAP_MOTOR_POWER)        printf(" MOTOR_POWER");
   if (info->capability_flags & LUMP_CAP_MOTOR_SPEED)        printf(" MOTOR_SPEED");
@@ -348,19 +393,44 @@ static int do_info(const struct class_entry_s *c)
   if (info->capability_flags & LUMP_CAP_NEEDS_SUPPLY_PIN1)  printf(" NEEDS_SUPPLY_PIN1");
   if (info->capability_flags & LUMP_CAP_NEEDS_SUPPLY_PIN2)  printf(" NEEDS_SUPPLY_PIN2");
   printf("\n");
+  printf("  baud:         %" PRIu32 "\n", info->baud);
+  if (info->fw_version || info->hw_version)
+    {
+      printf("  fw_version:   0x%08" PRIx32 "\n", info->fw_version);
+      printf("  hw_version:   0x%08" PRIx32 "\n", info->hw_version);
+    }
 
-  for (int m = 0; m < info->num_modes && m < LUMP_MAX_MODES; m++)
+  for (uint8_t m = 0; m < info->num_modes && m < LUMP_MAX_MODES; m++)
     {
       const struct lump_mode_info_s *mi = &info->modes[m];
-      printf("mode[%d] %-12s  %ux%s  raw[%g..%g] pct[%g..%g] si[%g..%g] %s%s",
-             m, mi->name, mi->num_values, dtype_name(mi->data_type),
-             (double)mi->raw_min, (double)mi->raw_max,
-             (double)mi->pct_min, (double)mi->pct_max,
-             (double)mi->si_min,  (double)mi->si_max,
-             mi->units, mi->writable ? " writable" : "");
+      printf("  mode %u  %-12s  %u x %s%s",
+             m,
+             mi->name[0] ? mi->name : "?",
+             mi->num_values,
+             dtype_name(mi->data_type),
+             mi->writable ? "  writable" : "");
+      if (mi->units[0])
+        {
+          printf("  unit=%s", mi->units);
+        }
+      if (mi->raw_min != mi->raw_max)
+        {
+          printf("  raw=%g..%g",
+                 (double)mi->raw_min, (double)mi->raw_max);
+        }
+      if (mi->pct_min != mi->pct_max)
+        {
+          printf("  pct=%g..%g",
+                 (double)mi->pct_min, (double)mi->pct_max);
+        }
+      if (mi->si_min != mi->si_max)
+        {
+          printf("  si=%g..%g",
+                 (double)mi->si_min, (double)mi->si_max);
+        }
       if (mi->mode_flags)
         {
-          printf(" flags=0x%02x", mi->mode_flags);
+          printf("  flags=0x%02x", mi->mode_flags);
           if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR)              printf(" MOTOR");
           if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR_POWER)        printf(" PWR");
           if (mi->mode_flags & LUMP_MODE_FLAG_MOTOR_SPEED)        printf(" SPD");
@@ -820,7 +890,7 @@ int main(int argc, FAR char *argv[])
 
   if (argc == 2)
     {
-      return do_status_one(c, false) < 0 ? 1 : 0;
+      return do_status_one(c) < 0 ? 1 : 0;
     }
 
   const char *verb = argv[2];
@@ -832,7 +902,7 @@ int main(int argc, FAR char *argv[])
 
   if (strcmp(verb, "status") == 0)
     {
-      return do_status_one(c, false) < 0 ? 1 : 0;
+      return do_status_one(c) < 0 ? 1 : 0;
     }
 
   if (strcmp(verb, "watch") == 0)

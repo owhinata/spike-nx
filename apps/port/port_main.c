@@ -379,6 +379,16 @@ static int do_lump_info(int port)
           printf("  raw=%g..%g",
                  (double)mi->raw_min, (double)mi->raw_max);
         }
+      if (mi->pct_min != mi->pct_max)
+        {
+          printf("  pct=%g..%g",
+                 (double)mi->pct_min, (double)mi->pct_max);
+        }
+      if (mi->si_min != mi->si_max)
+        {
+          printf("  si=%g..%g",
+                 (double)mi->si_min, (double)mi->si_max);
+        }
       if (mi->mode_flags)
         {
           printf("  flags=0x%02x", mi->mode_flags);
