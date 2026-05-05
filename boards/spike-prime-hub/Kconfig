@@ -93,6 +93,43 @@ config LEGO_LUMP_DIAG
 		enable bits for all six LUMP UARTs.  Useful for bring-up and
 		regression diagnosis; leave off for production builds.
 
+config LUMP_HIPRI_PROFILING
+	bool "LUMP HIPRI ISR cycle profiling (Issue #103)"
+	default n
+	depends on LEGO_LUMP
+	---help---
+		Bracket lump_uart_isr_core() with two DWT_CYCCNT reads so
+		`port lump status` / `sensor list` can show per-port HIPRI
+		ISR occupancy as IsrPct (0.1% units) and IsrAvgNs.  The HIPRI
+		direct vector (NVIC pri 0x00, Issue #100) bypasses arm_doirq()
+		so /proc/irqs and SCHED_IRQMONITOR can not see this cost
+		otherwise.
+
+		Off by default.  ISR cost on STM32F413 @ 96 MHz, derived
+		from arm-none-eabi-objdump of lump_uart_isr_core (build with
+		this Kconfig OFF):
+
+		  SW entry framing  (push + prologue, 1-time):  ~19 cycles
+		  Per-byte loop body (SR check + DR read + ring push):
+		                                                 ~23 cycles
+		  SW exit (pop + branch back to dispatch):       ~11 cycles
+		  ----------------------------------------------------------
+		  1-byte ISR call (static count):  ~53 cycles ≒ 552 ns
+		  Per extra byte drained per call: +23 cycles  ≒ +240 ns
+
+		Note: actual measured cycles are typically lower than the
+		static count because of pipelining and branch prediction —
+		empirical IsrAvgNs with profiling ON observed ~470-535 ns
+		per call at idle (i.e. the bare ISR plus ~27 cycles /
+		~280 ns of profiling overhead).
+
+		Turn this on for bring-up, root-cause work on Issue #100
+		(PendSV starvation), or any time you need to characterise the
+		HIPRI cost.  Leave it off in production — the IsrPct /
+		IsrAvgNs columns will display 0 / 0.0 (the fields stay in
+		lump_status_full_s so the ABI does not change with the
+		Kconfig).
+
 config LEGO_SENSOR
 	bool "LEGO sensor uORB driver (/dev/uorb/sensor_lego[0..5])"
 	default n

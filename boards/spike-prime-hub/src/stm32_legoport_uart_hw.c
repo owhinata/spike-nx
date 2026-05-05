@@ -55,10 +55,13 @@
  * arm_ramvec_attach() which requires CONFIG_ARCH_RAMVECTORS.
  * BUILD_PROTECTED + HIPRI also requires CONFIG_ARCH_INTERRUPTSTACK >= 8.
  *
- * Issue #103 instruments lump_uart_isr_core() with DWT cycle deltas so
- * `port lump status` can show per-port HIPRI ISR occupancy — the ISR
- * itself never reaches arm_doirq() so /proc/irqs / SCHED_IRQMONITOR
- * can not see it.
+ * Issue #103 optionally instruments lump_uart_isr_core() with DWT
+ * cycle deltas (CONFIG_LUMP_HIPRI_PROFILING) so `port lump status`
+ * can show per-port HIPRI ISR occupancy — the ISR itself never
+ * reaches arm_doirq() so /proc/irqs / SCHED_IRQMONITOR can not see
+ * it.  The instrumentation adds ~27 cycles (~270 ns @ 96 MHz) per
+ * ISR call on top of the ~17-19 cycle / ~180-200 ns SR+DR+ring-push
+ * core, so it is off by default and lit up for bring-up only.
  */
 
 #ifndef CONFIG_ARCH_HIPRI_INTERRUPT
@@ -118,15 +121,19 @@ struct lump_uart_state_s
   volatile uint16_t rx_tail;   /* kthread consumer index */
   volatile uint8_t  ore_count; /* count of overrun events seen by ISR */
 
+#ifdef CONFIG_LUMP_HIPRI_PROFILING
   /* HIPRI ISR cycle accounting (Issue #103).  Updated only by the ISR
    * (single writer); read under PRIMASK by lump_uart_get_isr_metrics()
    * to take a coherent snapshot of the (cycles, count) pair.  Both are
    * uint32_t so they wrap independently every ~44.7 s @ 96 MHz; the
-   * caller computes diffs with modular subtraction.
+   * caller computes diffs with modular subtraction.  Only carried in
+   * the per-port BSS when the profiling Kconfig is on so production
+   * builds pay no static-RAM cost.
    */
 
   volatile uint32_t isr_cycles;
   volatile uint32_t isr_count;
+#endif
 
   /* Wakeup sem.  Issue #100 Option A: this sem is no longer used for
    * byte-arrival notification — the kthread polls the ring directly
@@ -196,20 +203,23 @@ static inline uintptr_t lump_uart_reg(int port, uint32_t offset)
  * ops.  Wake notification is via the per-port LUMP kthread polling the
  * ring (lump_uart_read_byte() with 2 ms tickwait cap).
  *
- * Issue #103: bracket the body with DWT_CYCCNT reads so cycles spent
- * in this ISR can be reported via lump_uart_get_isr_metrics().  The
- * counter is a single LDR from PPB; wrap of the 32-bit difference is
- * harmless because the accumulator itself is 32-bit modular.  Read
- * DWT_CYCCNT directly via getreg32() rather than the non-inline
- * up_perf_gettime() wrapper to avoid the call+return overhead inside
- * a hot per-byte ISR (~16 cycles round trip × 2 calls saved).
+ * Issue #103: bracket the body with DWT_CYCCNT reads (when
+ * CONFIG_LUMP_HIPRI_PROFILING is on) so cycles spent in this ISR can
+ * be reported via lump_uart_get_isr_metrics().  The counter is a
+ * single LDR from PPB; wrap of the 32-bit difference is harmless
+ * because the accumulator itself is 32-bit modular.  Read DWT_CYCCNT
+ * directly via getreg32() rather than the non-inline up_perf_gettime()
+ * wrapper to avoid the call+return overhead inside a hot per-byte
+ * ISR (~16 cycles round trip × 2 calls saved).
  */
 
 static void lump_uart_isr_core(int port)
 {
   struct lump_uart_state_s *st = &g_lump_uart[port];
   uintptr_t base = g_lump_uart_hw_desc[port].usart_base;
+#ifdef CONFIG_LUMP_HIPRI_PROFILING
   uint32_t  t0   = getreg32(DWT_CYCCNT);
+#endif
   uint32_t  sr   = getreg32(base + STM32_USART_SR_OFFSET);
 
   while (sr & USART_SR_RXNE)
@@ -238,8 +248,10 @@ static void lump_uart_isr_core(int port)
       sr = getreg32(base + STM32_USART_SR_OFFSET);
     }
 
+#ifdef CONFIG_LUMP_HIPRI_PROFILING
   st->isr_cycles += getreg32(DWT_CYCCNT) - t0;
   st->isr_count  += 1u;
+#endif
 }
 
 /* Per-port direct vector thunks (signature `void(*)(void)`).
@@ -564,6 +576,7 @@ void lump_uart_get_isr_metrics(int port, uint32_t *cycles, uint32_t *count)
   if (cycles != NULL) *cycles = 0;
   if (count  != NULL) *count  = 0;
 
+#ifdef CONFIG_LUMP_HIPRI_PROFILING
   if (port < 0 || port >= BOARD_LEGOPORT_COUNT)
     {
       return;
@@ -585,6 +598,9 @@ void lump_uart_get_isr_metrics(int port, uint32_t *cycles, uint32_t *count)
 
   if (cycles != NULL) *cycles = c;
   if (count  != NULL) *count  = n;
+#else
+  (void)port;
+#endif
 }
 
 void lump_uart_flush_rx(int port)

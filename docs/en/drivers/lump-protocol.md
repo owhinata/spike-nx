@@ -148,11 +148,29 @@ Note that `on_error` fires on **every session-ending transition**, including pur
 
 `lump_status_full_s.isr_pct_x10` and `isr_avg_ns` expose how much CPU the LUMP UART HIPRI direct vector ISRs (NVIC priority 0x00, installed by `lump_uart_hipri_init()`) consume per port.  The ISRs bypass `arm_doirq()` / `irq_dispatch()`, so `/proc/irqs`, `SCHED_IRQMONITOR`, and `ps` cannot see them — the metric is the only window into their cost.
 
-`lump_uart_isr_core()` brackets its body with two `up_perf_gettime()` reads (DWT CYCCNT, 96 MHz on this board → 10.42 ns/cycle) and accumulates the difference into per-port `volatile uint32_t` cycle / call counters next to the ISR state.  `lump_get_status_full()` snapshots both counters under PRIMASK (the BASEPRI-based `up_irq_save()` cannot block a 0x00-priority direct vector) and computes the deltas with **modular subtraction** against the previous snapshot — wrap-safe as long as `port lump status` is polled more often than the 32-bit DWT wrap (~44.74 s @ 96 MHz).
+The instrumentation is **off by default** — `CONFIG_LUMP_HIPRI_PROFILING` (Kconfig) gates both the ISR-side DWT bracketing and the snapshot math in `lump_get_status_full()`.  When the Kconfig is off, the ISR keeps its baseline cost (see below), the engine snapshot block compiles out entirely, and the `isr_pct_x10` / `isr_avg_ns` ABI fields always read back as 0.  Turn it on for bring-up, Issue #100 root-cause work, or any time you need to measure the HIPRI cost.
 
-The first call after boot (and after each `LEGOPORT_LUMP_GET_STATUS_EX` epoch reset, if added later) reports `isr_pct_x10 = isr_avg_ns = 0` and just primes the snapshot — no synthetic "since boot" average is reported, so the value always means "across the interval since the last snapshot".
+When on: `lump_uart_isr_core()` brackets its body with two direct `getreg32(DWT_CYCCNT)` reads (96 MHz on this board → 10.42 ns/cycle, single LDR each — explicitly avoiding the `up_perf_gettime()` function-call wrapper to keep the hot path tight) and accumulates the difference into per-port `volatile uint32_t` cycle / call counters next to the ISR state.  `lump_get_status_full()` snapshots both counters under PRIMASK (the BASEPRI-based `up_irq_save()` cannot block a 0x00-priority direct vector) and computes the deltas with **modular subtraction** against the previous snapshot — wrap-safe as long as `port lump status` is polled more often than the 32-bit DWT wrap (~44.74 s @ 96 MHz).
+
+The first call after boot reports `isr_pct_x10 = isr_avg_ns = 0` and just primes the snapshot — no synthetic "since boot" average is reported, so the value always means "across the interval since the last snapshot".
 
 `isr_pct_x10` is a ratio of DWT cycles consumed to DWT cycles elapsed, **not wall clock** — `WFI` halts CYCCNT, so during deep idle the ratio is computed against active cycles only and tends to read higher than a wall-clock CPU% would.  Treat it as a "fraction of CPU non-idle time spent in this ISR" rather than "fraction of real time".
+
+#### ISR cost reference (objdump-derived, `CONFIG_LUMP_HIPRI_PROFILING=n`)
+
+Static instruction count of `lump_uart_isr_core` on STM32F413 @ 96 MHz, profiling off:
+
+| Section | Cycles | ns @ 96 MHz |
+|---|---|---|
+| SW entry framing (push + prologue, 1-time) | ~19 | ~198 |
+| Per-byte loop body (SR check + DR read + ring push, repeats) | ~23 | ~240 |
+| SW exit (pop + branch back to dispatch) | ~11 | ~115 |
+| **1-byte ISR call total** | **~53** | **~552** |
+| Each additional byte drained per call | +23 | +240 |
+
+(Cortex-M HW entry/exit overhead — the 12 + 12 cycle hardware push/pop of `xPSR / PC / LR / R0–R3 / R12` — is *not* included; that is per-vector, not per-port.)
+
+With `CONFIG_LUMP_HIPRI_PROFILING=y` the bracketing adds **~27 cycles ≈ 280 ns** per call: two `getreg32(DWT_CYCCNT)` PPB loads at the entry / exit, an `r6` save in the prologue stack frame, and a four-instruction `isr_cycles += t1 - t0; isr_count += 1` accumulator.  Empirically observed: 470-535 ns per call at idle on this build, which is consistent with the ~250 ns bare ISR (most calls drain a single byte, with pipelining and branch prediction making the actual cycle count lower than the static count above) plus the ~280 ns instrumentation.
 
 ## 6. ioctl on `/dev/legoport[N]`
 

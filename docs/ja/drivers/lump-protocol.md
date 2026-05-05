@@ -144,11 +144,29 @@ int lump_get_status_full(int port, struct lump_status_full_s *out);
 
 `lump_status_full_s.isr_pct_x10` と `isr_avg_ns` で、LUMP UART HIPRI direct vector ISR (NVIC priority 0x00、`lump_uart_hipri_init()` で `arm_ramvec_attach`) の per-port CPU 占有を露出する。これらの ISR は `arm_doirq()` / `irq_dispatch()` を経由しないので `/proc/irqs` / `SCHED_IRQMONITOR` / `ps` には現れず、本フィールドだけが計測手段になる。
 
-`lump_uart_isr_core()` 入口/出口で `up_perf_gettime()` (DWT CYCCNT、本ボードは 96 MHz → 10.42 ns/cycle) を 2 回読み、差分を per-port `volatile uint32_t` に累積。`lump_get_status_full()` が両カウンタを **PRIMASK 短時間 mask** で coherent snapshot (BASEPRI ベースの `up_irq_save()` では NVIC pri 0x00 を止められないため) し、前回 snapshot との差を **modular subtraction** で計算する。32-bit DWT は ~44.74 秒で wrap するので、それ以下の間隔で `port lump status` を polling することが前提。
+計測コードは **デフォルト無効** — `CONFIG_LUMP_HIPRI_PROFILING` (Kconfig) で ISR 側の DWT bracketing と engine 側の snapshot 計算の両方を gate する。Kconfig OFF 時は ISR がベースラインコストのまま (下表参照)、engine snapshot ブロックは完全にコンパイルアウト、`isr_pct_x10` / `isr_avg_ns` の ABI フィールドは常に 0 を返す。bring-up、Issue #100 の root-cause 解析、HIPRI コスト測定が必要な時のみ ON にする。
 
-ブート直後の初回呼出 (および将来 epoch reset を追加したらその後) は `isr_pct_x10 = isr_avg_ns = 0` を返して snapshot だけ取る。「ブート以来の累積平均」のような合成値は出さず、常に「前回 snapshot 以降の interval 値」を意味する。
+ON 時: `lump_uart_isr_core()` 入口/出口で `getreg32(DWT_CYCCNT)` 直読み (96 MHz → 10.42 ns/cycle、各 1 LDR — `up_perf_gettime()` の関数 call 経由はホットパスを膨らませるため意図的に避けている) を 2 回行い、差分を per-port `volatile uint32_t` に累積。`lump_get_status_full()` が両カウンタを **PRIMASK 短時間 mask** で coherent snapshot (BASEPRI ベースの `up_irq_save()` では NVIC pri 0x00 を止められないため) し、前回 snapshot との差を **modular subtraction** で計算する。32-bit DWT は ~44.74 秒で wrap するので、それ以下の間隔で `port lump status` を polling することが前提。
+
+ブート直後の初回呼出は `isr_pct_x10 = isr_avg_ns = 0` を返して snapshot だけ取る。「ブート以来の累積平均」のような合成値は出さず、常に「前回 snapshot 以降の interval 値」を意味する。
 
 `isr_pct_x10` は **DWT cycles 比であって wall-clock 比ではない** — `WFI` で CPU が halt 中は CYCCNT も止まるため、deep idle 時は active cycles 同士の比になり、wall-clock CPU% より高めに見える。「CPU が起きている時間の中でこの ISR に費やされた割合」と解釈する。
+
+#### ISR コスト リファレンス (objdump 由来、`CONFIG_LUMP_HIPRI_PROFILING=n`)
+
+profiling OFF ビルドの `lump_uart_isr_core` 静的命令数 (STM32F413 @ 96 MHz):
+
+| 区間 | Cycles | ns @ 96 MHz |
+|---|---|---|
+| SW 入口 (push + prologue、1-time) | ~19 | ~198 |
+| 1 byte ループ本体 (SR check + DR read + ring push、繰返) | ~23 | ~240 |
+| SW 出口 (pop + dispatch 復帰 branch) | ~11 | ~115 |
+| **1 byte ISR call 合計** | **~53** | **~552** |
+| 1 call で追加 1 byte drain あたり | +23 | +240 |
+
+(Cortex-M HW の 12 + 12 cycle ハードウェア push/pop — `xPSR / PC / LR / R0-R3 / R12` の HW スタック保存 — は本表に含まない。あれは per-vector, per-port ではなく 1 ISR fire 単位)
+
+`CONFIG_LUMP_HIPRI_PROFILING=y` 時の bracketing は **~27 cycles ≈ 280 ns** per call を追加: 2 回の `getreg32(DWT_CYCCNT)` PPB load (入口/出口)、prologue で `r6` を save list 追加、`isr_cycles += t1 - t0; isr_count += 1` の 4 命令 accumulator。実機計測: アイドル時で 470-535 ns/call → 内訳は ~250 ns 程度の bare ISR (1 byte/call が大半、pipelining と branch prediction で静的命令数より小さく出る) + ~280 ns 計測 oh、で整合。
 
 ## 6. ioctl (`/dev/legoport[N]`)
 

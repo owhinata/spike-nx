@@ -1916,11 +1916,15 @@ int lump_get_status_full(int port, struct lump_status_full_s *out)
     }
 #endif
 
+#ifdef CONFIG_LUMP_HIPRI_PROFILING
   /* Issue #103: HIPRI ISR cycle / count snapshot.  The accumulators
    * live next to the ISR in stm32_legoport_uart_hw.c and wrap every
    * ~44.7 s @ 96 MHz; modular subtraction handles wrap as long as the
    * caller polls more frequently than that.  First call has no prior
-   * snapshot so it reports 0 / 0 and just primes the state.
+   * snapshot so it reports 0 / 0 and just primes the state.  Whole
+   * block compiles out when CONFIG_LUMP_HIPRI_PROFILING is off; the
+   * isr_pct_x10 / isr_avg_ns ABI fields stay in lump_status_full_s
+   * and report 0 (memset above clears them).
    */
 
   uint32_t cur_cycles = 0;
@@ -1966,6 +1970,7 @@ int lump_get_status_full(int port, struct lump_status_full_s *out)
   e->last_isr_cycles = cur_cycles;
   e->last_isr_count  = cur_count;
   e->last_dwt        = cur_dwt;
+#endif /* CONFIG_LUMP_HIPRI_PROFILING */
 
   return OK;
 }
