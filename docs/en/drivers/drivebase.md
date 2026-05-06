@@ -201,6 +201,7 @@ PROGNAME = `drivebase` (NSH builtin).  STACKSIZE = 4096 (see §7).
 | `drivebase start [wheel_mm] [axle_mm]` | spawn the daemon.  `wheel_mm` / `axle_mm` accept decimals (e.g. `17.6 56.5`); default 56 / 112 (SPIKE driving base) |
 | `drivebase stop` | graceful daemon teardown (returns within ~2 s) |
 | `drivebase config <wheel_mm> <axle_mm>` | DRIVEBASE_CONFIG.  Decimals OK; the wire ABI carries micrometers so sub-mm precision survives (currently optional — daemon already takes wheel/axle from `start`) |
+| `drivebase reset [distance_mm] [angle_deg]` | DRIVEBASE_RESET — re-anchors the published distance/heading at the requested baseline (default 0/0).  Daemon also auto-resets on `drivebase start`, so this verb is mainly for re-zeroing mid-session |
 | `drivebase straight <mm> [coast\|brake\|hold]` | DRIVE_STRAIGHT |
 | `drivebase turn <deg>` | TURN (CCW positive) |
 | `drivebase forever <mmps> <dps>` | DRIVE_FOREVER (no completion, distance + heading concurrently) |

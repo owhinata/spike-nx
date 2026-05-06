@@ -64,6 +64,16 @@ struct db_drivebase_s
 
   struct db_servo_s servo[DB_SIDE_NUM];
 
+  /* Origin offset (raw encoder-derived avg / heading at the last
+   * reset).  db_drivebase_update() subtracts these from the raw
+   * encoder readings so the daemon publishes distance/heading
+   * relative to the latest reset point, not the absolute LUMP-mode-2
+   * position the motor returned at power-on.  See Issue #113.
+   */
+
+  int32_t  distance_origin_mm;
+  int32_t  angle_origin_mdeg;
+
   /* Cached aggregate state (rebuilt from per-servo status on demand) */
 
   int32_t  distance_mm;

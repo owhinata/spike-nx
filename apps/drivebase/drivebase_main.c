@@ -1281,7 +1281,8 @@ static void usage(void)
           "  drivebase status                            DRIVEBASE_GET_STATUS snapshot\n"
           "  drivebase start                             launch daemon\n"
           "  drivebase stop                              teardown daemon\n"
-          "  drivebase config <wheel_mm> <axle_mm>       DRIVEBASE_CONFIG\n"
+          "  drivebase config <wheel_mm> <axle_mm>       DRIVEBASE_CONFIG (decimals OK)\n"
+          "  drivebase reset [distance_mm] [angle_deg]   DRIVEBASE_RESET (default 0 0)\n"
           "  drivebase straight <mm> [coast|brake|hold]  DRIVE_STRAIGHT\n"
           "  drivebase turn <deg>                        TURN\n"
           "  drivebase forever <speed_mmps> <turn_dps>   DRIVE_FOREVER\n"
@@ -1392,10 +1393,11 @@ int main(int argc, FAR char *argv[])
   /* All remaining verbs need an open /dev/drivebase. */
 
   int dev = -1;
-  if (strcmp(verb, "config")     == 0 || strcmp(verb, "straight")  == 0 ||
-      strcmp(verb, "turn")       == 0 || strcmp(verb, "forever")   == 0 ||
-      strcmp(verb, "stop-motion")== 0 || strcmp(verb, "get-state") == 0 ||
-      strcmp(verb, "set-gyro")   == 0 || strcmp(verb, "jitter")    == 0)
+  if (strcmp(verb, "config")     == 0 || strcmp(verb, "reset")     == 0 ||
+      strcmp(verb, "straight")   == 0 || strcmp(verb, "turn")      == 0 ||
+      strcmp(verb, "forever")    == 0 || strcmp(verb, "stop-motion")== 0 ||
+      strcmp(verb, "get-state")  == 0 || strcmp(verb, "set-gyro")  == 0 ||
+      strcmp(verb, "jitter")     == 0)
     {
       dev = open(DRIVEBASE_DEVPATH, O_RDWR);
       if (dev < 0)
@@ -1440,6 +1442,33 @@ int main(int argc, FAR char *argv[])
       if (rc < 0)
         {
           fprintf(stderr, "DRIVEBASE_CONFIG: %s\n", strerror(errno));
+          return 1;
+        }
+      return 0;
+    }
+
+  if (strcmp(verb, "reset") == 0)
+    {
+      /* `drivebase reset [distance_mm] [angle_deg]` re-anchors the
+       * daemon's published distance/heading at the requested
+       * baseline (default 0/0).  Daemon also auto-resets at
+       * `drivebase start`, so this verb is mainly for re-zeroing
+       * mid-session.
+       */
+
+      double dist_mm = 0.0;
+      double angle_deg = 0.0;
+      if (argc >= 3) dist_mm   = strtod(argv[2], NULL);
+      if (argc >= 4) angle_deg = strtod(argv[3], NULL);
+      struct drivebase_reset_s r =
+        { .distance_mm = (int32_t)(dist_mm  + (dist_mm  >= 0 ? 0.5 : -0.5)),
+          .angle_mdeg  = (int32_t)(angle_deg * 1000.0 +
+                                   (angle_deg >= 0 ? 0.5 : -0.5)) };
+      int rc = ioctl(dev, DRIVEBASE_RESET, (unsigned long)&r);
+      close(dev);
+      if (rc < 0)
+        {
+          fprintf(stderr, "DRIVEBASE_RESET: %s\n", strerror(errno));
           return 1;
         }
       return 0;

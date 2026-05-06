@@ -162,12 +162,46 @@ int db_drivebase_init(struct db_drivebase_s *db,
   return 0;
 }
 
+/* Compute the raw (encoder-derived, pre-origin) avg distance and
+ * heading from the currently-cached per-servo positions.  Used by
+ * reset() / set_origin() to capture an offset so the public state
+ * surface starts from a known value.
+ */
+
+static void db_drivebase_raw_state(const struct db_drivebase_s *db,
+                                   int32_t *avg_mm,
+                                   int32_t *heading_mdeg)
+{
+  struct db_servo_status_s sL;
+  struct db_servo_status_s sR;
+  db_servo_get_status(&db->servo[DB_SIDE_LEFT],  &sL);
+  db_servo_get_status(&db->servo[DB_SIDE_RIGHT], &sR);
+
+  int32_t lL_mm = db_angle_mdeg_to_mm(sL.act_x_mdeg, db->wheel_d_um);
+  int32_t lR_mm = db_angle_mdeg_to_mm(sR.act_x_mdeg, db->wheel_d_um);
+  *avg_mm       = (lL_mm + lR_mm) / 2;
+  *heading_mdeg = diff_mm_to_heading_mdeg(lR_mm - lL_mm, db->axle_t_um);
+}
+
 int db_drivebase_reset(struct db_drivebase_s *db, uint64_t now_us)
 {
   int rc = db_servo_reset(&db->servo[DB_SIDE_LEFT], now_us);
   if (rc < 0) return rc;
   rc = db_servo_reset(&db->servo[DB_SIDE_RIGHT], now_us);
   if (rc < 0) return rc;
+
+  /* Capture the raw encoder-derived avg/heading as the new origin so
+   * the next get_state returns 0/0 (Issue #113).  The daemon's start
+   * sequence sleeps 30 ms after select_mode(2) before reaching here,
+   * which is plenty of time at LUMP's ~1 kHz publish rate for the
+   * servos to seed real act_x_mdeg values.  If a sample never made
+   * it through (rare — see db_servo_reset's EAGAIN branch), the
+   * raw values default to 0 so the origin is also 0; the worst case
+   * is the same one Issue #113 fixed: a non-zero starting offset.
+   */
+
+  db_drivebase_raw_state(db, &db->distance_origin_mm,
+                             &db->angle_origin_mdeg);
 
   db->distance_mm      = 0;
   db->drive_speed_mmps = 0;
@@ -182,13 +216,19 @@ int db_drivebase_reset(struct db_drivebase_s *db, uint64_t now_us)
 void db_drivebase_set_origin(struct db_drivebase_s *db,
                              int32_t distance_mm, int32_t angle_mdeg)
 {
-  /* Origin handling is a thin offset — it's applied at get_state
-   * time rather than rewriting the cached integration.  For commit
-   * #7 the state aggregator integrates from the per-servo encoder
-   * positions on the fly, so simply latch the offsets and let
-   * subsequent updates incorporate them.  (Persisting origin across
-   * a daemon restart is commit #9 RESET path territory.)
+  /* Re-anchor the origin so the next get_state reports
+   * (distance_mm, angle_mdeg) — i.e., raw - origin == requested.
+   * Computing origin against the *raw* encoder values (not the
+   * already-offset cache) lets the user RESET to any baseline,
+   * including non-zero, repeatedly during a session.
    */
+
+  int32_t raw_dist;
+  int32_t raw_heading;
+  db_drivebase_raw_state(db, &raw_dist, &raw_heading);
+
+  db->distance_origin_mm = raw_dist    - distance_mm;
+  db->angle_origin_mdeg  = raw_heading - angle_mdeg;
 
   db->distance_mm = distance_mm;
   db->angle_mdeg  = angle_mdeg;
@@ -386,9 +426,10 @@ int db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us)
   int32_t avg_mm  = (lL_mm + lR_mm) / 2;
   int32_t diff_mm = lR_mm - lL_mm;
 
-  db->distance_mm      = avg_mm;
+  db->distance_mm      = avg_mm - db->distance_origin_mm;
   db->angle_mdeg       = diff_mm_to_heading_mdeg(diff_mm,
-                                                 db->axle_t_um);
+                                                 db->axle_t_um) -
+                         db->angle_origin_mdeg;
 
   int32_t vL_mmps = db_angle_mdegps_to_mmps(sL.act_v_mdegps,
                                             db->wheel_d_um);
