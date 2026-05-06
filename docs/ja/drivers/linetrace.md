@@ -48,7 +48,78 @@ linetrace: cal 250 samples: black=4 white=72 midpoint=38
    - `ioctl(DRIVEBASE_DRIVE_FOREVER, {speed_mmps, turn_dps})`
 5. SIGINT 受信時: `ioctl(DRIVEBASE_STOP, {COAST})` → fd close → exit。
 
+### 2.3 `linetrace pidstat` (Issue #118)
+
+PID ゲイン (Kp/Ki/Kd) を実機調整するための観測コマンド。drivebase の `get-state` (Issue #115) と同じスタイルで、ヘッダ行 + interval ごと 1 行ずつのストリーミング形式で PID 内部状態を出す。
+
+```
+linetrace pidstat                       # 1 行 snapshot
+linetrace pidstat 5000                  # 5 秒間 1 Hz サンプル (= 5 行 + summary)
+linetrace pidstat 5000 100              # 5 秒間 100 ms interval (= ~50 行 + summary)
+```
+
+既定 `interval_ms = 1000` (1 Hz)。短 interval は printf jitter が制御ループに乗るため、特別な理由がなければ 1000 ms 以上を推奨。`interval_ms < 1000/hz` (制御周期未満) は reject。
+
+#### 出力列 (14 列)
+
+```
+ time_ms      iter   refl     err   err_min   err_max  err_avg    zc    d_max    d_avg      i_acc  turn_max  turn_avg    sat
+```
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `time_ms` | snapshot | pidstat 開始からの経過時間 (グラフ横軸) |
+| `iter` | snapshot | daemon の制御 tick カウンタ (uint32 表示、≈497 日で wrap) |
+| `refl` | snapshot | カラーセンサ反射光 (0–100) |
+| `err` | snapshot | `target - refl` |
+| `err_min/max` | interval 集計 | 直前 interval (100 Hz 全 tick) の偏差 min/max。**aliasing 回避** |
+| `err_avg` | interval 集計 | 直前 interval の **mean(\|err\|) × 10** (0.1 固定小数点)。IAE 系追従品質指標 |
+| `zc` | interval 集計 | 直前 interval の zero-crossing 回数 (符号反転) |
+| `d_max` | interval 集計 | max(\|d_term\|)。Kd 過大時のスパイク振幅 |
+| `d_avg` | interval 集計 | mean(\|d_term\|)。`d_max/d_avg` 比でノイズ性質判定 |
+| `i_acc` | snapshot | 積分蓄積 (積分は遅変動なので集計不要) |
+| `turn_max/avg` | interval 集計 | max/mean(\|turn_dps\|)。出力振幅 |
+| `sat` | 累積 delta | pidstat 開始からの飽和カウント (clamp が effect した tick 数) |
+
+集計 7 列 (err_min/max/avg, d_max/avg, turn_max/avg) は `interval_tick_count == 0` (idle 開始直後) のとき `-` 表示。
+
+#### summary 行
+
+```
+# pidstat: sat=N iter=B..E duration_ms=M reported_ticks=R expected=X
+```
+
+`reported_ticks` は印字済み interval の tick 合計、`expected = duration_ms × hz / 1000`。差分から daemon 停止 / 半端 interval 捨て / 実行 jitter / tick 抜けを切り分け可能。`duration_ms = 0` (snapshot mode) では出さない。
+
+#### 運用上の注意
+
+- **pidstat 実行中に `linetrace run` / `brake` を打たない**。1 interval 内で engaged 状態が変わると d_avg/turn_avg が薄まる
+- `linetrace status` は瞬時値の追従に使い、PID 各項の時系列は pidstat で取る (#118 で `last_p_term`/`last_i_term`/`last_d_term`/`last_turn_dps` を `status` から削除し、代わりに `last_i_acc` を追加)
+
 ## 3. チューニング
+
+PID ゲインの実機調整は `linetrace pidstat` の各列を見ながら進める:
+
+| 症状 | 観測する列 | 対処 |
+|---|---|---|
+| 発振 (Kp 過大) | `zc` 増加 + `err_min/err_max` 振幅拡大 | Kp を下げる |
+| 積分ワインドアップ (Ki 過大) | `i_acc` が anti-windup clamp 値に張り付く | Ki を下げる |
+| D 項ノイズ (Kd 過大) | `d_max / d_avg` 比が大きい (バーストノイズ) | Kd を下げる or LPF 追加 |
+| 出力飽和 (max_turn 不足) | `sat` 連続増加 + `turn_max == max_turn` | `--max-turn` を上げる |
+| 追従品質比較 | `err_avg` (IAE 系) | ゲインセット間で「より小さい方が良い」 |
+
+ホスト側で時系列をログに保存しグラフ化する例 (`#` summary を skip):
+
+```bash
+picocom -t '!' /dev/ttyACM0 | tee pidstat.log
+# 別端末で:
+awk '!/^#/ && NR>1 {print $1, $4}' pidstat.log | gnuplot -p -e \
+    "plot '<cat' using 1:2 with lines title 'err'"
+# 列 4=err、列 5=err_min、列 6=err_max、列 7=err_avg(×10)、列 8=zc、
+# 列 9=d_max、列 10=d_avg、列 13=turn_avg、列 14=sat
+```
+
+### 3.1 基本パラメータ
 
 - `target`: ライン (黒) と床 (白) の中間反射光。`linetrace cal` で実測してから決める。
 - `kp`: 1.0 から始めて発振するまで倍にしていき、発振したら 30 % 落とす。経験的に 1.5–4.0 が標準。

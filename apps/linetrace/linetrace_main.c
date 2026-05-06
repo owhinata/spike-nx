@@ -21,8 +21,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -73,18 +75,46 @@ static struct
   int hz;
 } g_params;
 
+/* PID observability state (Issue #118).
+ *
+ * Snapshot fields hold the most recent tick's value (refl, err, i_acc).
+ * Cumulative `sat_count` increments whenever the saturation clamp acts
+ * during a PID tick.  Interval-aggregate fields track per-interval
+ * statistics (min/max/abs-sum, zero-crossings, abs-max) that the
+ * `pidstat` subcommand consumes to defeat aliasing on err/d_term/turn.
+ * All accesses are guarded by `g_stats_lock` for row consistency
+ * between the daemon writer and the CLI reader; printf runs lock-free
+ * on a local snapshot copy.
+ */
 static struct
 {
   uint64_t iter;
   int      last_refl;
   int      last_err;
-  int      last_p_term;
-  int      last_i_term;
-  int      last_d_term;
-  int      last_turn_dps;
+  int      last_i_acc;
   int      last_ioctl_rc;
   int      last_ioctl_errno;
+  uint32_t sat_count;
+
+  /* Interval aggregates (reset on every CLI snapshot).  Daemon only
+   * accumulates while g_pidstat_active is true so 1-interval bound on
+   * sums is guaranteed (max ~100 ticks for 1s/100Hz default).
+   */
+  int      interval_err_min;
+  int      interval_err_max;
+  int32_t  interval_err_abs_sum;
+  uint16_t interval_zc;
+  int      interval_prev_err;
+  bool     interval_has_prev;
+  int32_t  interval_d_abs_max;
+  int64_t  interval_d_abs_sum;
+  int32_t  interval_turn_abs_max;
+  int32_t  interval_turn_abs_sum;
+  uint32_t interval_tick_count;
 } g_stats;
+
+static pthread_mutex_t g_stats_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool            g_pidstat_active = false;
 
 /* PID state — owned by the control loop.  do_run sets the reset flag
  * (matching the g_cal_request / g_brake_request pattern); the loop
@@ -399,13 +429,42 @@ static int linetrace_daemon(int argc, char *argv[])
             }
           int err = (last_refl >= 0) ? (g_params.target - last_refl) : 0;
 
+          pthread_mutex_lock(&g_stats_lock);
           g_stats.iter++;
-          g_stats.last_refl     = last_refl;
-          g_stats.last_err      = err;
-          g_stats.last_p_term   = 0;
-          g_stats.last_i_term   = 0;
-          g_stats.last_d_term   = 0;
-          g_stats.last_turn_dps = 0;
+          g_stats.last_refl  = last_refl;
+          g_stats.last_err   = err;
+          g_stats.last_i_acc = 0;
+
+          if (g_pidstat_active)
+            {
+              /* Idle: PID outputs are zero; only err contributes to
+               * interval aggregates.  d_term/turn_dps additions are
+               * unconditional max-update + 0-sum, kept symmetric with
+               * the engaged path for clarity.
+               */
+
+              if (err < g_stats.interval_err_min)
+                  g_stats.interval_err_min = err;
+              if (err > g_stats.interval_err_max)
+                  g_stats.interval_err_max = err;
+              int64_t err_abs = (err >= 0) ? (int64_t)err : -(int64_t)err;
+              g_stats.interval_err_abs_sum += (int32_t)err_abs;
+              if (g_stats.interval_has_prev)
+                {
+                  int p_sign = (g_stats.interval_prev_err > 0) -
+                               (g_stats.interval_prev_err < 0);
+                  int c_sign = (err > 0) - (err < 0);
+                  if (p_sign != 0 && c_sign != 0 && p_sign != c_sign &&
+                      g_stats.interval_zc < UINT16_MAX)
+                    {
+                      g_stats.interval_zc++;
+                    }
+                }
+              g_stats.interval_prev_err = err;
+              g_stats.interval_has_prev = true;
+              g_stats.interval_tick_count++;
+            }
+          pthread_mutex_unlock(&g_stats_lock);
           goto sleep_to_next_tick;
         }
 
@@ -473,18 +532,64 @@ static int linetrace_daemon(int argc, char *argv[])
       int sum_dps  = (int)((int64_t)p_term + i_term + d_term);
       int turn_dps = clamp_int(sum_dps, -g_params.max_turn,
                                          g_params.max_turn);
+      int saturated = (sum_dps != turn_dps) ? 1 : 0;
 
       int rc = drivebase_send_forever(db_fd, g_params.speed_mmps, turn_dps);
 
+      pthread_mutex_lock(&g_stats_lock);
       g_stats.iter++;
       g_stats.last_refl        = last_refl;
       g_stats.last_err         = err;
-      g_stats.last_p_term      = p_term;
-      g_stats.last_i_term      = i_term;
-      g_stats.last_d_term      = d_term;
-      g_stats.last_turn_dps    = turn_dps;
+      g_stats.last_i_acc       = g_pid_i_acc;
       g_stats.last_ioctl_rc    = rc;
       g_stats.last_ioctl_errno = (rc < 0) ? errno : 0;
+      g_stats.sat_count       += (uint32_t)saturated;
+
+      if (g_pidstat_active)
+        {
+          /* abs via 64-bit cast guards INT_MIN UB; sum stays in int32
+           * range because pidstat-only gating bounds 1 interval to
+           * 100*hz_max ticks (default <=100).
+           */
+
+          int64_t err_abs  = (err >= 0)      ? (int64_t)err
+                                             : -(int64_t)err;
+          int64_t d_abs    = (d_term >= 0)   ? (int64_t)d_term
+                                             : -(int64_t)d_term;
+          int64_t turn_abs = (turn_dps >= 0) ? (int64_t)turn_dps
+                                             : -(int64_t)turn_dps;
+
+          if (err < g_stats.interval_err_min)
+              g_stats.interval_err_min = err;
+          if (err > g_stats.interval_err_max)
+              g_stats.interval_err_max = err;
+          g_stats.interval_err_abs_sum += (int32_t)err_abs;
+
+          if (g_stats.interval_has_prev)
+            {
+              int p_sign = (g_stats.interval_prev_err > 0) -
+                           (g_stats.interval_prev_err < 0);
+              int c_sign = (err > 0) - (err < 0);
+              if (p_sign != 0 && c_sign != 0 && p_sign != c_sign &&
+                  g_stats.interval_zc < UINT16_MAX)
+                {
+                  g_stats.interval_zc++;
+                }
+            }
+          g_stats.interval_prev_err = err;
+          g_stats.interval_has_prev = true;
+
+          if ((int32_t)d_abs > g_stats.interval_d_abs_max)
+              g_stats.interval_d_abs_max = (int32_t)d_abs;
+          g_stats.interval_d_abs_sum += d_abs;
+
+          if ((int32_t)turn_abs > g_stats.interval_turn_abs_max)
+              g_stats.interval_turn_abs_max = (int32_t)turn_abs;
+          g_stats.interval_turn_abs_sum += (int32_t)turn_abs;
+
+          g_stats.interval_tick_count++;
+        }
+      pthread_mutex_unlock(&g_stats_lock);
 
     sleep_to_next_tick:
       {
@@ -836,6 +941,228 @@ static int do_brake(void)
 }
 
 /****************************************************************************
+ * Subcommand: pidstat
+ ****************************************************************************/
+
+static int do_pidstat(int argc, char **argv)
+{
+  long duration_ms = 0;
+  long interval_ms = 1000;
+
+  /* Argument parsing */
+
+  if (argc >= 1)
+    {
+      char *end;
+      long v = strtol(argv[0], &end, 10);
+      if (*end != '\0' || v < 0)
+        {
+          fprintf(stderr,
+                  "linetrace: pidstat duration_ms must be >= 0\n");
+          return 1;
+        }
+      duration_ms = v;
+    }
+  if (argc >= 2)
+    {
+      char *end;
+      long v = strtol(argv[1], &end, 10);
+      if (*end != '\0' || v <= 0)
+        {
+          fprintf(stderr,
+                  "linetrace: pidstat interval_ms must be > 0\n");
+          return 1;
+        }
+      interval_ms = v;
+    }
+  if (argc > 2)
+    {
+      fprintf(stderr,
+              "usage: linetrace pidstat [duration_ms [interval_ms]]\n");
+      return 1;
+    }
+
+  int min_interval_ms = (g_params.hz > 0) ? (1000 / g_params.hz) : 10;
+  if (min_interval_ms < 1)
+    {
+      min_interval_ms = 1;
+    }
+  if (duration_ms > 0 && interval_ms < min_interval_ms)
+    {
+      fprintf(stderr,
+              "linetrace: interval_ms %ld too small "
+              "(min %d ms for hz=%d)\n",
+              interval_ms, min_interval_ms, g_params.hz);
+      return 1;
+    }
+
+  /* Daemon check + interval reset + activate (atomic under lock).
+   * The lock guarantees the daemon's next publish will see the
+   * cleared aggregates and the active flag together.
+   */
+
+  pthread_mutex_lock(&g_stats_lock);
+  if (!g_daemon_running)
+    {
+      pthread_mutex_unlock(&g_stats_lock);
+      fprintf(stderr, "linetrace: daemon not running\n");
+      return 1;
+    }
+  g_stats.interval_err_min      = INT_MAX;
+  g_stats.interval_err_max      = INT_MIN;
+  g_stats.interval_err_abs_sum  = 0;
+  g_stats.interval_zc           = 0;
+  g_stats.interval_has_prev     = false;
+  g_stats.interval_d_abs_max    = 0;
+  g_stats.interval_d_abs_sum    = 0;
+  g_stats.interval_turn_abs_max = 0;
+  g_stats.interval_turn_abs_sum = 0;
+  g_stats.interval_tick_count   = 0;
+  uint32_t begin_sat    = g_stats.sat_count;
+  uint32_t begin_iter32 = (uint32_t)(g_stats.iter & 0xFFFFFFFFu);
+  g_pidstat_active      = true;
+  pthread_mutex_unlock(&g_stats_lock);
+
+  printf("%8s %9s %6s %7s %8s %8s %8s %5s %8s %8s %10s %9s %9s %6s\n",
+         "time_ms", "iter", "refl", "err",
+         "err_min", "err_max", "err_avg", "zc",
+         "d_max", "d_avg", "i_acc",
+         "turn_max", "turn_avg", "sat");
+
+  struct timespec t0;
+  struct timespec next;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  next = t0;
+
+  uint32_t reported_ticks = 0;
+  uint32_t end_iter32     = begin_iter32;
+  uint32_t end_sat        = begin_sat;
+  long     elapsed_ms     = 0;
+
+  for (;;)
+    {
+      pthread_mutex_lock(&g_stats_lock);
+      bool     running      = g_daemon_running;
+      uint64_t iter64       = g_stats.iter;
+      int      last_refl    = g_stats.last_refl;
+      int      last_err     = g_stats.last_err;
+      int      last_i_acc   = g_stats.last_i_acc;
+      uint32_t cur_sat      = g_stats.sat_count;
+      uint32_t n            = g_stats.interval_tick_count;
+      int      err_min      = g_stats.interval_err_min;
+      int      err_max      = g_stats.interval_err_max;
+      int32_t  err_sum      = g_stats.interval_err_abs_sum;
+      uint16_t zc           = g_stats.interval_zc;
+      int32_t  d_abs_max    = g_stats.interval_d_abs_max;
+      int64_t  d_abs_sum    = g_stats.interval_d_abs_sum;
+      int32_t  turn_abs_max = g_stats.interval_turn_abs_max;
+      int32_t  turn_abs_sum = g_stats.interval_turn_abs_sum;
+      g_stats.interval_err_min      = INT_MAX;
+      g_stats.interval_err_max      = INT_MIN;
+      g_stats.interval_err_abs_sum  = 0;
+      g_stats.interval_zc           = 0;
+      g_stats.interval_d_abs_max    = 0;
+      g_stats.interval_d_abs_sum    = 0;
+      g_stats.interval_turn_abs_max = 0;
+      g_stats.interval_turn_abs_sum = 0;
+      g_stats.interval_tick_count   = 0;
+      pthread_mutex_unlock(&g_stats_lock);
+
+      struct timespec tn;
+      clock_gettime(CLOCK_MONOTONIC, &tn);
+      elapsed_ms = (tn.tv_sec - t0.tv_sec) * 1000L +
+                   (tn.tv_nsec - t0.tv_nsec) / 1000000L;
+
+      /* Format aggregate columns: '-' when no ticks were captured
+       * (idle on entry or before the first daemon publish landed).
+       */
+
+      char b_emin[16], b_emax[16], b_eavg[16];
+      char b_dmax[16], b_davg[16];
+      char b_tmax[16], b_tavg[16];
+
+      if (n == 0)
+        {
+          snprintf(b_emin, sizeof(b_emin), "%8s", "-");
+          snprintf(b_emax, sizeof(b_emax), "%8s", "-");
+          snprintf(b_eavg, sizeof(b_eavg), "%8s", "-");
+          snprintf(b_dmax, sizeof(b_dmax), "%8s", "-");
+          snprintf(b_davg, sizeof(b_davg), "%8s", "-");
+          snprintf(b_tmax, sizeof(b_tmax), "%9s", "-");
+          snprintf(b_tavg, sizeof(b_tavg), "%9s", "-");
+        }
+      else
+        {
+          int err_avg_x10 = (int)(((int64_t)err_sum * 10 +
+                                   (int64_t)n / 2) / (int64_t)n);
+          int d_avg       = (int)(d_abs_sum / (int64_t)n);
+          int turn_avg    = (int)(turn_abs_sum / (int32_t)n);
+          snprintf(b_emin, sizeof(b_emin), "%8d", err_min);
+          snprintf(b_emax, sizeof(b_emax), "%8d", err_max);
+          snprintf(b_eavg, sizeof(b_eavg), "%8d", err_avg_x10);
+          snprintf(b_dmax, sizeof(b_dmax), "%8ld", (long)d_abs_max);
+          snprintf(b_davg, sizeof(b_davg), "%8d", d_avg);
+          snprintf(b_tmax, sizeof(b_tmax), "%9ld", (long)turn_abs_max);
+          snprintf(b_tavg, sizeof(b_tavg), "%9d", turn_avg);
+        }
+
+      printf("%8ld %9lu %6d %7d %s %s %s %5u %s %s %10d %s %s %6lu\n",
+             elapsed_ms,
+             (unsigned long)(iter64 & 0xFFFFFFFFu),
+             last_refl, last_err,
+             b_emin, b_emax, b_eavg, (unsigned)zc,
+             b_dmax, b_davg,
+             last_i_acc,
+             b_tmax, b_tavg,
+             (unsigned long)(cur_sat - begin_sat));
+
+      reported_ticks += n;
+      end_iter32      = (uint32_t)(iter64 & 0xFFFFFFFFu);
+      end_sat         = cur_sat;
+
+      if (!running)
+        {
+          printf("# pidstat: daemon stopped\n");
+          break;
+        }
+
+      if (duration_ms == 0 || elapsed_ms >= duration_ms)
+        {
+          break;
+        }
+
+      long period_ns = interval_ms * 1000000L;
+      next.tv_nsec += period_ns;
+      while (next.tv_nsec >= 1000000000L)
+        {
+          next.tv_nsec -= 1000000000L;
+          next.tv_sec  += 1;
+        }
+      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+    }
+
+  pthread_mutex_lock(&g_stats_lock);
+  g_pidstat_active = false;
+  pthread_mutex_unlock(&g_stats_lock);
+
+  if (duration_ms > 0)
+    {
+      uint32_t expected =
+          (uint32_t)((duration_ms * (long)g_params.hz) / 1000L);
+      printf("# pidstat: sat=%lu iter=%lu..%lu duration_ms=%ld "
+             "reported_ticks=%lu expected=%lu\n",
+             (unsigned long)(end_sat - begin_sat),
+             (unsigned long)begin_iter32,
+             (unsigned long)end_iter32,
+             elapsed_ms,
+             (unsigned long)reported_ticks,
+             (unsigned long)expected);
+    }
+
+  return 0;
+}
+
+/****************************************************************************
  * Subcommand: status
  ****************************************************************************/
 
@@ -847,6 +1174,15 @@ static int do_status(void)
       return 0;
     }
 
+  pthread_mutex_lock(&g_stats_lock);
+  uint64_t iter        = g_stats.iter;
+  int      last_refl   = g_stats.last_refl;
+  int      last_err    = g_stats.last_err;
+  int      last_i_acc  = g_stats.last_i_acc;
+  int      ioctl_rc    = g_stats.last_ioctl_rc;
+  int      ioctl_errno = g_stats.last_ioctl_errno;
+  pthread_mutex_unlock(&g_stats_lock);
+
   printf("pid:           %d\n", g_daemon_pid);
   printf("speed:         %d mm/s\n", g_params.speed_mmps);
   printf("engaged:       %s\n", g_engaged ? "yes" : "no");
@@ -856,15 +1192,11 @@ static int do_status(void)
   printf("target:        %d\n", g_params.target);
   printf("max_turn:      %d dps\n", g_params.max_turn);
   printf("hz:            %d\n", g_params.hz);
-  printf("iter:          %llu\n", (unsigned long long)g_stats.iter);
-  printf("last_refl:     %d\n", g_stats.last_refl);
-  printf("last_err:      %d\n", g_stats.last_err);
-  printf("last_p_term:   %d\n", g_stats.last_p_term);
-  printf("last_i_term:   %d\n", g_stats.last_i_term);
-  printf("last_d_term:   %d\n", g_stats.last_d_term);
-  printf("last_turn_dps: %d\n", g_stats.last_turn_dps);
-  printf("last_ioctl_rc: %d (errno=%d)\n",
-         g_stats.last_ioctl_rc, g_stats.last_ioctl_errno);
+  printf("iter:          %llu\n", (unsigned long long)iter);
+  printf("last_refl:     %d\n", last_refl);
+  printf("last_err:      %d\n", last_err);
+  printf("last_i_acc:    %d\n", last_i_acc);
+  printf("last_ioctl_rc: %d (errno=%d)\n", ioctl_rc, ioctl_errno);
   printf("cal:           %s\n",
          g_cal_request ? "in_flight" : (g_cal_done ? "done" : "idle"));
   return 0;
@@ -883,24 +1215,35 @@ static void usage(void)
     "[--ki K] [--kd K] [--max-turn dps] [--hz N]\n"
     "       linetrace brake\n"
     "       linetrace stop\n"
+    "       linetrace pidstat [duration_ms [interval_ms]]\n"
     "       linetrace status\n"
     "\n"
-    "  start:  spawn resident daemon (idle: speed=0 kp=0 target=%d)\n"
-    "  cal:    daemon samples 3 s, prints black/white/midpoint\n"
-    "          (requires speed=0; use 'linetrace run 0 0' if needed)\n"
-    "  run:    update daemon params live\n"
-    "          run 100 0 61          straight at 100 mm/s\n"
-    "          run 100 3 61          P-control follow with kp=3\n"
-    "          run 100 3 61 --ki 0.5 --kd 0.1\n"
-    "                                PID follow (kp=3 ki=0.5 kd=0.1)\n"
-    "          run 0 0               command stop (daemon stays alive)\n"
-    "          gain ranges: kp/ki/kd in [-100.00, 100.00] (0.01 step)\n"
-    "          defaults inherit from previous values; first run after\n"
-    "          start uses target=%d, --max-turn=%d, --hz=%d\n"
-    "  brake:  FOREVER(0,0) + STOP{BRAKE}; reset speed=0 kp=0\n"
-    "          daemon stays alive — 'linetrace run ...' to re-engage\n"
-    "  stop:   coast wheels, daemon exits\n"
-    "  status: print daemon state and last loop iteration values\n",
+    "  start:   spawn resident daemon (idle: speed=0 kp=0 target=%d)\n"
+    "  cal:     daemon samples 3 s, prints black/white/midpoint\n"
+    "           (requires speed=0; use 'linetrace run 0 0' if needed)\n"
+    "  run:     update daemon params live\n"
+    "           run 100 0 61          straight at 100 mm/s\n"
+    "           run 100 3 61          P-control follow with kp=3\n"
+    "           run 100 3 61 --ki 0.5 --kd 0.1\n"
+    "                                 PID follow (kp=3 ki=0.5 kd=0.1)\n"
+    "           run 0 0               command stop (daemon stays alive)\n"
+    "           gain ranges: kp/ki/kd in [-100.00, 100.00] (0.01 step)\n"
+    "           defaults inherit from previous values; first run after\n"
+    "           start uses target=%d, --max-turn=%d, --hz=%d\n"
+    "  brake:   FOREVER(0,0) + STOP{BRAKE}; reset speed=0 kp=0\n"
+    "           daemon stays alive — 'linetrace run ...' to re-engage\n"
+    "  stop:    coast wheels, daemon exits\n"
+    "  pidstat: stream PID internals for gain tuning (default 1000ms)\n"
+    "           refl/err/i_acc are snapshots; err_min/max/avg, zc,\n"
+    "           d_max/avg, turn_max/avg are aggregates over the\n"
+    "           preceding interval.  err_avg is x10 fixed-point.\n"
+    "           sat is cumulative delta from pidstat start.  '-'\n"
+    "           appears when no ticks landed in the interval.\n"
+    "           NOTE: do not issue run/brake while pidstat runs;\n"
+    "           a 1-interval engaged/idle straddle dilutes averages.\n"
+    "           summary's reported_ticks counts only printed intervals\n"
+    "           (a partial interval at end-of-stream is dropped).\n"
+    "  status:  print daemon state and last err/refl/i_acc snapshot\n",
     DEFAULT_TARGET, DEFAULT_TARGET, DEFAULT_MAX_TURN, DEFAULT_HZ);
 }
 
@@ -934,6 +1277,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "run") == 0)
     {
       return do_run(argc - 2, argv + 2);
+    }
+
+  if (strcmp(argv[1], "pidstat") == 0)
+    {
+      return do_pidstat(argc - 2, argv + 2);
     }
 
   if (strcmp(argv[1], "brake") == 0)
