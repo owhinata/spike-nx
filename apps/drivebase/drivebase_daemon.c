@@ -265,6 +265,28 @@ static int daemon_task_main(int argc, char *argv[])
     {
       usleep(50000);
       db_chardev_handler_publish_status(&d->handler);
+
+      /* If user requested DRIVEBASE_JITTER_RESET, claim and apply it
+       * before the snapshot so the published cache reflects the post-
+       * reset state in the same idle wake.
+       */
+
+      int reset_req = 0;
+      if (ioctl(d->handler.fd, DRIVEBASE_DAEMON_CLAIM_JITTER_RESET,
+                (unsigned long)&reset_req) == 0 && reset_req)
+        {
+          db_rt_reset_jitter(&d->rt);
+        }
+
+      /* Snapshot RT loop counters and push to the kernel cache so
+       * `drivebase jitter` reads live data instead of zeros.  20 Hz
+       * is plenty for diagnostics; the snapshot itself is a
+       * mutex-protected memcpy of an 8-bucket histogram + 3 counters.
+       */
+
+      struct drivebase_jitter_dump_s jdump;
+      db_rt_get_jitter(&d->rt, &jdump);
+      db_chardev_handler_publish_jitter(&d->handler, &jdump);
     }
 
   atomic_store(&d->state, DB_DAEMON_TEARDOWN);

@@ -16,6 +16,7 @@
 #include "drivebase_motor.h"
 #include "drivebase_settings.h"
 #include "drivebase_angle.h"
+#include "drivebase_rt.h"      /* DB_RT_TICK_MS — nominal PID dt        */
 
 /****************************************************************************
  * Private Helpers
@@ -274,9 +275,15 @@ int db_servo_update(struct db_servo_s *s, uint64_t now_us)
 
   /* 3. PID update. */
 
-  uint32_t dt_ms_pid = (now_us > s->t_last_us) ? 5 :
+  /* PID is fed the *nominal* tick instead of the measured delta so
+   * scheduling jitter does not modulate the integral / derivative
+   * gains.  ki_pos / done_streak_ms / smart_hold_streak_ms are all
+   * dt_ms-proportional, so the constant must track DB_RT_TICK_US.
+   */
+
+  uint32_t dt_ms_pid = (now_us > s->t_last_us) ? DB_RT_TICK_MS :
                        (uint32_t)((now_us - s->t_last_us) / 1000);
-  if (dt_ms_pid == 0) dt_ms_pid = 5;  /* assume nominal tick on first call */
+  if (dt_ms_pid == 0) dt_ms_pid = DB_RT_TICK_MS;
 
   struct db_pid_input_s in =
   {

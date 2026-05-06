@@ -79,6 +79,7 @@ extern "C"
 
 #define DRIVEBASE_JITTER_DUMP        _DBASEIOC(0x40)  /* drivebase_jitter_dump_s    */
 #define DRIVEBASE_GET_STATUS         _DBASEIOC(0x41)  /* drivebase_status_s         */
+#define DRIVEBASE_JITTER_RESET       _DBASEIOC(0x42)  /* arg ignored                */
 
 /* Daemon-internal ioctls.  Only the userspace daemon (one per board)
  * issues these; userspace clients must not touch them.  The Linux/FUSE
@@ -92,6 +93,7 @@ extern "C"
 #define DRIVEBASE_DAEMON_PUBLISH_STATE  _DBASEIOC(0x83) /* drivebase_state_s *  */
 #define DRIVEBASE_DAEMON_PUBLISH_STATUS _DBASEIOC(0x84) /* drivebase_status_s * */
 #define DRIVEBASE_DAEMON_PUBLISH_JITTER _DBASEIOC(0x85) /* drivebase_jitter_dump_s* */
+#define DRIVEBASE_DAEMON_CLAIM_JITTER_RESET _DBASEIOC(0x86) /* int * out (0/1)      */
 
 /****************************************************************************
  * Public Types: enums

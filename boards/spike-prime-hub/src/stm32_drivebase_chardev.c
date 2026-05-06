@@ -107,6 +107,13 @@ struct db_chardev_s
   struct drivebase_jitter_dump_s  jitter;
   mutex_t                         jitter_lock;
 
+  /* Set by user-side DRIVEBASE_JITTER_RESET ioctl, claimed (cleared)
+   * by the daemon's idle loop when it processes the reset.  Atomic so
+   * the user-side ioctl handler does not need to take a mutex.
+   */
+
+  atomic_uint                     jitter_reset_pending;
+
   /* Daemon attach state.  attach_filep is the fd that issued ATTACH;
    * close() compares this pointer to detect daemon termination
    * (segfault / `task_delete` / clean exit) and triggers cleanup.
@@ -848,6 +855,23 @@ static int db_chardev_ioctl(FAR struct file *filep, int cmd,
         nxmutex_unlock(&dev->jitter_lock);
         return OK;
 
+      case DRIVEBASE_DAEMON_CLAIM_JITTER_RESET:
+        if (argp == NULL)
+          {
+            return -EINVAL;
+          }
+        if (!dev->attached || dev->attach_filep != filep)
+          {
+            return -ENOTCONN;
+          }
+        if (!board_user_out_ok(argp, sizeof(int)))
+          {
+            return -EFAULT;
+          }
+        *(FAR int *)argp =
+            (int)atomic_exchange(&dev->jitter_reset_pending, 0);
+        return OK;
+
       /* User-facing: STOP has its own fast path */
 
       case DRIVEBASE_STOP:
@@ -872,6 +896,17 @@ static int db_chardev_ioctl(FAR struct file *filep, int cmd,
             return -EINVAL;
           }
         return db_read_status(dev, argp); /* always available, even detached */
+
+      case DRIVEBASE_JITTER_RESET:
+        /* Latch the request; the daemon's idle loop processes it on
+         * its next wake (~50 ms) by calling db_rt_reset_jitter and
+         * then publishing a fresh (zeroed) snapshot.  Available even
+         * when detached so a user can clear stale data after a
+         * crash/restart cycle.
+         */
+
+        atomic_store(&dev->jitter_reset_pending, 1);
+        return OK;
 
       case DRIVEBASE_JITTER_DUMP:
         if (argp == NULL)

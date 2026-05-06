@@ -32,7 +32,8 @@ extern "C"
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define DB_RT_TICK_US      5000        /* 5 ms control loop period       */
+#define DB_RT_TICK_US      2000        /* 2 ms control loop period       */
+#define DB_RT_TICK_MS      (DB_RT_TICK_US / 1000)
 #define DB_RT_DEADLINE_US  1000        /* lag threshold above which we   */
                                        /* count a deadline miss          */
 

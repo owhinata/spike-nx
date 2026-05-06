@@ -270,3 +270,12 @@ int db_chardev_handler_publish_status(struct db_chardev_handler_s *h)
                  (unsigned long)&s);
   return rc < 0 ? -errno : 0;
 }
+
+int db_chardev_handler_publish_jitter(struct db_chardev_handler_s *h,
+                                      const struct drivebase_jitter_dump_s *j)
+{
+  if (!h->attached) return -ENOTCONN;
+  int rc = ioctl(h->fd, DRIVEBASE_DAEMON_PUBLISH_JITTER,
+                 (unsigned long)j);
+  return rc < 0 ? -errno : 0;
+}

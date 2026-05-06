@@ -94,6 +94,16 @@ int  db_chardev_handler_tick(struct db_chardev_handler_s *h,
 
 int  db_chardev_handler_publish_status(struct db_chardev_handler_s *h);
 
+/* Publish a snapshot of the RT loop's jitter histogram + counters into
+ * the kernel chardev's cache so user-space `drivebase jitter` can read
+ * it via DRIVEBASE_JITTER_DUMP.  Caller fills the struct (typically
+ * via db_rt_get_jitter); this just memcpy's it through the ioctl.
+ * Cheap — call from the daemon's idle loop alongside publish_status.
+ */
+
+int  db_chardev_handler_publish_jitter(struct db_chardev_handler_s *h,
+                                       const struct drivebase_jitter_dump_s *j);
+
 #ifdef __cplusplus
 }
 #endif

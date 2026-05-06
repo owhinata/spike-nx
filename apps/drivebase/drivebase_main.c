@@ -1632,6 +1632,24 @@ int main(int argc, FAR char *argv[])
 
   if (strcmp(verb, "jitter") == 0)
     {
+      if (argc >= 3 && strcmp(argv[2], "reset") == 0)
+        {
+          int rc = ioctl(dev, DRIVEBASE_JITTER_RESET, 0);
+          close(dev);
+          if (rc < 0)
+            {
+              fprintf(stderr, "JITTER_RESET: %s\n", strerror(errno));
+              return 1;
+            }
+          /* The daemon's idle loop applies the reset on its next wake
+           * (~50 ms).  Wait briefly so the next `drivebase jitter`
+           * sees the cleared cache instead of pre-reset values.
+           */
+
+          usleep(80000);
+          printf("jitter reset\n");
+          return 0;
+        }
       struct drivebase_jitter_dump_s d;
       int rc = ioctl(dev, DRIVEBASE_JITTER_DUMP, (unsigned long)&d);
       close(dev);
