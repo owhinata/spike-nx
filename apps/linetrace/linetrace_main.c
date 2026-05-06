@@ -21,6 +21,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <poll.h>
 #include <sched.h>
 #include <stdbool.h>
@@ -65,6 +66,8 @@ static struct
 {
   int speed_mmps;
   int kp_x100;
+  int ki_x100;
+  int kd_x100;
   int target;
   int max_turn;
   int hz;
@@ -75,10 +78,25 @@ static struct
   uint64_t iter;
   int      last_refl;
   int      last_err;
+  int      last_p_term;
+  int      last_i_term;
+  int      last_d_term;
   int      last_turn_dps;
   int      last_ioctl_rc;
   int      last_ioctl_errno;
 } g_stats;
+
+/* PID state — owned by the control loop.  do_run sets the reset flag
+ * (matching the g_cal_request / g_brake_request pattern); the loop
+ * picks it up on the next tick and zeros the integrator + clears the
+ * derivative seed so the first sample after a parameter change does
+ * not produce a spurious D kick.
+ */
+
+static int           g_pid_i_acc;
+static int           g_pid_prev_err;
+static bool          g_pid_has_prev;
+static volatile bool g_pid_reset_request;
 
 static volatile bool g_daemon_running = false;
 static volatile bool g_daemon_stop    = false;
@@ -310,9 +328,24 @@ static int linetrace_daemon(int argc, char *argv[])
           drivebase_send_stop(db_fd, DRIVEBASE_ON_COMPLETION_BRAKE);
           g_params.speed_mmps = 0;
           g_params.kp_x100    = 0;
+          g_params.ki_x100    = 0;
+          g_params.kd_x100    = 0;
+          g_pid_reset_request = true;
           g_brake_request     = false;
           clock_gettime(CLOCK_MONOTONIC, &next);
           continue;
+        }
+
+      /* PID reset on demand (do_run / brake wrote new params).  Done
+       * before integrating this tick so the new gain set sees a
+       * clean integrator + suppressed first-sample derivative kick.
+       */
+
+      if (g_pid_reset_request)
+        {
+          g_pid_i_acc         = 0;
+          g_pid_has_prev      = false;
+          g_pid_reset_request = false;
         }
 
       int v = color_read_latest(color_fd);
@@ -321,15 +354,59 @@ static int linetrace_daemon(int argc, char *argv[])
           last_refl = v;
         }
 
-      int err      = (last_refl >= 0) ? (g_params.target - last_refl) : 0;
-      int turn_dps = (g_params.kp_x100 * err) / 100;
-      turn_dps = clamp_int(turn_dps, -g_params.max_turn, g_params.max_turn);
+      int err    = (last_refl >= 0) ? (g_params.target - last_refl) : 0;
+      int dt_ms  = 1000 / g_params.hz;       /* hz validated 10..200    */
+      int p_term = (g_params.kp_x100 * err) / 100;
+
+      /* I-term: accumulate err·ms.  Anti-windup clamps |i_acc| so
+       * |i_term| <= max_turn even at full ki — see the plan/Issue
+       * for the trade-off vs drivebase_control.c's gated approach.
+       * ki_x100 is validated to ±10000 in do_run, so the divide is
+       * always in safe range and the abs() cannot hit INT_MIN.
+       */
+
+      g_pid_i_acc += err * dt_ms;
+      if (g_params.ki_x100 != 0)
+        {
+          int ki_abs  = (g_params.ki_x100 < 0) ?
+                        -g_params.ki_x100 : g_params.ki_x100;
+          int i_limit = (g_params.max_turn * 100 * 1000) / ki_abs;
+          g_pid_i_acc = clamp_int(g_pid_i_acc, -i_limit, i_limit);
+        }
+      else
+        {
+          g_pid_i_acc = 0;
+        }
+      int i_term = (int)(((int64_t)g_params.ki_x100 * g_pid_i_acc) /
+                         (100 * 1000));
+
+      /* D-term: kd × derr / dt_sec.  Suppress on first sample after
+       * a reset so the initial step from 0 prev_err does not produce
+       * a spurious derivative kick.
+       */
+
+      int d_term = 0;
+      if (g_pid_has_prev && dt_ms > 0)
+        {
+          int derr = err - g_pid_prev_err;
+          d_term   = (int)(((int64_t)g_params.kd_x100 * derr * 10) /
+                           dt_ms);
+        }
+      g_pid_prev_err = err;
+      g_pid_has_prev = true;
+
+      int sum_dps  = (int)((int64_t)p_term + i_term + d_term);
+      int turn_dps = clamp_int(sum_dps, -g_params.max_turn,
+                                         g_params.max_turn);
 
       int rc = drivebase_send_forever(db_fd, g_params.speed_mmps, turn_dps);
 
       g_stats.iter++;
       g_stats.last_refl        = last_refl;
       g_stats.last_err         = err;
+      g_stats.last_p_term      = p_term;
+      g_stats.last_i_term      = i_term;
+      g_stats.last_d_term      = d_term;
       g_stats.last_turn_dps    = turn_dps;
       g_stats.last_ioctl_rc    = rc;
       g_stats.last_ioctl_errno = (rc < 0) ? errno : 0;
@@ -379,12 +456,19 @@ static int do_start(void)
 
   g_params.speed_mmps = 0;
   g_params.kp_x100    = 0;
+  g_params.ki_x100    = 0;
+  g_params.kd_x100    = 0;
   g_params.target     = DEFAULT_TARGET;
   g_params.max_turn   = DEFAULT_MAX_TURN;
   g_params.hz         = DEFAULT_HZ;
 
   memset(&g_stats, 0, sizeof(g_stats));
   g_stats.last_refl = -1;
+
+  g_pid_i_acc         = 0;
+  g_pid_prev_err      = 0;
+  g_pid_has_prev      = false;
+  g_pid_reset_request = false;
 
   g_cal_request = false;
   g_cal_done    = false;
@@ -503,6 +587,25 @@ static int do_cal(void)
  * Subcommand: run
  ****************************************************************************/
 
+/* Parse a PID gain (kp/ki/kd) into the x100 fixed-point representation.
+ * Validates as `double` first so out-of-range or non-finite inputs
+ * (e.g. `1e100`, `nan`) are rejected before the `(int)` cast can hit
+ * undefined behaviour.  Range matches g_params field bounds.
+ */
+
+static int parse_gain(const char *s, int *out_x100)
+{
+  char  *end;
+  double v = strtod(s, &end);
+  if (end == s || *end != '\0' || !isfinite(v) ||
+      v < -100.0 || v > 100.0)
+    {
+      return -1;
+    }
+  *out_x100 = (int)(v * 100.0 + (v >= 0.0 ? 0.5 : -0.5));
+  return 0;
+}
+
 static int do_run(int argc, char **argv)
 {
   if (!g_daemon_running)
@@ -516,12 +619,20 @@ static int do_run(int argc, char **argv)
     {
       fprintf(stderr,
               "usage: linetrace run <speed_mmps> <kp> [target] "
-              "[--max-turn dps] [--hz N]\n");
+              "[--ki K] [--kd K] [--max-turn dps] [--hz N]\n");
       return 1;
     }
 
   int  speed_mmps = atoi(argv[0]);
-  int  kp_x100    = (int)(strtod(argv[1], NULL) * 100.0);
+  int  kp_x100    = 0;
+  if (parse_gain(argv[1], &kp_x100) < 0)
+    {
+      fprintf(stderr,
+              "linetrace: kp must be in [-100.00, 100.00]\n");
+      return 1;
+    }
+  int  ki_x100    = g_params.ki_x100;
+  int  kd_x100    = g_params.kd_x100;
   int  target     = g_params.target;
   int  max_turn   = g_params.max_turn;
   int  hz         = g_params.hz;
@@ -543,6 +654,26 @@ static int do_run(int argc, char **argv)
       else if (strcmp(argv[i], "--hz") == 0 && i + 1 < argc)
         {
           hz = atoi(argv[i + 1]);
+          i += 2;
+        }
+      else if (strcmp(argv[i], "--ki") == 0 && i + 1 < argc)
+        {
+          if (parse_gain(argv[i + 1], &ki_x100) < 0)
+            {
+              fprintf(stderr,
+                      "linetrace: --ki must be in [-100.00, 100.00]\n");
+              return 1;
+            }
+          i += 2;
+        }
+      else if (strcmp(argv[i], "--kd") == 0 && i + 1 < argc)
+        {
+          if (parse_gain(argv[i + 1], &kd_x100) < 0)
+            {
+              fprintf(stderr,
+                      "linetrace: --kd must be in [-100.00, 100.00]\n");
+              return 1;
+            }
           i += 2;
         }
       else
@@ -572,12 +703,17 @@ static int do_run(int argc, char **argv)
 
   g_params.speed_mmps = speed_mmps;
   g_params.kp_x100    = kp_x100;
+  g_params.ki_x100    = ki_x100;
+  g_params.kd_x100    = kd_x100;
   g_params.target     = target;
   g_params.max_turn   = max_turn;
   g_params.hz         = hz;
+  g_pid_reset_request = true;
 
-  printf("linetrace: speed=%d mm/s kp=%.2f target=%d max_turn=%d hz=%d\n",
-         speed_mmps, kp_x100 / 100.0, target, max_turn, hz);
+  printf("linetrace: speed=%d mm/s kp=%.2f ki=%.2f kd=%.2f "
+         "target=%d max_turn=%d hz=%d\n",
+         speed_mmps, kp_x100 / 100.0, ki_x100 / 100.0, kd_x100 / 100.0,
+         target, max_turn, hz);
   return 0;
 }
 
@@ -628,12 +764,17 @@ static int do_status(void)
   printf("pid:           %d\n", g_daemon_pid);
   printf("speed:         %d mm/s\n", g_params.speed_mmps);
   printf("kp:            %.2f\n", g_params.kp_x100 / 100.0);
+  printf("ki:            %.2f\n", g_params.ki_x100 / 100.0);
+  printf("kd:            %.2f\n", g_params.kd_x100 / 100.0);
   printf("target:        %d\n", g_params.target);
   printf("max_turn:      %d dps\n", g_params.max_turn);
   printf("hz:            %d\n", g_params.hz);
   printf("iter:          %llu\n", (unsigned long long)g_stats.iter);
   printf("last_refl:     %d\n", g_stats.last_refl);
   printf("last_err:      %d\n", g_stats.last_err);
+  printf("last_p_term:   %d\n", g_stats.last_p_term);
+  printf("last_i_term:   %d\n", g_stats.last_i_term);
+  printf("last_d_term:   %d\n", g_stats.last_d_term);
   printf("last_turn_dps: %d\n", g_stats.last_turn_dps);
   printf("last_ioctl_rc: %d (errno=%d)\n",
          g_stats.last_ioctl_rc, g_stats.last_ioctl_errno);
@@ -652,7 +793,7 @@ static void usage(void)
     "usage: linetrace start\n"
     "       linetrace cal\n"
     "       linetrace run <speed_mmps> <kp> [target] "
-    "[--max-turn dps] [--hz N]\n"
+    "[--ki K] [--kd K] [--max-turn dps] [--hz N]\n"
     "       linetrace brake\n"
     "       linetrace stop\n"
     "       linetrace status\n"
@@ -663,7 +804,10 @@ static void usage(void)
     "  run:    update daemon params live\n"
     "          run 100 0 61          straight at 100 mm/s\n"
     "          run 100 3 61          P-control follow with kp=3\n"
+    "          run 100 3 61 --ki 0.5 --kd 0.1\n"
+    "                                PID follow (kp=3 ki=0.5 kd=0.1)\n"
     "          run 0 0               command stop (daemon stays alive)\n"
+    "          gain ranges: kp/ki/kd in [-100.00, 100.00] (0.01 step)\n"
     "          defaults inherit from previous values; first run after\n"
     "          start uses target=%d, --max-turn=%d, --hz=%d\n"
     "  brake:  FOREVER(0,0) + STOP{BRAKE}; reset speed=0 kp=0\n"
