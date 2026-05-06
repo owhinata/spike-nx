@@ -205,8 +205,9 @@ def test_linetrace_status_drops_pid_term_fields(p):
     """L-5: `linetrace status` no longer prints the legacy snapshot fields.
 
     Issue #118 swap: last_p_term / last_i_term / last_d_term /
-    last_turn_dps drop out (they're aggregate-only via pidstat) and
-    last_i_acc takes their place.
+    last_turn_dps drop out (they're aggregate-only via pidstat).
+    Issue #119 also drops last_i_acc since pidstat exposes the i_acc
+    column directly.
     """
 
     _ensure_stopped(p)
@@ -216,13 +217,111 @@ def test_linetrace_status_drops_pid_term_fields(p):
     try:
         out = p.sendCommand("linetrace status", timeout=5)
         st = _parse_status(out)
-        for legacy in ("last_p_term", "last_i_term",
-                       "last_d_term", "last_turn_dps"):
+        for legacy in ("last_p_term", "last_i_term", "last_d_term",
+                       "last_turn_dps", "last_i_acc"):
             assert legacy not in st, (
                 f"legacy snapshot field {legacy} should be removed"
             )
-        assert "last_i_acc" in st, f"last_i_acc missing: {out!r}"
         assert "last_err" in st
         assert "last_refl" in st
+        assert "target" in st
+        assert "max_turn" in st
+    finally:
+        _ensure_stopped(p)
+
+
+# ---------------------------------------------------------------------------
+# Issue #119: linetrace target / max_turn
+# ---------------------------------------------------------------------------
+
+
+def test_linetrace_set_without_daemon(p):
+    """L-6: target/max_turn refuse cleanly when no daemon is running."""
+
+    _ensure_stopped(p)
+    out = p.sendCommand("linetrace target 30", timeout=5)
+    assert "not running" in out, f"unexpected: {out!r}"
+    out = p.sendCommand("linetrace max_turn 90", timeout=5)
+    assert "not running" in out, f"unexpected: {out!r}"
+
+
+def test_linetrace_set_missing_or_extra_args(p):
+    """L-7: bare or extra-arg invocation prints usage and rejects."""
+
+    _ensure_stopped(p)
+    p.sendCommand("linetrace start", timeout=8)
+    time.sleep(0.3)
+
+    try:
+        for cmd in ("linetrace target",
+                    "linetrace max_turn",
+                    "linetrace target 30 40",
+                    "linetrace max_turn 90 120"):
+            out = p.sendCommand(cmd, timeout=5)
+            assert "usage" in out.lower(), (
+                f"expected usage hint for {cmd!r}: {out!r}"
+            )
+    finally:
+        _ensure_stopped(p)
+
+
+def test_linetrace_set_rejects_out_of_range(p):
+    """L-8: target/max_turn outside the validated ranges are rejected."""
+
+    _ensure_stopped(p)
+    p.sendCommand("linetrace start", timeout=8)
+    time.sleep(0.3)
+
+    try:
+        out = p.sendCommand("linetrace target 150", timeout=5)
+        assert "target" in out, f"expected target rejection: {out!r}"
+
+        out = p.sendCommand("linetrace target -1", timeout=5)
+        assert "target" in out, f"expected target rejection: {out!r}"
+
+        out = p.sendCommand("linetrace max_turn 0", timeout=5)
+        assert "max_turn" in out, f"expected max_turn rejection: {out!r}"
+
+        out = p.sendCommand("linetrace max_turn 5000", timeout=5)
+        assert "max_turn" in out, f"expected max_turn rejection: {out!r}"
+
+        out = p.sendCommand("linetrace target abc", timeout=5)
+        assert "integer" in out, f"expected non-integer rejection: {out!r}"
+    finally:
+        _ensure_stopped(p)
+
+
+@pytest.mark.interactive
+def test_linetrace_set_updates_target_and_max_turn(p):
+    """L-9: target/max_turn writes are observable via status.
+
+    Issue #119 motivation: setting target before `run` makes the idle
+    err computation match the operational threshold, so positioning
+    feedback via `status` is meaningful.
+    """
+
+    _ensure_stopped(p)
+    p.sendCommand("linetrace start", timeout=8)
+    time.sleep(0.3)
+
+    try:
+        # Defaults from do_start: target=50, max_turn=180
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("target") == "50"
+        assert st.get("max_turn") == "180"
+
+        out = p.sendCommand("linetrace target 38", timeout=5)
+        assert "target=38" in out, f"unexpected target output: {out!r}"
+
+        out = p.sendCommand("linetrace max_turn 120", timeout=5)
+        assert "max_turn=120" in out, (
+            f"unexpected max_turn output: {out!r}"
+        )
+
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("target") == "38"
+        assert st.get("max_turn") == "120"
     finally:
         _ensure_stopped(p)

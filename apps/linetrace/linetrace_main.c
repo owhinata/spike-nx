@@ -909,6 +909,89 @@ static int do_run(int argc, char **argv)
 }
 
 /****************************************************************************
+ * Subcommand: target / max_turn (Issue #119)
+ *
+ * Mutate a single PID parameter without engaging the drivebase.  Lets
+ * the user set the operational reflectance threshold before `run`, so
+ * `linetrace status` shows last_err against the real target while
+ * positioning the robot.  `max_turn` accepts live tuning during a run
+ * (the anti-windup clamp re-derives from the new value next tick).
+ ****************************************************************************/
+
+static int parse_int_arg(const char *tag, char **argv, int argc,
+                         int *out)
+{
+  if (argc != 1)
+    {
+      fprintf(stderr, "usage: linetrace %s <value>\n", tag);
+      return -1;
+    }
+
+  char *end = NULL;
+  long  v   = strtol(argv[0], &end, 10);
+  if (end == argv[0] || *end != '\0' || v < INT_MIN || v > INT_MAX)
+    {
+      fprintf(stderr, "linetrace: %s value must be an integer\n", tag);
+      return -1;
+    }
+
+  *out = (int)v;
+  return 0;
+}
+
+static int do_set_target(int argc, char **argv)
+{
+  if (!g_daemon_running)
+    {
+      fprintf(stderr,
+              "linetrace: not running — 'linetrace start' first\n");
+      return 1;
+    }
+
+  int target_new;
+  if (parse_int_arg("target", argv, argc, &target_new) < 0)
+    {
+      return 1;
+    }
+
+  if (target_new < 0 || target_new > 100)
+    {
+      fprintf(stderr, "linetrace: target must be in [0, 100]\n");
+      return 1;
+    }
+
+  g_params.target = target_new;
+  printf("linetrace: target=%d\n", g_params.target);
+  return 0;
+}
+
+static int do_set_max_turn(int argc, char **argv)
+{
+  if (!g_daemon_running)
+    {
+      fprintf(stderr,
+              "linetrace: not running — 'linetrace start' first\n");
+      return 1;
+    }
+
+  int max_turn_new;
+  if (parse_int_arg("max_turn", argv, argc, &max_turn_new) < 0)
+    {
+      return 1;
+    }
+
+  if (max_turn_new < 1 || max_turn_new > 1000)
+    {
+      fprintf(stderr, "linetrace: max_turn must be in [1, 1000]\n");
+      return 1;
+    }
+
+  g_params.max_turn = max_turn_new;
+  printf("linetrace: max_turn=%d\n", g_params.max_turn);
+  return 0;
+}
+
+/****************************************************************************
  * Subcommand: brake
  ****************************************************************************/
 
@@ -1178,7 +1261,6 @@ static int do_status(void)
   uint64_t iter        = g_stats.iter;
   int      last_refl   = g_stats.last_refl;
   int      last_err    = g_stats.last_err;
-  int      last_i_acc  = g_stats.last_i_acc;
   int      ioctl_rc    = g_stats.last_ioctl_rc;
   int      ioctl_errno = g_stats.last_ioctl_errno;
   pthread_mutex_unlock(&g_stats_lock);
@@ -1195,7 +1277,6 @@ static int do_status(void)
   printf("iter:          %llu\n", (unsigned long long)iter);
   printf("last_refl:     %d\n", last_refl);
   printf("last_err:      %d\n", last_err);
-  printf("last_i_acc:    %d\n", last_i_acc);
   printf("last_ioctl_rc: %d (errno=%d)\n", ioctl_rc, ioctl_errno);
   printf("cal:           %s\n",
          g_cal_request ? "in_flight" : (g_cal_done ? "done" : "idle"));
@@ -1213,6 +1294,8 @@ static void usage(void)
     "       linetrace cal\n"
     "       linetrace run <speed_mmps> <kp> [target] "
     "[--ki K] [--kd K] [--max-turn dps] [--hz N]\n"
+    "       linetrace target <N>\n"
+    "       linetrace max_turn <DPS>\n"
     "       linetrace brake\n"
     "       linetrace stop\n"
     "       linetrace pidstat [duration_ms [interval_ms]]\n"
@@ -1230,6 +1313,11 @@ static void usage(void)
     "           gain ranges: kp/ki/kd in [-100.00, 100.00] (0.01 step)\n"
     "           defaults inherit from previous values; first run after\n"
     "           start uses target=%d, --max-turn=%d, --hz=%d\n"
+    "  target:   set target reflectance without engaging the drivebase\n"
+    "            (e.g. 'target 38' so 'status' shows last_err against\n"
+    "            the operational target while positioning).  [0, 100]\n"
+    "  max_turn: set turn-rate clamp [1, 1000] dps; usable live to\n"
+    "            re-derive the anti-windup limit on the next tick\n"
     "  brake:   FOREVER(0,0) + STOP{BRAKE}; reset speed=0 kp=0\n"
     "           daemon stays alive — 'linetrace run ...' to re-engage\n"
     "  stop:    coast wheels, daemon exits\n"
@@ -1282,6 +1370,16 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "pidstat") == 0)
     {
       return do_pidstat(argc - 2, argv + 2);
+    }
+
+  if (strcmp(argv[1], "target") == 0)
+    {
+      return do_set_target(argc - 2, argv + 2);
+    }
+
+  if (strcmp(argv[1], "max_turn") == 0)
+    {
+      return do_set_max_turn(argc - 2, argv + 2);
     }
 
   if (strcmp(argv[1], "brake") == 0)

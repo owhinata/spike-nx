@@ -48,7 +48,18 @@ linetrace: cal 250 samples: black=4 white=72 midpoint=38
    - `ioctl(DRIVEBASE_DRIVE_FOREVER, {speed_mmps, turn_dps})`
 5. SIGINT 受信時: `ioctl(DRIVEBASE_STOP, {COAST})` → fd close → exit。
 
-### 2.3 `linetrace pidstat` (Issue #118)
+### 2.3 `linetrace target <N>` / `linetrace max_turn <DPS>` (Issue #119)
+
+`run` を打たずに `target` / `max_turn` を更新するための単機能サブコマンド。`linetrace start` 直後の idle 状態でも、運用 target を反映した `last_err` を `linetrace status` で確認できるようにするため。走行中に `max_turn` を変えると anti-windup clamp 値が次 tick から再導出されるので live tuning にも使える。
+
+```
+linetrace target 38            # cal で求めた midpoint を反映
+linetrace max_turn 120         # 出力上限を狭めてアグレッシブ抑制
+```
+
+範囲: `target ∈ [0, 100]`, `max_turn ∈ [1, 1000]`。引数なし / 余剰引数 / 非整数は usage エラー (現在値は `linetrace status` で参照)。
+
+### 2.4 `linetrace pidstat` (Issue #118)
 
 PID ゲイン (Kp/Ki/Kd) を実機調整するための観測コマンド。drivebase の `get-state` (Issue #115) と同じスタイルで、ヘッダ行 + interval ごと 1 行ずつのストリーミング形式で PID 内部状態を出す。
 

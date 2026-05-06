@@ -48,7 +48,18 @@ linetrace: cal 250 samples: black=4 white=72 midpoint=38
    - `ioctl(DRIVEBASE_DRIVE_FOREVER, {speed_mmps, turn_dps})`
 5. On SIGINT: `ioctl(DRIVEBASE_STOP, {COAST})`, close fds, exit.
 
-### 2.3 `linetrace pidstat` (Issue #118)
+### 2.3 `linetrace target <N>` / `linetrace max_turn <DPS>` (Issue #119)
+
+Single-purpose subcommands that mutate `target` / `max_turn` without engaging the drivebase.  Lets the user set the operational reflectance threshold while still idle, so `linetrace status` shows last_err against the real target during robot positioning.  `max_turn` is also usable as live-tuning during a `run`: changing it makes the next tick re-derive the anti-windup clamp from the new value.
+
+```
+linetrace target 38            # apply the cal midpoint
+linetrace max_turn 120         # tighter output cap for aggressive damping
+```
+
+Ranges: `target ∈ [0, 100]`, `max_turn ∈ [1, 1000]`.  Missing / extra / non-integer arguments are usage errors; query the current values with `linetrace status`.
+
+### 2.4 `linetrace pidstat` (Issue #118)
 
 Observation command for tuning PID gains (Kp/Ki/Kd) on real hardware.  Mirrors drivebase `get-state` (Issue #115): a header line followed by one row per interval streaming the PID internals.
 
