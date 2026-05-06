@@ -105,6 +105,17 @@ static int           g_daemon_pid     = -1;
 static volatile bool g_cal_request   = false;
 static volatile bool g_cal_done      = false;
 static volatile bool g_brake_request = false;
+
+/* Drivebase ownership intent (Issue #117).  Set true on a successful
+ * `linetrace run` (any speed/gain combination, including `run 0 0`),
+ * cleared on `linetrace brake` and at daemon start.  Sticky — `run
+ * 0 0` keeps the drivebase actively held at FOREVER(0, 0) until the
+ * user explicitly brakes.  CLI thread writes (do_start / do_run);
+ * daemon thread writes from the brake handler.  Single-byte volatile
+ * reads/writes are atomic on Cortex-M4 — no lock needed.
+ */
+
+static volatile bool g_engaged       = false;
 static struct
 {
   int min_v;
@@ -308,7 +319,8 @@ static int linetrace_daemon(int argc, char *argv[])
       return 1;
     }
 
-  int last_refl = -1;
+  int  last_refl   = -1;
+  bool was_engaged = false;   /* drivebase ownership intent (Issue #117) */
 
   struct timespec next;
   clock_gettime(CLOCK_MONOTONIC, &next);
@@ -317,6 +329,18 @@ static int linetrace_daemon(int argc, char *argv[])
     {
       if (g_cal_request)
         {
+          /* Cal takes ~3 sec.  If we were still engaged when the
+           * user fired `linetrace cal` (e.g. immediately after
+           * `run 0 0` before the disengage tick had a chance to
+           * fire), release the drivebase first so it does not sit
+           * on the previous FOREVER command for the cal sweep.
+           */
+
+          if (was_engaged)
+            {
+              drivebase_send_stop(db_fd, DRIVEBASE_ON_COMPLETION_COAST);
+              was_engaged = false;
+            }
           run_calibration(color_fd);
           clock_gettime(CLOCK_MONOTONIC, &next);
           continue;
@@ -332,9 +356,60 @@ static int linetrace_daemon(int argc, char *argv[])
           g_params.kd_x100    = 0;
           g_pid_reset_request = true;
           g_brake_request     = false;
+          /* Honor the explicit BRAKE; clear ownership + edge tracker
+           * so the next tick's idle-edge path does not overwrite
+           * the BRAKE with COAST.
+           */
+          g_engaged           = false;
+          was_engaged         = false;
           clock_gettime(CLOCK_MONOTONIC, &next);
           continue;
         }
+
+      /* Engagement gate (Issue #117): when not engaged (initial state
+       * after `start`, or after `brake`), stop hammering the drivebase
+       * chardev with FOREVER(0,0) every tick.  Send STOP{COAST} once
+       * on the disengage edge so the user can issue unrelated
+       * drivebase commands without contention.  `run 0 0` is an
+       * explicit "active hold at zero" and stays engaged — the user
+       * must `brake` to release.
+       */
+
+      if (!g_engaged)
+        {
+          if (was_engaged)
+            {
+              drivebase_send_stop(db_fd, DRIVEBASE_ON_COMPLETION_COAST);
+              was_engaged = false;
+            }
+
+          /* Idle ticks still refresh sensor reading + err so the user
+           * can use `linetrace status` to inspect reflectance and
+           * error against the current target (e.g. positioning the
+           * robot over the line before `run`).  PID outputs are
+           * forced to 0 so status clearly indicates "no drive output"
+           * instead of showing stale values from the last engaged
+           * tick.
+           */
+
+          int v = color_read_latest(color_fd);
+          if (v >= 0)
+            {
+              last_refl = v;
+            }
+          int err = (last_refl >= 0) ? (g_params.target - last_refl) : 0;
+
+          g_stats.iter++;
+          g_stats.last_refl     = last_refl;
+          g_stats.last_err      = err;
+          g_stats.last_p_term   = 0;
+          g_stats.last_i_term   = 0;
+          g_stats.last_d_term   = 0;
+          g_stats.last_turn_dps = 0;
+          goto sleep_to_next_tick;
+        }
+
+      was_engaged = true;
 
       /* PID reset on demand (do_run / brake wrote new params).  Done
        * before integrating this tick so the new gain set sees a
@@ -411,14 +486,23 @@ static int linetrace_daemon(int argc, char *argv[])
       g_stats.last_ioctl_rc    = rc;
       g_stats.last_ioctl_errno = (rc < 0) ? errno : 0;
 
-      long period_ns = 1000000000L / g_params.hz;
-      next.tv_nsec += period_ns;
-      while (next.tv_nsec >= 1000000000L)
-        {
-          next.tv_nsec -= 1000000000L;
-          next.tv_sec  += 1;
-        }
-      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+    sleep_to_next_tick:
+      {
+        /* Block-scoped: a label may not directly precede a
+         * declaration in C, so wrap period_ns in a compound stmt.
+         * Idle ticks reach here via `goto` to keep the
+         * clock_nanosleep absolute-deadline ladder intact.
+         */
+
+        long period_ns = 1000000000L / g_params.hz;
+        next.tv_nsec += period_ns;
+        while (next.tv_nsec >= 1000000000L)
+          {
+            next.tv_nsec -= 1000000000L;
+            next.tv_sec  += 1;
+          }
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+      }
     }
 
   drivebase_send_stop(db_fd, DRIVEBASE_ON_COMPLETION_COAST);
@@ -469,6 +553,7 @@ static int do_start(void)
   g_pid_prev_err      = 0;
   g_pid_has_prev      = false;
   g_pid_reset_request = false;
+  g_engaged           = false;
 
   g_cal_request = false;
   g_cal_done    = false;
@@ -709,6 +794,7 @@ static int do_run(int argc, char **argv)
   g_params.max_turn   = max_turn;
   g_params.hz         = hz;
   g_pid_reset_request = true;
+  g_engaged           = true;
 
   printf("linetrace: speed=%d mm/s kp=%.2f ki=%.2f kd=%.2f "
          "target=%d max_turn=%d hz=%d\n",
@@ -763,6 +849,7 @@ static int do_status(void)
 
   printf("pid:           %d\n", g_daemon_pid);
   printf("speed:         %d mm/s\n", g_params.speed_mmps);
+  printf("engaged:       %s\n", g_engaged ? "yes" : "no");
   printf("kp:            %.2f\n", g_params.kp_x100 / 100.0);
   printf("ki:            %.2f\n", g_params.ki_x100 / 100.0);
   printf("kd:            %.2f\n", g_params.kd_x100 / 100.0);
