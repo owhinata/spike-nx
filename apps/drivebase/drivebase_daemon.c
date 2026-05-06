@@ -205,6 +205,11 @@ static int daemon_task_main(int argc, char *argv[])
       (argc >= 2) ? (uint32_t)strtoul(argv[1], NULL, 10) : 56000;
   uint32_t axle_t_um  =
       (argc >= 3) ? (uint32_t)strtoul(argv[2], NULL, 10) : 112000;
+  uint32_t tick_us    =
+      (argc >= 4) ? (uint32_t)strtoul(argv[3], NULL, 10)
+                  : DB_RT_TICK_US_DEFAULT;
+  uint32_t tick_ms    = tick_us / 1000;
+  if (tick_ms == 0) tick_ms = 1;
 
   d->wheel_d_um = wheel_d_um;
   d->axle_t_um  = axle_t_um;
@@ -227,7 +232,7 @@ static int daemon_task_main(int argc, char *argv[])
   uint64_t t0 = (uint64_t)ts.tv_sec * 1000000ULL +
                 (uint64_t)ts.tv_nsec / 1000ULL;
 
-  rc = db_drivebase_init(&d->db, d->wheel_d_um, d->axle_t_um);
+  rc = db_drivebase_init(&d->db, d->wheel_d_um, d->axle_t_um, tick_ms);
   if (rc < 0) goto fail_motor;
   rc = db_drivebase_reset(&d->db, t0);
   if (rc < 0) goto fail_motor;
@@ -241,6 +246,7 @@ static int daemon_task_main(int argc, char *argv[])
   d->handler.configured = true;
   d->handler.wheel_d_um = d->wheel_d_um;
   d->handler.axle_t_um  = d->axle_t_um;
+  d->handler.tick_ms    = tick_ms;
 
   /* IMU is best-effort — the daemon runs encoder-only if open fails. */
 
@@ -249,7 +255,7 @@ static int daemon_task_main(int argc, char *argv[])
       d->imu_open = true;
     }
 
-  db_rt_init(&d->rt);
+  db_rt_init(&d->rt, tick_us);
   rc = db_rt_start(&d->rt, CONFIG_APP_DRIVEBASE_RT_PRIORITY,
                    rt_tick_cb, d);
   if (rc < 0) goto fail_chardev;
@@ -331,7 +337,8 @@ fail:
  * Public Functions
  ****************************************************************************/
 
-int drivebase_daemon_start(uint32_t wheel_d_um, uint32_t axle_t_um)
+int drivebase_daemon_start(uint32_t wheel_d_um, uint32_t axle_t_um,
+                           uint32_t tick_us)
 {
   int rc = daemon_global_alloc();
   if (rc < 0)
@@ -350,12 +357,17 @@ int drivebase_daemon_start(uint32_t wheel_d_um, uint32_t axle_t_um)
 
   while (sem_trywait(&g_daemon->teardown_done) == 0) { }
 
-  /* Pass wheel/axle to the daemon task via argv strings. */
+  /* Pass wheel/axle/tick_us to the daemon task via argv strings. */
 
-  static char wheel_str[12], axle_str[12];
-  snprintf(wheel_str, sizeof(wheel_str), "%lu", (unsigned long)wheel_d_um);
-  snprintf(axle_str,  sizeof(axle_str),  "%lu", (unsigned long)axle_t_um);
-  static char *argv[] = { wheel_str, axle_str, NULL };
+  if (tick_us == 0) tick_us = DB_RT_TICK_US_DEFAULT;
+  static char wheel_str[12], axle_str[12], tick_str[12];
+  snprintf(wheel_str, sizeof(wheel_str), "%lu",
+           (unsigned long)wheel_d_um);
+  snprintf(axle_str,  sizeof(axle_str),  "%lu",
+           (unsigned long)axle_t_um);
+  snprintf(tick_str,  sizeof(tick_str),  "%lu",
+           (unsigned long)tick_us);
+  static char *argv[] = { wheel_str, axle_str, tick_str, NULL };
 
   int pid = task_create(DAEMON_TASK_NAME, DAEMON_TASK_PRIORITY,
                         DAEMON_TASK_STACK, daemon_task_main, argv);

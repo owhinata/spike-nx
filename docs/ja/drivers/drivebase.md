@@ -198,7 +198,7 @@ PROGNAME = `drivebase` (NSH builtin)。stack size は 4096 (§7 参照)。
 |---|---|
 | `drivebase` (引数なし) | usage を表示 |
 | `drivebase status` | DRIVEBASE_GET_STATUS スナップショットを表示 (daemon 未起動でも動作) |
-| `drivebase start [wheel_mm] [axle_mm]` | daemon 起動。`wheel_mm` / `axle_mm` は小数指定可 (例 `17.6 56.5`)。default wheel=56, axle=112 (SPIKE driving base) |
+| `drivebase start [wheel_mm [axle_mm [tick_ms]]]` | daemon 起動。`wheel_mm` / `axle_mm` は小数指定可 (例 `17.6 56.5`)。`tick_ms` は RT 制御周期 (Issue #120, 範囲 1–20 ms)。default 56 / 112 / 2。**ボード起動時に rcS から default 引数で自動実行される (Issue #120)** |
 | `drivebase stop` | daemon 停止 (グレースフル teardown、~2 秒以内) |
 | `drivebase config <wheel_mm> <axle_mm>` | DRIVEBASE_CONFIG。小数 OK (内部 ABI が μm 単位なので sub-mm 精度を保持)。現状は daemon の起動時 default を使うので通常不要 |
 | `drivebase reset [distance_mm] [angle_deg]` | DRIVEBASE_RESET — daemon の publish する distance/heading を指定値 (default 0/0) に再 anchor。`drivebase start` 時にも自動的に 0/0 に reset されるので、本 verb は主にセッション途中で再ゼロ化したいとき用 |

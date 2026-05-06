@@ -42,6 +42,8 @@ struct db_chardev_handler_s
   bool                      configured;
   uint32_t                  wheel_d_um;
   uint32_t                  axle_t_um;
+  uint32_t                  tick_ms;           /* RT loop period        */
+                                               /* (Issue #120)          */
 
   struct db_drivebase_s    *db;                /* injected by attach()  */
 };

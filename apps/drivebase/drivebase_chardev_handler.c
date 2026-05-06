@@ -45,7 +45,8 @@ static int dispatch_envelope(struct db_chardev_handler_s *h,
             }
           h->wheel_d_um = c->wheel_d_um;
           h->axle_t_um  = c->axle_t_um;
-          int rc = db_drivebase_init(h->db, h->wheel_d_um, h->axle_t_um);
+          int rc = db_drivebase_init(h->db, h->wheel_d_um, h->axle_t_um,
+                                     h->tick_ms);
           if (rc < 0) return rc;
           rc = db_drivebase_reset(h->db, now_us);
           if (rc == 0) h->configured = true;

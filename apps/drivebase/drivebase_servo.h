@@ -38,6 +38,14 @@ struct db_servo_s
 {
   enum db_side_e            side;
 
+  /* Nominal control-loop period in ms (= drivebase RT tick).  Used as
+   * the PID dt fallback when measured Δt is unavailable; ki / D term
+   * scaling are dt-proportional so the value must track the running
+   * tick.  Configured through db_drivebase_init via db_servo_init.
+   */
+
+  uint32_t                  tick_ms;
+
   struct db_observer_s      observer;
   struct db_pid_state_s     pid;
   struct db_trajectory_s    trajectory;
@@ -83,7 +91,8 @@ struct db_servo_status_s
  * Public Function Prototypes
  ****************************************************************************/
 
-void db_servo_init(struct db_servo_s *s, enum db_side_e side);
+void db_servo_init(struct db_servo_s *s, enum db_side_e side,
+                   uint32_t tick_ms);
 
 /* Reset internal state (observer + PID + trajectory) to "stopped at
  * the current encoder reading".  Call once after drivebase_motor_init

@@ -430,7 +430,8 @@ static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
    *    Hard-code wheel_d_um / axle_t_um from the verb args.)
    */
 
-  rc = db_drivebase_init(&ctx.db, wheel_d_um, axle_t_um);
+  rc = db_drivebase_init(&ctx.db, wheel_d_um, axle_t_um,
+                         DB_RT_TICK_MS_DEFAULT);
   if (rc < 0)
     {
       fprintf(stderr, "db_drivebase_init: %s\n", strerror(-rc));
@@ -466,10 +467,11 @@ static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
   ctx.handler.configured = true;
   ctx.handler.wheel_d_um = wheel_d_um;
   ctx.handler.axle_t_um  = axle_t_um;
+  ctx.handler.tick_ms    = DB_RT_TICK_MS_DEFAULT;
 
   /* 3. Spawn the RT tick task. */
 
-  db_rt_init(&ctx.rt);
+  db_rt_init(&ctx.rt, DB_RT_TICK_US_DEFAULT);
   rc = db_rt_start(&ctx.rt, CONFIG_APP_DRIVEBASE_RT_PRIORITY,
                    daemon_tick_cb, &ctx);
   if (rc < 0)
@@ -662,7 +664,7 @@ static int do_rt_subcmd(int argc, FAR char *argv[])
   uint32_t duration_ms = (argc >= 1) ? (uint32_t)atoi(argv[0]) : 2000;
 
   struct db_rt_s rt;
-  db_rt_init(&rt);
+  db_rt_init(&rt, DB_RT_TICK_US_DEFAULT);
   int rc = db_rt_start(&rt, CONFIG_APP_DRIVEBASE_RT_PRIORITY,
                        rt_noop_cb, NULL);
   if (rc < 0)
@@ -755,7 +757,8 @@ static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
   drivebase_motor_select_mode(DB_SIDE_RIGHT, 2);
   usleep(30000);
 
-  rc = db_drivebase_init(&db, wheel_d_um, axle_t_um);
+  rc = db_drivebase_init(&db, wheel_d_um, axle_t_um,
+                         DB_RT_TICK_MS_DEFAULT);
   if (rc < 0)
     {
       fprintf(stderr, "db_drivebase_init: %s\n", strerror(-rc));
@@ -949,7 +952,7 @@ static int do_servo_run(enum db_side_e side, const char *target_kind,
       return 1;
     }
 #define servo (*servop)
-  db_servo_init(&servo, side);
+  db_servo_init(&servo, side, DB_RT_TICK_MS_DEFAULT);
   rc = db_servo_reset(&servo, now_us());
   if (rc < 0)
     {
@@ -1279,7 +1282,10 @@ static void usage(void)
           "usage:\n"
           "  drivebase                                   show this help\n"
           "  drivebase status                            DRIVEBASE_GET_STATUS snapshot\n"
-          "  drivebase start                             launch daemon\n"
+          "  drivebase start [wheel_mm [axle_mm [tick_ms]]]\n"
+          "                                              launch daemon\n"
+          "                                              (defaults: 56 / 112 / 2;\n"
+          "                                              tick_ms in [1, 20])\n"
           "  drivebase stop                              teardown daemon\n"
           "  drivebase config <wheel_mm> <axle_mm>       DRIVEBASE_CONFIG (decimals OK)\n"
           "  drivebase reset [distance_mm] [angle_deg]   DRIVEBASE_RESET (default 0 0)\n"
@@ -1364,16 +1370,31 @@ int main(int argc, FAR char *argv[])
     {
       double   wheel_mm = (argc >= 3) ? strtod(argv[2], NULL) : 56.0;
       double   axle_mm  = (argc >= 4) ? strtod(argv[3], NULL) : 112.0;
+      int      tick_ms  = (argc >= 5) ? atoi(argv[4])
+                                      : DB_RT_TICK_MS_DEFAULT;
       uint32_t wheel_d_um = (uint32_t)(wheel_mm * 1000.0 + 0.5);
       uint32_t axle_t_um  = (uint32_t)(axle_mm  * 1000.0 + 0.5);
-      int rc = drivebase_daemon_start(wheel_d_um, axle_t_um);
+
+      if (tick_ms < (int)(DB_RT_TICK_US_MIN / 1000) ||
+          tick_ms > (int)(DB_RT_TICK_US_MAX / 1000))
+        {
+          fprintf(stderr,
+                  "drivebase start: tick_ms must be in [%d, %d]\n",
+                  DB_RT_TICK_US_MIN / 1000,
+                  DB_RT_TICK_US_MAX / 1000);
+          return 1;
+        }
+
+      uint32_t tick_us = (uint32_t)tick_ms * 1000u;
+      int rc = drivebase_daemon_start(wheel_d_um, axle_t_um, tick_us);
       if (rc < 0)
         {
           fprintf(stderr, "drivebase start: %s\n", strerror(-rc));
           return 1;
         }
-      printf("drivebase: started (pid=%d wheel=%g mm axle=%g mm)\n",
-             rc, wheel_mm, axle_mm);
+      printf("drivebase: started (pid=%d wheel=%g mm axle=%g mm "
+             "tick=%d ms)\n",
+             rc, wheel_mm, axle_mm, tick_ms);
       return 0;
     }
 

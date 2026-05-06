@@ -32,9 +32,11 @@ extern "C"
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define DB_RT_TICK_US      2000        /* 2 ms control loop period       */
-#define DB_RT_TICK_MS      (DB_RT_TICK_US / 1000)
-#define DB_RT_DEADLINE_US  1000        /* lag threshold above which we   */
+#define DB_RT_TICK_US_DEFAULT 2000     /* default control loop period μs */
+#define DB_RT_TICK_MS_DEFAULT (DB_RT_TICK_US_DEFAULT / 1000)
+#define DB_RT_TICK_US_MIN     1000     /* tick range bounds (Issue #120) */
+#define DB_RT_TICK_US_MAX     20000
+#define DB_RT_DEADLINE_US     1000     /* lag threshold above which we   */
                                        /* count a deadline miss          */
 
 /****************************************************************************
@@ -58,6 +60,13 @@ struct db_rt_s
   int                priority;
   int                last_cb_error;
 
+  /* Control loop period — settable via db_rt_init.  Bound to
+   * [DB_RT_TICK_US_MIN, DB_RT_TICK_US_MAX]; values outside the range
+   * are clamped at init.  Issue #120.
+   */
+
+  uint32_t           tick_us;
+
   db_rt_tick_cb_t    tick_cb;
   void              *tick_cb_arg;
 
@@ -76,7 +85,12 @@ struct db_rt_s
  * Public Function Prototypes
  ****************************************************************************/
 
-void db_rt_init(struct db_rt_s *rt);
+/* Initialize the RT state with a control-loop period of `tick_us` μs.
+ * Values outside [DB_RT_TICK_US_MIN, DB_RT_TICK_US_MAX] are clamped.
+ * Pass DB_RT_TICK_US_DEFAULT for the canonical 2 ms cadence.
+ */
+
+void db_rt_init(struct db_rt_s *rt, uint32_t tick_us);
 
 /* Spawn the RT thread.  `priority` is the pthread SCHED_FIFO value
  * (CONFIG_APP_DRIVEBASE_RT_PRIORITY recommended, default 220).

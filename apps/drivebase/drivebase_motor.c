@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -166,6 +167,56 @@ static int open_one(struct db_motor_side_s *m)
  * Public Functions
  ****************************************************************************/
 
+/* boot-time port-SYNC wait (Issue #120).  rcS-driven auto-start fires
+ * within the first second of boot but lump probes the LPF2 ports
+ * asynchronously and only finishes type_id assignment ~5 s later.
+ * open_one() returns -ENODEV until the LEGOSENSOR class topic binds
+ * to a Medium-Motor-typed port, so retry on ENODEV / -ENOENT for up
+ * to 10 s before giving up.  Manual `drivebase start` after motors
+ * are connected resolves on the first attempt.
+ */
+
+#define DB_MOTOR_PROBE_TIMEOUT_US   10000000ULL
+#define DB_MOTOR_PROBE_INTERVAL_MS  100
+
+static uint64_t now_us_monotonic(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000ULL +
+         (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+static int open_one_with_retry(struct db_motor_side_s *m,
+                               uint64_t deadline_us)
+{
+  int ret;
+  for (;;)
+    {
+      ret = open_one(m);
+      if (ret == 0)
+        {
+          return 0;
+        }
+
+      /* Only retry on transient "not bound yet" — propagate hard
+       * errors (e.g. EACCES) immediately so misconfig surfaces.
+       */
+
+      if (ret != -ENODEV && ret != -ENOENT && ret != -EBUSY)
+        {
+          return ret;
+        }
+
+      if (now_us_monotonic() >= deadline_us)
+        {
+          return ret;
+        }
+
+      usleep(DB_MOTOR_PROBE_INTERVAL_MS * 1000);
+    }
+}
+
 int drivebase_motor_init(void)
 {
   if (g_initialised)
@@ -173,13 +224,15 @@ int drivebase_motor_init(void)
       return -EALREADY;
     }
 
-  int ret = open_one(&g_motor[DB_SIDE_LEFT]);
+  uint64_t deadline = now_us_monotonic() + DB_MOTOR_PROBE_TIMEOUT_US;
+
+  int ret = open_one_with_retry(&g_motor[DB_SIDE_LEFT], deadline);
   if (ret < 0)
     {
       return ret;
     }
 
-  ret = open_one(&g_motor[DB_SIDE_RIGHT]);
+  ret = open_one_with_retry(&g_motor[DB_SIDE_RIGHT], deadline);
   if (ret < 0)
     {
       close_one(&g_motor[DB_SIDE_LEFT]);

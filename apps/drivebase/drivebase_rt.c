@@ -116,7 +116,7 @@ static void *db_rt_thread(void *arg)
 
   while (atomic_load(&rt->running))
     {
-      ts_add_ns(&next, DB_RT_TICK_US * NS_PER_US);
+      ts_add_ns(&next, (long)rt->tick_us * NS_PER_US);
 
       /* Sleep until the next deadline; EINTR is benign — clamp and  */
       /* continue.  Other failures abort the loop.                    */
@@ -161,11 +161,15 @@ static void *db_rt_thread(void *arg)
  * Public Functions
  ****************************************************************************/
 
-void db_rt_init(struct db_rt_s *rt)
+void db_rt_init(struct db_rt_s *rt, uint32_t tick_us)
 {
   memset(rt, 0, sizeof(*rt));
   atomic_store(&rt->running, false);
   pthread_mutex_init(&rt->stats_lock, NULL);
+
+  if (tick_us < DB_RT_TICK_US_MIN) tick_us = DB_RT_TICK_US_MIN;
+  if (tick_us > DB_RT_TICK_US_MAX) tick_us = DB_RT_TICK_US_MAX;
+  rt->tick_us = tick_us;
 }
 
 int db_rt_start(struct db_rt_s *rt, int priority,

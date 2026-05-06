@@ -29,9 +29,12 @@ static int64_t abs64(int64_t v) { return v < 0 ? -v : v; }
  * Public Functions
  ****************************************************************************/
 
-void db_servo_init(struct db_servo_s *s, enum db_side_e side)
+void db_servo_init(struct db_servo_s *s, enum db_side_e side,
+                   uint32_t tick_ms)
 {
   s->side                  = side;
+  s->tick_ms               = (tick_ms == 0) ? DB_RT_TICK_MS_DEFAULT
+                                            : tick_ms;
   s->trajectory_active     = false;
   s->prev_endpoint_valid   = false;
   s->prev_endpoint_mdeg    = 0;
@@ -278,12 +281,13 @@ int db_servo_update(struct db_servo_s *s, uint64_t now_us)
   /* PID is fed the *nominal* tick instead of the measured delta so
    * scheduling jitter does not modulate the integral / derivative
    * gains.  ki_pos / done_streak_ms / smart_hold_streak_ms are all
-   * dt_ms-proportional, so the constant must track DB_RT_TICK_US.
+   * dt_ms-proportional, so the constant must track the running RT
+   * tick (settable at daemon start, Issue #120).
    */
 
-  uint32_t dt_ms_pid = (now_us > s->t_last_us) ? DB_RT_TICK_MS :
+  uint32_t dt_ms_pid = (now_us > s->t_last_us) ? s->tick_ms :
                        (uint32_t)((now_us - s->t_last_us) / 1000);
-  if (dt_ms_pid == 0) dt_ms_pid = DB_RT_TICK_MS;
+  if (dt_ms_pid == 0) dt_ms_pid = s->tick_ms;
 
   struct db_pid_input_s in =
   {

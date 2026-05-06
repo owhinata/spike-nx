@@ -28,6 +28,7 @@
 
 #include "drivebase_drivebase.h"
 #include "drivebase_motor.h"
+#include "drivebase_rt.h"          /* DB_RT_TICK_MS_DEFAULT (Issue #120) */
 #include "drivebase_settings.h"
 #include "drivebase_angle.h"
 
@@ -145,20 +146,27 @@ static int dispatch_forever(struct db_drivebase_s *db, uint64_t now_us,
  ****************************************************************************/
 
 int db_drivebase_init(struct db_drivebase_s *db,
-                      uint32_t wheel_d_um, uint32_t axle_t_um)
+                      uint32_t wheel_d_um, uint32_t axle_t_um,
+                      uint32_t tick_ms)
 {
   if (wheel_d_um == 0 || axle_t_um == 0)
     {
       return -EINVAL;
     }
 
+  if (tick_ms == 0)
+    {
+      tick_ms = DB_RT_TICK_MS_DEFAULT;
+    }
+
   memset(db, 0, sizeof(*db));
   db->wheel_d_um = wheel_d_um;
   db->axle_t_um  = axle_t_um;
+  db->tick_ms    = tick_ms;
   db->active_command = DRIVEBASE_ACTIVE_NONE;
 
-  db_servo_init(&db->servo[DB_SIDE_LEFT],  DB_SIDE_LEFT);
-  db_servo_init(&db->servo[DB_SIDE_RIGHT], DB_SIDE_RIGHT);
+  db_servo_init(&db->servo[DB_SIDE_LEFT],  DB_SIDE_LEFT,  tick_ms);
+  db_servo_init(&db->servo[DB_SIDE_RIGHT], DB_SIDE_RIGHT, tick_ms);
   return 0;
 }
 

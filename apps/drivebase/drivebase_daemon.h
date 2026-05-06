@@ -38,12 +38,17 @@ enum db_daemon_state_e
  ****************************************************************************/
 
 /* Spawn the daemon task with a configured wheel diameter / axle
- * track.  Returns the new daemon's pid (> 0) on success or a
- * negated errno.  Idempotent — second call while running returns
- * -EALREADY.
+ * track and an RT-loop period.  Returns the new daemon's pid (> 0)
+ * on success or a negated errno.  Idempotent — second call while
+ * running returns -EALREADY.
+ *
+ * `tick_us = 0` selects DB_RT_TICK_US_DEFAULT (2 ms).  Values out of
+ * [DB_RT_TICK_US_MIN, DB_RT_TICK_US_MAX] are clamped inside the RT
+ * layer (Issue #120).
  */
 
-int  drivebase_daemon_start(uint32_t wheel_d_um, uint32_t axle_t_um);
+int  drivebase_daemon_start(uint32_t wheel_d_um, uint32_t axle_t_um,
+                            uint32_t tick_us);
 
 /* Request graceful teardown.  Sets running=false and waits up to
  * `timeout_ms` for the daemon task to exit.  Returns 0 on clean

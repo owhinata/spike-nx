@@ -162,6 +162,51 @@ def test_drivebase_start_status_stop_cycle(p):
     assert st["attach_generation"] >= 1
 
 
+def test_drivebase_start_with_tick_arg(p):
+    """D-3b: `drivebase start 56 112 5` boots with a 5 ms RT tick.
+
+    Issue #120 made the RT tick settable as the third positional arg.
+    Verifies the daemon comes up cleanly with a non-default tick and
+    publishes through GET_STATUS / GET_STATE the same way as the
+    default 2 ms cadence.
+    """
+
+    _ensure_stopped(p)
+    start = p.sendCommand("drivebase start 56 112 5", timeout=8)
+    assert "started" in start, f"start failed: {start!r}"
+    assert "tick=5 ms" in start, (
+        f"missing tick echo in start banner: {start!r}"
+    )
+    time.sleep(1.0)
+
+    out = p.sendCommand("drivebase status", timeout=5)
+    st = _parse_status(out)
+    assert st["daemon_attached"] == 1
+    assert st["last_publish_us"] > 0
+
+    p.sendCommand("drivebase stop", timeout=8)
+    time.sleep(0.3)
+
+
+def test_drivebase_start_rejects_bad_tick(p):
+    """D-3c: tick_ms outside [1, 20] is rejected before the daemon spawns."""
+
+    _ensure_stopped(p)
+
+    out = p.sendCommand("drivebase start 56 112 0", timeout=5)
+    assert "tick_ms must be in" in out, f"expected reject: {out!r}"
+
+    out = p.sendCommand("drivebase start 56 112 25", timeout=5)
+    assert "tick_ms must be in" in out, f"expected reject: {out!r}"
+
+    # Confirm rejected attempts did not actually start the daemon.
+    out = p.sendCommand("drivebase status", timeout=5)
+    st = _parse_status(out)
+    assert st["daemon_attached"] == 0, (
+        f"daemon should not have attached after reject: {out!r}"
+    )
+
+
 def test_drivebase_start_already_running(p):
     """D-4: second `drivebase start` while running returns EALREADY."""
 

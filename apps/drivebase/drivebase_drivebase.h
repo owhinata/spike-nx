@@ -60,6 +60,13 @@ struct db_drivebase_s
   uint32_t wheel_d_um;
   uint32_t axle_t_um;
 
+  /* RT control-loop period in ms (= db_rt_s.tick_us / 1000).  The
+   * servo PID inherits this for its dt_ms fallback so gains stay
+   * tick-proportional.  Issue #120.
+   */
+
+  uint32_t tick_ms;
+
   /* Per-side servos — owned outright by the drivebase */
 
   struct db_servo_s servo[DB_SIDE_NUM];
@@ -92,7 +99,8 @@ struct db_drivebase_s
 /* Lifecycle */
 
 int  db_drivebase_init(struct db_drivebase_s *db,
-                       uint32_t wheel_d_um, uint32_t axle_t_um);
+                       uint32_t wheel_d_um, uint32_t axle_t_um,
+                       uint32_t tick_ms);
 
 int  db_drivebase_reset(struct db_drivebase_s *db, uint64_t now_us);
 
