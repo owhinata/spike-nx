@@ -42,38 +42,45 @@
  * Private Helpers — geometry conversions
  ****************************************************************************/
 
-/* Wheel travel (mm) ↔ motor angle (mdeg).  l_mm = θ_mdeg / 1000 *
- * π * d / 360.  Same math as drivebase_angle.h but spelled out here
- * for readability.
+/* Wheel travel (mm) ↔ motor angle (mdeg).  Geometry argument in
+ * micrometers (see db_drivebase_s.wheel_d_um); the angle math is
+ * implemented in drivebase_angle.h with two-step int64 arithmetic so
+ * the same int64 head-room covers both mm- and um-resolution wheels.
  */
 
-static int64_t mm_to_motor_mdeg(int32_t mm, uint32_t d_mm)
+static int64_t mm_to_motor_mdeg(int32_t mm, uint32_t d_um)
 {
-  return db_angle_mm_to_mdeg(mm, d_mm);
+  return db_angle_mm_to_mdeg(mm, d_um);
 }
 
 /* heading (mdeg of robot rotation) ↔ wheel-differential travel (mm).
  *   l_diff_mm = H_rad * axle_t = (H_deg * π/180) * axle_t
- *   l_diff_mm = H_mdeg * π * axle_t / (1000 * 180)
+ *   l_diff_mm = H_mdeg * π * axle_t_um / (1000 * 180 * 1000)
+ *             = H_mdeg * 355 * axle_t_um / (113 * 180,000,000)
+ *
+ * Single-shot multiply would overflow (worst case
+ * h_mdeg=2.1e12 * 355 * a_um=5e5 ~= 3.7e20), so absorb pi first then
+ * multiply by axle_t_um — same two-step pattern as
+ * db_angle_mdeg_to_mm.
  */
 
-static int32_t heading_mdeg_to_diff_mm(int32_t h_mdeg, uint32_t a_mm)
+static int32_t heading_mdeg_to_diff_mm(int32_t h_mdeg, uint32_t a_um)
 {
-  int64_t num = (int64_t)h_mdeg * DB_PI_NUM * (int64_t)a_mm;
-  int64_t den = (int64_t)1000 * 180 * DB_PI_DEN;
-  if (num >= 0) return (int32_t)((num + den / 2) / den);
-  return (int32_t)((num - den / 2) / den);
+  int64_t pi_h = db_angle_div_round((int64_t)h_mdeg * DB_PI_NUM, DB_PI_DEN);
+  int64_t num  = pi_h * (int64_t)a_um;
+  return (int32_t)db_angle_div_round(num, 180000000LL);
 }
 
-/* Inverse: wheel-differential mm → robot heading mdeg. */
+/* Inverse: wheel-differential mm → robot heading mdeg.
+ *   h_mdeg = diff_mm * 180,000,000 / (pi * axle_t_um)
+ */
 
-static int32_t diff_mm_to_heading_mdeg(int32_t diff_mm, uint32_t a_mm)
+static int32_t diff_mm_to_heading_mdeg(int32_t diff_mm, uint32_t a_um)
 {
-  if (a_mm == 0) return 0;
-  int64_t num = (int64_t)diff_mm * 1000 * 180 * DB_PI_DEN;
-  int64_t den = (int64_t)DB_PI_NUM * (int64_t)a_mm;
-  if (num >= 0) return (int32_t)((num + den / 2) / den);
-  return (int32_t)((num - den / 2) / den);
+  if (a_um == 0) return 0;
+  int64_t pi_diff = db_angle_div_round((int64_t)diff_mm * 180000000LL,
+                                       (int64_t)a_um);
+  return (int32_t)db_angle_div_round(pi_diff * DB_PI_DEN, DB_PI_NUM);
 }
 
 /****************************************************************************
@@ -95,15 +102,15 @@ static int dispatch_position(struct db_drivebase_s *db, uint64_t now_us,
 
   int32_t dL_mm = dl_avg_mm - dl_diff_mm / 2;
   int32_t dR_mm = dl_avg_mm + dl_diff_mm / 2;
-  int64_t dL_mdeg = mm_to_motor_mdeg(dL_mm, db->wheel_d_mm);
-  int64_t dR_mdeg = mm_to_motor_mdeg(dR_mm, db->wheel_d_mm);
+  int64_t dL_mdeg = mm_to_motor_mdeg(dL_mm, db->wheel_d_um);
+  int64_t dR_mdeg = mm_to_motor_mdeg(dR_mm, db->wheel_d_um);
 
   int32_t v_mdegps = db_angle_mmps_to_mdegps(v_avg_mmps,
-                                             db->wheel_d_mm);
+                                             db->wheel_d_um);
   int32_t a_mdegps2 = db_angle_mmps_to_mdegps(a_avg_mmps2,
-                                              db->wheel_d_mm);
+                                              db->wheel_d_um);
   int32_t d_mdegps2 = db_angle_mmps_to_mdegps(d_avg_mmps2,
-                                              db->wheel_d_mm);
+                                              db->wheel_d_um);
 
   int rc = db_servo_position_relative(&db->servo[DB_SIDE_LEFT], now_us,
                                       dL_mdeg, v_mdegps,
@@ -122,9 +129,9 @@ static int dispatch_forever(struct db_drivebase_s *db, uint64_t now_us,
 {
   int32_t vL_mmps = v_avg_mmps - v_diff_mmps / 2;
   int32_t vR_mmps = v_avg_mmps + v_diff_mmps / 2;
-  int32_t vL_mdegps = db_angle_mmps_to_mdegps(vL_mmps, db->wheel_d_mm);
-  int32_t vR_mdegps = db_angle_mmps_to_mdegps(vR_mmps, db->wheel_d_mm);
-  int32_t a_mdegps2 = db_angle_mmps_to_mdegps(a_mmps2, db->wheel_d_mm);
+  int32_t vL_mdegps = db_angle_mmps_to_mdegps(vL_mmps, db->wheel_d_um);
+  int32_t vR_mdegps = db_angle_mmps_to_mdegps(vR_mmps, db->wheel_d_um);
+  int32_t a_mdegps2 = db_angle_mmps_to_mdegps(a_mmps2, db->wheel_d_um);
 
   int rc = db_servo_forever(&db->servo[DB_SIDE_LEFT], now_us,
                             vL_mdegps, a_mdegps2);
@@ -138,16 +145,16 @@ static int dispatch_forever(struct db_drivebase_s *db, uint64_t now_us,
  ****************************************************************************/
 
 int db_drivebase_init(struct db_drivebase_s *db,
-                      uint32_t wheel_d_mm, uint32_t axle_t_mm)
+                      uint32_t wheel_d_um, uint32_t axle_t_um)
 {
-  if (wheel_d_mm == 0 || axle_t_mm == 0)
+  if (wheel_d_um == 0 || axle_t_um == 0)
     {
       return -EINVAL;
     }
 
   memset(db, 0, sizeof(*db));
-  db->wheel_d_mm = wheel_d_mm;
-  db->axle_t_mm  = axle_t_mm;
+  db->wheel_d_um = wheel_d_um;
+  db->axle_t_um  = axle_t_um;
   db->active_command = DRIVEBASE_ACTIVE_NONE;
 
   db_servo_init(&db->servo[DB_SIDE_LEFT],  DB_SIDE_LEFT);
@@ -197,18 +204,18 @@ int db_drivebase_drive_straight(struct db_drivebase_s *db,
                                 uint8_t on_completion)
 {
   const struct db_traj_limits_s *dl =
-    db_settings_distance_limits(db->wheel_d_mm);
+    db_settings_distance_limits(db->wheel_d_um);
 
   /* Convert the trajectory limits (in motor mdeg/s) back to wheel
    * mm/s for dispatch_position's sake.
    */
 
   int32_t v_mmps    = db_angle_mdegps_to_mmps(dl->v_max_mdegps,
-                                              db->wheel_d_mm);
+                                              db->wheel_d_um);
   int32_t a_mmps2   = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
-                                              db->wheel_d_mm);
+                                              db->wheel_d_um);
   int32_t d_mmps2   = db_angle_mdegps_to_mmps(dl->decel_mdegps2,
-                                              db->wheel_d_mm);
+                                              db->wheel_d_um);
 
   db->active_command = DRIVEBASE_ACTIVE_STRAIGHT;
   return dispatch_position(db, now_us, distance_mm, 0,
@@ -223,9 +230,9 @@ int db_drivebase_turn(struct db_drivebase_s *db,
   /* l_diff = H_rad * axle_t = angle_deg * π/180 * axle_t */
 
   int32_t dl_diff_mm = heading_mdeg_to_diff_mm(angle_deg * 1000,
-                                               db->axle_t_mm);
+                                               db->axle_t_um);
   const struct db_traj_limits_s *hl =
-    db_settings_heading_limits(db->wheel_d_mm, db->axle_t_mm);
+    db_settings_heading_limits(db->wheel_d_um, db->axle_t_um);
   /* Convert heading angular speed → wheel mm/s for dispatch.  At
    * each motor, the speed magnitude is (v_heading * axle_t / 2 / π)
    * but we already scaled in db_settings_heading_limits's mdeg/s of
@@ -237,13 +244,13 @@ int db_drivebase_turn(struct db_drivebase_s *db,
    */
 
   const struct db_traj_limits_s *dl =
-    db_settings_distance_limits(db->wheel_d_mm);
+    db_settings_distance_limits(db->wheel_d_um);
   int32_t v_mmps  = db_angle_mdegps_to_mmps(dl->v_max_mdegps,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
   int32_t a_mmps2 = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
   int32_t d_mmps2 = db_angle_mdegps_to_mmps(dl->decel_mdegps2,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
   (void)hl;
 
   db->active_command = DRIVEBASE_ACTIVE_TURN;
@@ -268,16 +275,16 @@ int db_drivebase_drive_curve(struct db_drivebase_s *db,
   int32_t dl_avg_mm  = (int32_t)((int64_t)radius_mm * angle_deg *
                                   DB_PI_NUM / DB_PI_DEN / 180);
   int32_t dl_diff_mm = heading_mdeg_to_diff_mm(angle_deg * 1000,
-                                               db->axle_t_mm);
+                                               db->axle_t_um);
 
   const struct db_traj_limits_s *dl =
-    db_settings_distance_limits(db->wheel_d_mm);
+    db_settings_distance_limits(db->wheel_d_um);
   int32_t v_mmps  = db_angle_mdegps_to_mmps(dl->v_max_mdegps,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
   int32_t a_mmps2 = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
   int32_t d_mmps2 = db_angle_mdegps_to_mmps(dl->decel_mdegps2,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
 
   db->active_command = DRIVEBASE_ACTIVE_CURVE;
   return dispatch_position(db, now_us, dl_avg_mm, dl_diff_mm,
@@ -308,16 +315,16 @@ int db_drivebase_drive_arc_distance(struct db_drivebase_s *db,
                                   ((int64_t)radius_mm * DB_PI_NUM));
   int32_t dl_avg_mm  = distance_mm;
   int32_t dl_diff_mm = heading_mdeg_to_diff_mm(angle_mdeg,
-                                               db->axle_t_mm);
+                                               db->axle_t_um);
 
   const struct db_traj_limits_s *dl =
-    db_settings_distance_limits(db->wheel_d_mm);
+    db_settings_distance_limits(db->wheel_d_um);
   int32_t v_mmps  = db_angle_mdegps_to_mmps(dl->v_max_mdegps,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
   int32_t a_mmps2 = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
   int32_t d_mmps2 = db_angle_mdegps_to_mmps(dl->decel_mdegps2,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
 
   db->active_command = DRIVEBASE_ACTIVE_ARC;
   return dispatch_position(db, now_us, dl_avg_mm, dl_diff_mm,
@@ -334,12 +341,12 @@ int db_drivebase_drive_forever(struct db_drivebase_s *db,
    */
 
   int32_t v_diff_mmps = heading_mdeg_to_diff_mm(turn_rate_dps * 1000,
-                                                db->axle_t_mm);
+                                                db->axle_t_um);
 
   const struct db_traj_limits_s *dl =
-    db_settings_distance_limits(db->wheel_d_mm);
+    db_settings_distance_limits(db->wheel_d_um);
   int32_t a_mmps2 = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
 
   db->active_command = DRIVEBASE_ACTIVE_FOREVER;
   return dispatch_forever(db, now_us, speed_mmps, v_diff_mmps,
@@ -374,24 +381,24 @@ int db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us)
   db_servo_get_status(&db->servo[DB_SIDE_LEFT],  &sL);
   db_servo_get_status(&db->servo[DB_SIDE_RIGHT], &sR);
 
-  int32_t lL_mm = db_angle_mdeg_to_mm(sL.act_x_mdeg, db->wheel_d_mm);
-  int32_t lR_mm = db_angle_mdeg_to_mm(sR.act_x_mdeg, db->wheel_d_mm);
+  int32_t lL_mm = db_angle_mdeg_to_mm(sL.act_x_mdeg, db->wheel_d_um);
+  int32_t lR_mm = db_angle_mdeg_to_mm(sR.act_x_mdeg, db->wheel_d_um);
   int32_t avg_mm  = (lL_mm + lR_mm) / 2;
   int32_t diff_mm = lR_mm - lL_mm;
 
   db->distance_mm      = avg_mm;
   db->angle_mdeg       = diff_mm_to_heading_mdeg(diff_mm,
-                                                 db->axle_t_mm);
+                                                 db->axle_t_um);
 
   int32_t vL_mmps = db_angle_mdegps_to_mmps(sL.act_v_mdegps,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
   int32_t vR_mmps = db_angle_mdegps_to_mmps(sR.act_v_mdegps,
-                                            db->wheel_d_mm);
+                                            db->wheel_d_um);
   db->drive_speed_mmps = (vL_mmps + vR_mmps) / 2;
   /* Heading rate (deg/s) = (vR - vL) / axle_t * 180/π                */
   int32_t v_diff = vR_mmps - vL_mmps;
   int32_t v_diff_mdegps = diff_mm_to_heading_mdeg(v_diff,
-                                                  db->axle_t_mm);
+                                                  db->axle_t_um);
   db->turn_rate_dps    = v_diff_mdegps / 1000;
 
   db->done    = sL.done && sR.done;

@@ -117,7 +117,7 @@ enum drivebase_on_completion_e {
   DRIVEBASE_ON_COMPLETION_BRAKE_SMART = 5,  /* SMART: 完了後 ~100 ms hold → brake */
 };
 
-struct drivebase_config_s          { uint32_t wheel_diameter_mm; uint32_t axle_track_mm; uint8_t r[8]; };
+struct drivebase_config_s          { uint32_t wheel_d_um; uint32_t axle_t_um; uint8_t r[8]; };
 struct drivebase_drive_straight_s  { int32_t distance_mm; uint8_t on_completion; uint8_t r[7]; };
 struct drivebase_turn_s            { int32_t angle_deg; uint8_t on_completion; uint8_t r[3]; };
 struct drivebase_drive_forever_s   { int32_t speed_mmps; int32_t turn_rate_dps; };
@@ -198,14 +198,14 @@ PROGNAME = `drivebase` (NSH builtin)。stack size は 4096 (§7 参照)。
 |---|---|
 | `drivebase` (引数なし) | usage を表示 |
 | `drivebase status` | DRIVEBASE_GET_STATUS スナップショットを表示 (daemon 未起動でも動作) |
-| `drivebase start [wheel_mm] [axle_mm]` | daemon 起動。default wheel=56, axle=112 (SPIKE driving base) |
+| `drivebase start [wheel_mm] [axle_mm]` | daemon 起動。`wheel_mm` / `axle_mm` は小数指定可 (例 `17.6 56.5`)。default wheel=56, axle=112 (SPIKE driving base) |
 | `drivebase stop` | daemon 停止 (グレースフル teardown、~2 秒以内) |
-| `drivebase config <wheel_mm> <axle_mm>` | DRIVEBASE_CONFIG (現在は daemon の起動時 default を使うので通常不要) |
+| `drivebase config <wheel_mm> <axle_mm>` | DRIVEBASE_CONFIG。小数 OK (内部 ABI が μm 単位なので sub-mm 精度を保持)。現状は daemon の起動時 default を使うので通常不要 |
 | `drivebase straight <mm> [coast\|brake\|hold]` | DRIVE_STRAIGHT |
 | `drivebase turn <deg>` | TURN (CCW positive) |
 | `drivebase forever <mmps> <dps>` | DRIVE_FOREVER (停止しない、distance + heading 同時) |
 | `drivebase stop-motion <coast\|brake\|hold>` | DRIVEBASE_STOP (緊急停止 fast path) |
-| `drivebase get-state` | DRIVEBASE_GET_STATE (距離 / 速度 / heading / 完了 / stall) |
+| `drivebase get-state [duration_ms [interval_ms]]` | DRIVEBASE_GET_STATE。引数なしは 1 行のみ。`duration_ms` 指定時は `interval_ms` 毎 (default 100ms) にサンプリングして 1 行ずつ表形式で出力 |
 | `drivebase set-gyro <none\|1d\|3d>` | DRIVEBASE_SET_USE_GYRO (heading 上書き) |
 | `drivebase jitter [reset]` | DRIVEBASE_JITTER_DUMP (RT loop の wake latency 統計) |
 

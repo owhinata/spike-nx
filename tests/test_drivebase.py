@@ -37,17 +37,39 @@ def _parse_status(text):
     return {m.group(1): int(m.group(2)) for m in _STATUS_RE.finditer(text)}
 
 
+_STATE_HEADER = (
+    "time_ms", "dist_mm", "v_mmps", "angle_mdeg", "tr_dps",
+    "done", "stall", "cmd", "tick",
+)
+# CLI exposes columns under names that don't 1:1 match the legacy
+# key=value surface; this map keeps existing assertions working.
+_STATE_ALIASES = {"dist": "dist_mm", "v": "v_mmps", "angle": "angle_mdeg"}
+
+
 def _parse_state(text):
-    """Parse the single-line `drivebase get-state` output."""
-    out = {}
-    for kv in text.split():
-        if "=" in kv:
-            k, _, v = kv.partition("=")
-            try:
-                out[k] = int(v)
-            except ValueError:
-                pass
-    return out
+    """Parse `drivebase get-state` table output.
+
+    Returns the *first* data row as a dict keyed by header name.  Both
+    the modern column names (``dist_mm``) and the legacy short names
+    (``dist``) are accessible so older assertions keep working.
+    """
+    rows = []
+    for line in text.splitlines():
+        toks = line.split()
+        if len(toks) != len(_STATE_HEADER):
+            continue
+        if toks == list(_STATE_HEADER):
+            continue
+        try:
+            rows.append({k: int(v) for k, v in zip(_STATE_HEADER, toks)})
+        except ValueError:
+            continue
+    if not rows:
+        return {}
+    row = rows[0]
+    for short, full in _STATE_ALIASES.items():
+        row[short] = row[full]
+    return row
 
 
 def _ensure_stopped(p):

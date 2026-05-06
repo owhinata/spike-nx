@@ -117,7 +117,7 @@ enum drivebase_on_completion_e {
   DRIVEBASE_ON_COMPLETION_BRAKE_SMART = 5,  /* SMART: hold ~100 ms then brake */
 };
 
-struct drivebase_config_s          { uint32_t wheel_diameter_mm; uint32_t axle_track_mm; uint8_t r[8]; };
+struct drivebase_config_s          { uint32_t wheel_d_um; uint32_t axle_t_um; uint8_t r[8]; };
 struct drivebase_drive_straight_s  { int32_t distance_mm; uint8_t on_completion; uint8_t r[7]; };
 struct drivebase_turn_s            { int32_t angle_deg; uint8_t on_completion; uint8_t r[3]; };
 struct drivebase_drive_forever_s   { int32_t speed_mmps; int32_t turn_rate_dps; };
@@ -198,14 +198,14 @@ PROGNAME = `drivebase` (NSH builtin).  STACKSIZE = 4096 (see §7).
 |---|---|
 | `drivebase` (no args) | print usage |
 | `drivebase status` | dump DRIVEBASE_GET_STATUS snapshot (works without a daemon) |
-| `drivebase start [wheel_mm] [axle_mm]` | spawn the daemon.  Default wheel=56, axle=112 (SPIKE driving base) |
+| `drivebase start [wheel_mm] [axle_mm]` | spawn the daemon.  `wheel_mm` / `axle_mm` accept decimals (e.g. `17.6 56.5`); default 56 / 112 (SPIKE driving base) |
 | `drivebase stop` | graceful daemon teardown (returns within ~2 s) |
-| `drivebase config <wheel_mm> <axle_mm>` | DRIVEBASE_CONFIG (currently optional — daemon already takes wheel/axle from `start`) |
+| `drivebase config <wheel_mm> <axle_mm>` | DRIVEBASE_CONFIG.  Decimals OK; the wire ABI carries micrometers so sub-mm precision survives (currently optional — daemon already takes wheel/axle from `start`) |
 | `drivebase straight <mm> [coast\|brake\|hold]` | DRIVE_STRAIGHT |
 | `drivebase turn <deg>` | TURN (CCW positive) |
 | `drivebase forever <mmps> <dps>` | DRIVE_FOREVER (no completion, distance + heading concurrently) |
 | `drivebase stop-motion <coast\|brake\|hold>` | DRIVEBASE_STOP (emergency fast path) |
-| `drivebase get-state` | DRIVEBASE_GET_STATE (distance / speed / heading / done / stall) |
+| `drivebase get-state [duration_ms [interval_ms]]` | DRIVEBASE_GET_STATE.  Default = single-row table; with `duration_ms` polls every `interval_ms` (default 100 ms) and prints one row per sample |
 | `drivebase set-gyro <none\|1d\|3d>` | DRIVEBASE_SET_USE_GYRO (override heading source) |
 | `drivebase jitter [reset]` | DRIVEBASE_JITTER_DUMP (RT loop wake-latency stats) |
 

@@ -43,7 +43,7 @@ enum db_daemon_state_e
  * -EALREADY.
  */
 
-int  drivebase_daemon_start(uint32_t wheel_d_mm, uint32_t axle_t_mm);
+int  drivebase_daemon_start(uint32_t wheel_d_um, uint32_t axle_t_um);
 
 /* Request graceful teardown.  Sets running=false and waits up to
  * `timeout_ms` for the daemon task to exit.  Returns 0 on clean

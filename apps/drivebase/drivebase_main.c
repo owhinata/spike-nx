@@ -397,7 +397,7 @@ static int daemon_tick_cb(uint64_t now_us, void *arg)
  */
 
 static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
-                         uint32_t wheel_d_mm, uint32_t axle_t_mm)
+                         uint32_t wheel_d_um, uint32_t axle_t_um)
 {
   struct daemon_ctx_s *ctxp = calloc(1, sizeof(*ctxp));
   if (ctxp == NULL)
@@ -427,10 +427,10 @@ static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
   /* 2. Init drivebase up-front (skip the CONFIG ioctl path for now —
    *    that exercises a separate dispatch in the RT thread context
    *    that's covered in commit #11 once the daemon FSM owns it.
-   *    Hard-code wheel_d_mm / axle_t_mm from the verb args.)
+   *    Hard-code wheel_d_um / axle_t_um from the verb args.)
    */
 
-  rc = db_drivebase_init(&ctx.db, wheel_d_mm, axle_t_mm);
+  rc = db_drivebase_init(&ctx.db, wheel_d_um, axle_t_um);
   if (rc < 0)
     {
       fprintf(stderr, "db_drivebase_init: %s\n", strerror(-rc));
@@ -464,8 +464,8 @@ static int do_daemon_run(const char *kind, int32_t arg1, int32_t arg2,
    */
 
   ctx.handler.configured = true;
-  ctx.handler.wheel_d_mm = wheel_d_mm;
-  ctx.handler.axle_t_mm  = axle_t_mm;
+  ctx.handler.wheel_d_um = wheel_d_um;
+  ctx.handler.axle_t_um  = axle_t_um;
 
   /* 3. Spawn the RT tick task. */
 
@@ -634,11 +634,11 @@ static int do_daemon_subcmd(int argc, FAR char *argv[])
   const char *kind = argv[0];
   int32_t  arg1 = (argc >= 2) ? (int32_t)atol(argv[1]) : 0;
   int32_t  arg2 = (argc >= 3) ? (int32_t)atol(argv[2]) : 0;
-  uint32_t wheel_d_mm = 56;
-  uint32_t axle_t_mm  = 112;     /* SPIKE driving base reference frame  */
-  if (argc >= 4) wheel_d_mm = (uint32_t)atoi(argv[3]);
-  if (argc >= 5) axle_t_mm  = (uint32_t)atoi(argv[4]);
-  return do_daemon_run(kind, arg1, arg2, wheel_d_mm, axle_t_mm);
+  double   wheel_mm = (argc >= 4) ? strtod(argv[3], NULL) : 56.0;
+  double   axle_mm  = (argc >= 5) ? strtod(argv[4], NULL) : 112.0;
+  uint32_t wheel_d_um = (uint32_t)(wheel_mm * 1000.0 + 0.5);
+  uint32_t axle_t_um  = (uint32_t)(axle_mm  * 1000.0 + 0.5);
+  return do_daemon_run(kind, arg1, arg2, wheel_d_um, axle_t_um);
 }
 
 /****************************************************************************
@@ -733,7 +733,7 @@ static int do_rt_subcmd(int argc, FAR char *argv[])
 
 static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
                         uint32_t duration_ms, uint8_t on_completion,
-                        uint32_t wheel_d_mm, uint32_t axle_t_mm)
+                        uint32_t wheel_d_um, uint32_t axle_t_um)
 {
   struct db_drivebase_s *dbp = calloc(1, sizeof(*dbp));
   if (dbp == NULL)
@@ -755,7 +755,7 @@ static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
   drivebase_motor_select_mode(DB_SIDE_RIGHT, 2);
   usleep(30000);
 
-  rc = db_drivebase_init(&db, wheel_d_mm, axle_t_mm);
+  rc = db_drivebase_init(&db, wheel_d_um, axle_t_um);
   if (rc < 0)
     {
       fprintf(stderr, "db_drivebase_init: %s\n", strerror(-rc));
@@ -869,8 +869,8 @@ static int do_drive_subcmd(int argc, FAR char *argv[])
   int32_t arg1 = 0, arg2 = 0;
   uint32_t duration = 3000;
   uint8_t on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
-  uint32_t wheel_d = 56;     /* SPIKE Medium wheel default                */
-  uint32_t axle_t  = 112;    /* SPIKE driving base reference frame        */
+  double wheel_mm = 56.0;
+  double axle_mm  = 112.0;
 
   if (argc >= 2) arg1 = (int32_t)atol(argv[1]);
   if (argc >= 3) arg2 = (int32_t)atol(argv[2]);
@@ -884,11 +884,13 @@ static int do_drive_subcmd(int argc, FAR char *argv[])
       else if (strcmp(argv[4], "hold") == 0)
         on_completion = DRIVEBASE_ON_COMPLETION_HOLD;
     }
-  if (argc >= 6) wheel_d = (uint32_t)atoi(argv[5]);
-  if (argc >= 7) axle_t  = (uint32_t)atoi(argv[6]);
+  if (argc >= 6) wheel_mm = strtod(argv[5], NULL);
+  if (argc >= 7) axle_mm  = strtod(argv[6], NULL);
 
+  uint32_t wheel_d_um = (uint32_t)(wheel_mm * 1000.0 + 0.5);
+  uint32_t axle_t_um  = (uint32_t)(axle_mm  * 1000.0 + 0.5);
   return do_drive_run(kind, arg1, arg2, duration, on_completion,
-                      wheel_d, axle_t);
+                      wheel_d_um, axle_t_um);
 }
 
 /****************************************************************************
@@ -1140,17 +1142,18 @@ static int do_alg_traj(int argc, FAR char *argv[])
 
 static int do_alg_settings(int argc, FAR char *argv[])
 {
-  uint32_t wheel_d = (argc >= 1) ? (uint32_t)atoi(argv[0]) : 56;
-  uint32_t axle_t  = (argc >= 2) ? (uint32_t)atoi(argv[1]) : 112;
+  double wheel_mm = (argc >= 1) ? strtod(argv[0], NULL) : 56.0;
+  double axle_mm  = (argc >= 2) ? strtod(argv[1], NULL) : 112.0;
+  uint32_t wheel_d_um = (uint32_t)(wheel_mm * 1000.0 + 0.5);
+  uint32_t axle_t_um  = (uint32_t)(axle_mm  * 1000.0 + 0.5);
 
   const struct db_servo_gains_s        *g = db_settings_servo_gains();
-  const struct db_traj_limits_s        *dl = db_settings_distance_limits(wheel_d);
-  const struct db_traj_limits_s        *hl = db_settings_heading_limits(wheel_d, axle_t);
+  const struct db_traj_limits_s        *dl = db_settings_distance_limits(wheel_d_um);
+  const struct db_traj_limits_s        *hl = db_settings_heading_limits(wheel_d_um, axle_t_um);
   const struct db_stall_settings_s     *st = db_settings_stall();
   const struct db_completion_settings_s *cm = db_settings_completion();
 
-  printf("wheel_d=%lu mm  axle_t=%lu mm\n",
-         (unsigned long)wheel_d, (unsigned long)axle_t);
+  printf("wheel_d=%g mm  axle_t=%g mm\n", wheel_mm, axle_mm);
   printf("servo: kp_pos=%ld ki_pos=%ld kd_pos=%ld "
          "kp_speed=%ld ki_speed=%ld deadband=%ld out=[%ld,%ld]\n",
          (long)g->kp_pos, (long)g->ki_pos, (long)g->kd_pos,
@@ -1182,13 +1185,13 @@ static int do_alg_angle(int argc, FAR char *argv[])
               "usage: drivebase _alg angle <wheel_d_mm> <mdeg>\n");
       return 1;
     }
-  uint32_t wheel_d = (uint32_t)atoi(argv[0]);
-  int64_t mdeg     = (int64_t)atoll(argv[1]);
-  int32_t mm       = db_angle_mdeg_to_mm(mdeg, wheel_d);
-  int64_t back     = db_angle_mm_to_mdeg(mm, wheel_d);
-  printf("wheel_d=%lu mm  mdeg=%lld -> mm=%ld -> mdeg=%lld\n",
-         (unsigned long)wheel_d, (long long)mdeg,
-         (long)mm, (long long)back);
+  double   wheel_mm   = strtod(argv[0], NULL);
+  uint32_t wheel_d_um = (uint32_t)(wheel_mm * 1000.0 + 0.5);
+  int64_t  mdeg       = (int64_t)atoll(argv[1]);
+  int32_t  mm         = db_angle_mdeg_to_mm(mdeg, wheel_d_um);
+  int64_t  back       = db_angle_mm_to_mdeg(mm, wheel_d_um);
+  printf("wheel_d=%g mm  mdeg=%lld -> mm=%ld -> mdeg=%lld\n",
+         wheel_mm, (long long)mdeg, (long)mm, (long long)back);
   return 0;
 }
 
@@ -1283,7 +1286,8 @@ static void usage(void)
           "  drivebase turn <deg>                        TURN\n"
           "  drivebase forever <speed_mmps> <turn_dps>   DRIVE_FOREVER\n"
           "  drivebase stop-motion <coast|brake|hold>    STOP\n"
-          "  drivebase get-state                         GET_STATE\n"
+          "  drivebase get-state [duration_ms [interval_ms]]\n"
+          "                                              GET_STATE (table; default one-shot)\n"
           "  drivebase set-gyro <none|1d|3d>             SET_USE_GYRO\n"
           "  drivebase jitter [reset]                    JITTER_DUMP\n");
 }
@@ -1357,16 +1361,18 @@ int main(int argc, FAR char *argv[])
 
   if (strcmp(verb, "start") == 0)
     {
-      uint32_t wheel_d_mm = (argc >= 3) ? (uint32_t)atoi(argv[2]) : 56;
-      uint32_t axle_t_mm  = (argc >= 4) ? (uint32_t)atoi(argv[3]) : 112;
-      int rc = drivebase_daemon_start(wheel_d_mm, axle_t_mm);
+      double   wheel_mm = (argc >= 3) ? strtod(argv[2], NULL) : 56.0;
+      double   axle_mm  = (argc >= 4) ? strtod(argv[3], NULL) : 112.0;
+      uint32_t wheel_d_um = (uint32_t)(wheel_mm * 1000.0 + 0.5);
+      uint32_t axle_t_um  = (uint32_t)(axle_mm  * 1000.0 + 0.5);
+      int rc = drivebase_daemon_start(wheel_d_um, axle_t_um);
       if (rc < 0)
         {
           fprintf(stderr, "drivebase start: %s\n", strerror(-rc));
           return 1;
         }
-      printf("drivebase: started (pid=%d wheel=%lu axle=%lu)\n",
-             rc, (unsigned long)wheel_d_mm, (unsigned long)axle_t_mm);
+      printf("drivebase: started (pid=%d wheel=%g mm axle=%g mm)\n",
+             rc, wheel_mm, axle_mm);
       return 0;
     }
 
@@ -1407,9 +1413,28 @@ int main(int argc, FAR char *argv[])
           fprintf(stderr, "usage: drivebase config <wheel_mm> <axle_mm>\n");
           close(dev); return 1;
         }
+
+      char *endp;
+      double wheel = strtod(argv[2], &endp);
+      if (endp == argv[2] || *endp != '\0' || wheel <= 0.0)
+        {
+          fprintf(stderr, "bad wheel_mm: %s\n", argv[2]);
+          close(dev); return 1;
+        }
+      double axle = strtod(argv[3], &endp);
+      if (endp == argv[3] || *endp != '\0' || axle <= 0.0)
+        {
+          fprintf(stderr, "bad axle_mm: %s\n", argv[3]);
+          close(dev); return 1;
+        }
+
+      /* ABI carries micrometers (0.001 mm), so the float input keeps
+       * its sub-mm precision through to the daemon's angle math.
+       */
+
       struct drivebase_config_s c =
-        { .wheel_diameter_mm = (uint32_t)atoi(argv[2]),
-          .axle_track_mm     = (uint32_t)atoi(argv[3]) };
+        { .wheel_d_um = (uint32_t)(wheel * 1000.0 + 0.5),
+          .axle_t_um  = (uint32_t)(axle  * 1000.0 + 0.5) };
       int rc = ioctl(dev, DRIVEBASE_CONFIG, (unsigned long)&c);
       close(dev);
       if (rc < 0)
@@ -1492,16 +1517,69 @@ int main(int argc, FAR char *argv[])
 
   if (strcmp(verb, "get-state") == 0)
     {
-      struct drivebase_state_s st;
-      int rc = ioctl(dev, DRIVEBASE_GET_STATE, (unsigned long)&st);
+      uint32_t duration_ms = 0;
+      uint32_t interval_ms = 100;
+      if (argc >= 3)
+        {
+          int v = atoi(argv[2]);
+          if (v < 0)
+            {
+              fprintf(stderr,
+                      "usage: drivebase get-state "
+                      "[duration_ms [interval_ms]]\n");
+              close(dev); return 1;
+            }
+          duration_ms = (uint32_t)v;
+        }
+      if (argc >= 4)
+        {
+          int v = atoi(argv[3]);
+          if (v <= 0)
+            {
+              fprintf(stderr,
+                      "usage: drivebase get-state "
+                      "[duration_ms [interval_ms]]\n");
+              close(dev); return 1;
+            }
+          interval_ms = (uint32_t)v;
+        }
+
+      printf("%8s  %8s  %7s  %10s  %7s  %4s  %5s  %3s  %10s\n",
+             "time_ms", "dist_mm", "v_mmps", "angle_mdeg", "tr_dps",
+             "done", "stall", "cmd", "tick");
+
+      struct timespec t0;
+      clock_gettime(CLOCK_MONOTONIC, &t0);
+
+      for (;;)
+        {
+          struct drivebase_state_s st;
+          int rc = ioctl(dev, DRIVEBASE_GET_STATE, (unsigned long)&st);
+          if (rc < 0)
+            {
+              fprintf(stderr, "GET_STATE: %s\n", strerror(errno));
+              close(dev); return 1;
+            }
+
+          struct timespec tn;
+          clock_gettime(CLOCK_MONOTONIC, &tn);
+          long elapsed_ms = (tn.tv_sec - t0.tv_sec) * 1000L +
+                            (tn.tv_nsec - t0.tv_nsec) / 1000000L;
+
+          printf("%8ld  %8ld  %7ld  %10ld  %7ld  %4u  %5u  %3u  %10lu\n",
+                 elapsed_ms,
+                 (long)st.distance_mm, (long)st.drive_speed_mmps,
+                 (long)st.angle_mdeg, (long)st.turn_rate_dps,
+                 st.is_done, st.is_stalled, st.active_command,
+                 (unsigned long)st.tick_seq);
+
+          if (duration_ms == 0 || (uint32_t)elapsed_ms >= duration_ms)
+            {
+              break;
+            }
+          usleep(interval_ms * 1000);
+        }
       close(dev);
-      if (rc < 0) { fprintf(stderr, "GET_STATE: %s\n", strerror(errno)); return 1; }
-      printf("dist=%ld mm v=%ld mmps angle=%ld mdeg tr=%ld dps "
-             "done=%u stall=%u cmd=%u tick=%lu\n",
-             (long)st.distance_mm, (long)st.drive_speed_mmps,
-             (long)st.angle_mdeg, (long)st.turn_rate_dps,
-             st.is_done, st.is_stalled, st.active_command,
-             (unsigned long)st.tick_seq);
       return 0;
     }
 

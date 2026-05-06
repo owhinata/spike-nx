@@ -52,10 +52,13 @@ extern "C"
 
 struct db_drivebase_s
 {
-  /* Geometry */
+  /* Geometry — micrometers (0.001 mm) so user can specify sub-mm
+   * wheel diameters; angle math in drivebase_angle.h is two-step int64
+   * to keep the extra precision without overflow.
+   */
 
-  uint32_t wheel_d_mm;
-  uint32_t axle_t_mm;
+  uint32_t wheel_d_um;
+  uint32_t axle_t_um;
 
   /* Per-side servos — owned outright by the drivebase */
 
@@ -79,7 +82,7 @@ struct db_drivebase_s
 /* Lifecycle */
 
 int  db_drivebase_init(struct db_drivebase_s *db,
-                       uint32_t wheel_d_mm, uint32_t axle_t_mm);
+                       uint32_t wheel_d_um, uint32_t axle_t_um);
 
 int  db_drivebase_reset(struct db_drivebase_s *db, uint64_t now_us);
 

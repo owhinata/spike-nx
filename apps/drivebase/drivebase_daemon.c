@@ -75,8 +75,8 @@ struct daemon_global_s
   atomic_int                state;          /* enum db_daemon_state_e   */
   atomic_bool               running;
   pid_t                     pid;
-  uint32_t                  wheel_d_mm;
-  uint32_t                  axle_t_mm;
+  uint32_t                  wheel_d_um;
+  uint32_t                  axle_t_um;
   pthread_mutex_t           lock;
   sem_t                     teardown_done;
 
@@ -201,11 +201,13 @@ static int daemon_task_main(int argc, char *argv[])
 {
   struct daemon_global_s *d = g_daemon;
 
-  uint32_t wheel_d_mm = (argc >= 2) ? (uint32_t)atoi(argv[1]) : 56;
-  uint32_t axle_t_mm  = (argc >= 3) ? (uint32_t)atoi(argv[2]) : 112;
+  uint32_t wheel_d_um =
+      (argc >= 2) ? (uint32_t)strtoul(argv[1], NULL, 10) : 56000;
+  uint32_t axle_t_um  =
+      (argc >= 3) ? (uint32_t)strtoul(argv[2], NULL, 10) : 112000;
 
-  d->wheel_d_mm = wheel_d_mm;
-  d->axle_t_mm  = axle_t_mm;
+  d->wheel_d_um = wheel_d_um;
+  d->axle_t_um  = axle_t_um;
   d->consecutive_misses = 0;
   d->last_seen_misses   = 0;
   d->use_gyro           = DRIVEBASE_USE_GYRO_NONE;
@@ -225,7 +227,7 @@ static int daemon_task_main(int argc, char *argv[])
   uint64_t t0 = (uint64_t)ts.tv_sec * 1000000ULL +
                 (uint64_t)ts.tv_nsec / 1000ULL;
 
-  rc = db_drivebase_init(&d->db, d->wheel_d_mm, d->axle_t_mm);
+  rc = db_drivebase_init(&d->db, d->wheel_d_um, d->axle_t_um);
   if (rc < 0) goto fail_motor;
   rc = db_drivebase_reset(&d->db, t0);
   if (rc < 0) goto fail_motor;
@@ -237,8 +239,8 @@ static int daemon_task_main(int argc, char *argv[])
                                  DRIVEBASE_ON_COMPLETION_COAST);
   if (rc < 0) goto fail_motor;
   d->handler.configured = true;
-  d->handler.wheel_d_mm = d->wheel_d_mm;
-  d->handler.axle_t_mm  = d->axle_t_mm;
+  d->handler.wheel_d_um = d->wheel_d_um;
+  d->handler.axle_t_um  = d->axle_t_um;
 
   /* IMU is best-effort — the daemon runs encoder-only if open fails. */
 
@@ -307,7 +309,7 @@ fail:
  * Public Functions
  ****************************************************************************/
 
-int drivebase_daemon_start(uint32_t wheel_d_mm, uint32_t axle_t_mm)
+int drivebase_daemon_start(uint32_t wheel_d_um, uint32_t axle_t_um)
 {
   int rc = daemon_global_alloc();
   if (rc < 0)
@@ -329,8 +331,8 @@ int drivebase_daemon_start(uint32_t wheel_d_mm, uint32_t axle_t_mm)
   /* Pass wheel/axle to the daemon task via argv strings. */
 
   static char wheel_str[12], axle_str[12];
-  snprintf(wheel_str, sizeof(wheel_str), "%lu", (unsigned long)wheel_d_mm);
-  snprintf(axle_str,  sizeof(axle_str),  "%lu", (unsigned long)axle_t_mm);
+  snprintf(wheel_str, sizeof(wheel_str), "%lu", (unsigned long)wheel_d_um);
+  snprintf(axle_str,  sizeof(axle_str),  "%lu", (unsigned long)axle_t_um);
   static char *argv[] = { wheel_str, axle_str, NULL };
 
   int pid = task_create(DAEMON_TASK_NAME, DAEMON_TASK_PRIORITY,

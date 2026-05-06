@@ -43,9 +43,9 @@ static int dispatch_envelope(struct db_chardev_handler_s *h,
             {
               return -EBUSY;
             }
-          h->wheel_d_mm = c->wheel_diameter_mm;
-          h->axle_t_mm  = c->axle_track_mm;
-          int rc = db_drivebase_init(h->db, h->wheel_d_mm, h->axle_t_mm);
+          h->wheel_d_um = c->wheel_d_um;
+          h->axle_t_um  = c->axle_t_um;
+          int rc = db_drivebase_init(h->db, h->wheel_d_um, h->axle_t_um);
           if (rc < 0) return rc;
           rc = db_drivebase_reset(h->db, now_us);
           if (rc == 0) h->configured = true;

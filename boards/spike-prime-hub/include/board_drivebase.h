@@ -142,12 +142,17 @@ enum drivebase_active_command_e
  * right port are implicit in the sensor class topic naming
  * (sensor_motor_l = odd port, sensor_motor_r = even port) so they are
  * not negotiable per-daemon-life.
+ *
+ * Units are micrometers (0.001 mm).  This keeps the wire format an
+ * uint32 while letting userspace specify sub-mm wheel diameters (e.g.
+ * 17.6 mm = 17600 um).  The internal angle math uses two-step int64
+ * arithmetic so the extra precision propagates without overflow.
  */
 
 struct drivebase_config_s
 {
-  uint32_t wheel_diameter_mm;
-  uint32_t axle_track_mm;
+  uint32_t wheel_d_um;
+  uint32_t axle_t_um;
   uint8_t  reserved[8];
 };
 

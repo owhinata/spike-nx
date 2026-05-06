@@ -80,9 +80,9 @@ struct db_completion_settings_s
  ****************************************************************************/
 
 const struct db_servo_gains_s        *db_settings_servo_gains(void);
-const struct db_traj_limits_s        *db_settings_distance_limits(uint32_t wheel_d_mm);
-const struct db_traj_limits_s        *db_settings_heading_limits(uint32_t wheel_d_mm,
-                                                                 uint32_t axle_t_mm);
+const struct db_traj_limits_s        *db_settings_distance_limits(uint32_t wheel_d_um);
+const struct db_traj_limits_s        *db_settings_heading_limits(uint32_t wheel_d_um,
+                                                                 uint32_t axle_t_um);
 const struct db_stall_settings_s     *db_settings_stall(void);
 const struct db_completion_settings_s *db_settings_completion(void);
 

@@ -69,25 +69,30 @@ static const struct db_servo_gains_s g_servo_gains =
  *   a_drive_default      = v_drive_default * 4       (1/4 s ramp)
  * The same scale law is applied to heading via axle_track:
  *   v_turn_default_dps   = (v_drive * 360) / (π * axle_track)
+ *
+ * Geometry inputs are micrometers (matching db_drivebase_s).  The
+ * heuristic v_drive = wheel_d * 4 only needs mm precision so we
+ * round (wheel_d_um / 1000) before multiplying — keeps the resulting
+ * speed an integer mm/s and matches the historical default values.
  ****************************************************************************/
 
 static struct db_traj_limits_s g_distance_limits;
 static struct db_traj_limits_s g_heading_limits;
 
-static void recompute_distance(uint32_t wheel_d_mm)
+static void recompute_distance(uint32_t wheel_d_um)
 {
   /* Express in milli-deg/s of motor angle.  v_mmps -> v_mdegps via
    * db_angle_mmps_to_mdegps.
    */
 
-  int32_t v_mmps = (int32_t)wheel_d_mm * 4;
+  int32_t v_mmps = (int32_t)((wheel_d_um + 500) / 1000) * 4;
   g_distance_limits.v_max_mdegps   = db_angle_mmps_to_mdegps(v_mmps,
-                                                             wheel_d_mm);
+                                                             wheel_d_um);
   g_distance_limits.accel_mdegps2  = g_distance_limits.v_max_mdegps * 4;
   g_distance_limits.decel_mdegps2  = g_distance_limits.v_max_mdegps * 4;
 }
 
-static void recompute_heading(uint32_t wheel_d_mm, uint32_t axle_t_mm)
+static void recompute_heading(uint32_t wheel_d_um, uint32_t axle_t_um)
 {
   /* Heading is measured in deg of robot rotation.  Wheel travels
    * (axle_t * π / 360) mm per deg of heading; the same wheel speed
@@ -95,11 +100,13 @@ static void recompute_heading(uint32_t wheel_d_mm, uint32_t axle_t_mm)
    * travel as the conversion.
    */
 
-  int32_t v_drive_mmps  = (int32_t)wheel_d_mm * 4;       /* same scale */
+  int32_t v_drive_mmps  = (int32_t)((wheel_d_um + 500) / 1000) * 4;
   /* (mdeg of heading)/s = (mdeg of wheel)/s * (wheel_d / axle_track) */
   int64_t v_wheel_mdegps = db_angle_mmps_to_mdegps(v_drive_mmps,
-                                                   wheel_d_mm);
-  int64_t v_heading_mdegps = v_wheel_mdegps * wheel_d_mm / axle_t_mm;
+                                                   wheel_d_um);
+  int64_t v_heading_mdegps =
+      axle_t_um == 0 ? 0
+                     : v_wheel_mdegps * (int64_t)wheel_d_um / axle_t_um;
   if (v_heading_mdegps > INT32_MAX) v_heading_mdegps = INT32_MAX;
   g_heading_limits.v_max_mdegps   = (int32_t)v_heading_mdegps;
   g_heading_limits.accel_mdegps2  = (int32_t)(v_heading_mdegps * 4);
@@ -112,16 +119,16 @@ const struct db_servo_gains_s *db_settings_servo_gains(void)
 }
 
 const struct db_traj_limits_s *
-db_settings_distance_limits(uint32_t wheel_d_mm)
+db_settings_distance_limits(uint32_t wheel_d_um)
 {
-  recompute_distance(wheel_d_mm);
+  recompute_distance(wheel_d_um);
   return &g_distance_limits;
 }
 
 const struct db_traj_limits_s *
-db_settings_heading_limits(uint32_t wheel_d_mm, uint32_t axle_t_mm)
+db_settings_heading_limits(uint32_t wheel_d_um, uint32_t axle_t_um)
 {
-  recompute_heading(wheel_d_mm, axle_t_mm);
+  recompute_heading(wheel_d_um, axle_t_um);
   return &g_heading_limits;
 }
 

@@ -40,8 +40,8 @@ struct db_chardev_handler_s
                                                /* the daemon has acted  */
                                                /* on                    */
   bool                      configured;
-  uint32_t                  wheel_d_mm;
-  uint32_t                  axle_t_mm;
+  uint32_t                  wheel_d_um;
+  uint32_t                  axle_t_um;
 
   struct db_drivebase_s    *db;                /* injected by attach()  */
 };

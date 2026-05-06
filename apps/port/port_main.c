@@ -603,8 +603,8 @@ static int do_lump_watch(int port, int duration_ms)
       return 1;
     }
 
-  printf("Port %c watching %d ms... (Ctrl-C to stop)\n",
-         'A' + port, duration_ms);
+  printf("%8s  %4s  %4s  %3s  %s\n",
+         "time_ms", "port", "mode", "len", "data");
 
   /* Poll the engine's DATA ring at ~10 ms cadence. */
 
@@ -628,11 +628,11 @@ static int do_lump_watch(int port, int duration_ms)
       if (rc == 0)
         {
           frames++;
-          printf("[%c] mode=%u len=%u",
-                 'A' + port, frame.mode, frame.len);
+          printf("%8ld  %4c  %4u  %3u  ",
+                 elapsed_ms, 'A' + port, frame.mode, frame.len);
           for (uint8_t i = 0; i < frame.len; i++)
             {
-              printf(" %02x", frame.data[i]);
+              printf("%s%02x", i ? " " : "", frame.data[i]);
             }
           printf("\n");
         }
@@ -883,7 +883,7 @@ static int do_pwm_status(int port)
 static void usage(void)
 {
   printf("Usage:\n");
-  printf("  port             - alias of `port list`\n");
+  printf("  port             - show this help\n");
   printf("  port list        - dump all 6 ports\n");
   printf("  port info <P>    - single-port info (P = A..F or 0..5)\n");
   printf("  port wait <P> [timeout_ms]\n"
@@ -921,9 +921,23 @@ static void usage(void)
 
 int main(int argc, FAR char *argv[])
 {
-  if (argc < 2 || strcmp(argv[1], "list") == 0)
+  if (argc < 2)
+    {
+      usage();
+      return 0;
+    }
+
+  if (strcmp(argv[1], "list") == 0)
     {
       return do_list();
+    }
+
+  if (strcmp(argv[1], "help") == 0 ||
+      strcmp(argv[1], "-h")   == 0 ||
+      strcmp(argv[1], "--help") == 0)
+    {
+      usage();
+      return 0;
     }
 
   if (strcmp(argv[1], "info") == 0)

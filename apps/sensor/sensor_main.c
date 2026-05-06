@@ -167,60 +167,63 @@ static int parse_signed_long(const char *s, long *out)
  * Private Functions — sample decoding
  ****************************************************************************/
 
-static void print_sample(const struct lump_sample_s *s)
+/* Header used by `sensor <class> watch`.  The columns are space-padded
+ * so the output is column-aligned in a fixed-width terminal, with the
+ * per-sample `data` payload tail-printed because its width is mode-
+ * dependent (INT8 x4 vs FLOAT x8 etc.).
+ */
+
+#define WATCH_HEADER_FMT  \
+    "%8s  %4s  %5s  %6s  %4s  %-5s  %4s  %s\n"
+#define WATCH_ROW_FMT     \
+    "%8ld  %4c  %5" PRIu32 "  %6" PRIu32 "  %4u  %-5s  %4u  "
+
+static void print_sample_row(long time_ms, const struct lump_sample_s *s)
 {
-  printf("[port=%c] gen=%" PRIu32 " seq=%" PRIu32 " mode=%u (%s x%u) ",
-         'A' + s->port, s->generation, s->seq, s->mode_id,
+  printf(WATCH_ROW_FMT, time_ms, 'A' + s->port,
+         s->generation, s->seq, s->mode_id,
          dtype_name(s->data_type), s->num_values);
 
   if (s->len == 0)
     {
-      if (s->type_id == 0)
-        {
-          printf("| <disconnect>\n");
-        }
-      else
-        {
-          printf("| <sync sentinel>\n");
-        }
+      printf("%s\n", s->type_id == 0 ? "<disconnect>" : "<sync>");
       return;
     }
 
-  printf("|");
   switch (s->data_type)
     {
       case LUMP_DATA_INT8:
         for (int i = 0; i < s->num_values && i < 32; i++)
           {
-            printf(" %d", s->data.i8[i]);
+            printf("%s%d", i ? " " : "", s->data.i8[i]);
           }
         break;
 
       case LUMP_DATA_INT16:
         for (int i = 0; i < s->num_values && i < 16; i++)
           {
-            printf(" %d", s->data.i16[i]);
+            printf("%s%d", i ? " " : "", s->data.i16[i]);
           }
         break;
 
       case LUMP_DATA_INT32:
         for (int i = 0; i < s->num_values && i < 8; i++)
           {
-            printf(" %" PRId32, s->data.i32[i]);
+            printf("%s%" PRId32, i ? " " : "", s->data.i32[i]);
           }
         break;
 
       case LUMP_DATA_FLOAT:
         for (int i = 0; i < s->num_values && i < 8; i++)
           {
-            printf(" %.3f", (double)s->data.f32[i]);
+            printf("%s%.3f", i ? " " : "", (double)s->data.f32[i]);
           }
         break;
 
       default:
         for (int i = 0; i < s->len && i < 32; i++)
           {
-            printf(" %02x", s->data.raw[i]);
+            printf("%s%02x", i ? " " : "", s->data.raw[i]);
           }
         break;
     }
@@ -457,6 +460,9 @@ static int do_watch(const struct class_entry_s *c, int duration_ms)
       return -errno;
     }
 
+  printf(WATCH_HEADER_FMT,
+         "time_ms", "port", "gen", "seq", "mode", "type", "nval", "data");
+
   struct timespec t0;
   clock_gettime(CLOCK_MONOTONIC, &t0);
 
@@ -483,16 +489,18 @@ static int do_watch(const struct class_entry_s *c, int duration_ms)
 
       struct lump_sample_s s;
       ssize_t n = read(fd, &s, sizeof(s));
-      if (n == sizeof(s))
-        {
-          print_sample(&s);
-          count++;
-        }
 
       struct timespec t1;
       clock_gettime(CLOCK_MONOTONIC, &t1);
       long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
                         (t1.tv_nsec - t0.tv_nsec) / 1000000;
+
+      if (n == sizeof(s))
+        {
+          print_sample_row(elapsed_ms, &s);
+          count++;
+        }
+
       remaining = duration_ms - (int)elapsed_ms;
     }
 
@@ -860,8 +868,8 @@ static void usage(void)
 {
   fprintf(stderr,
           "usage:\n"
-          "  sensor                                 list all class topics\n"
-          "  sensor list                            same as above\n"
+          "  sensor                                 show this help\n"
+          "  sensor list                            list all class topics\n"
           "  sensor <class>                         status one-liner\n"
           "  sensor <class> info                    device info / mode schema\n"
           "  sensor <class> status                  engine + traffic counters\n"
@@ -877,9 +885,23 @@ static void usage(void)
 
 int main(int argc, FAR char *argv[])
 {
-  if (argc < 2 || strcmp(argv[1], "list") == 0)
+  if (argc < 2)
+    {
+      usage();
+      return 0;
+    }
+
+  if (strcmp(argv[1], "list") == 0)
     {
       return do_list() < 0 ? 1 : 0;
+    }
+
+  if (strcmp(argv[1], "help") == 0 ||
+      strcmp(argv[1], "-h")   == 0 ||
+      strcmp(argv[1], "--help") == 0)
+    {
+      usage();
+      return 0;
     }
 
   const struct class_entry_s *c = lookup_class(argv[1]);
