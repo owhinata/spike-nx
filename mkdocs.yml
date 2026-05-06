@@ -80,6 +80,7 @@ nav:
       - development/file-transfer.md
       - development/apps.md
       - development/build-protected.md
+      - development/nsh-boot-script.md
       - development/pc-receive-spp.md
       - development/bt-nsh-shell.md
   - NuttX:

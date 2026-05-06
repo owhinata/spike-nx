@@ -1,0 +1,9 @@
+/****************************************************************************
+ * boards/spike-prime-hub/src/etc/init.d/rc.sysinit
+ *
+ * NSH system-init script.  Reserved for filesystem mounts that must run
+ * before rcS; currently empty.  nsh_sysinitscript() is silent when the file
+ * is missing, but Make.defs lists this path so we keep it as a stub.
+ ****************************************************************************/
+
+#include <nuttx/config.h>

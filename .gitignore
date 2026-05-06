@@ -17,6 +17,8 @@ boards/*/src/*.o
 boards/*/src/*.a
 boards/*/src/.depend
 boards/*/src/Make.dep
+boards/*/src/etctmp.c
+boards/*/src/etctmp/
 boards/*/kernel/*.o
 boards/*/kernel/*.elf
 boards/*/kernel/.depend

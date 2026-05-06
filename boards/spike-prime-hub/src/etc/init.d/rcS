@@ -1,0 +1,16 @@
+/****************************************************************************
+ * boards/spike-prime-hub/src/etc/init.d/rcS
+ *
+ * NSH start-up script.  Auto-launches the btsensor daemon at console boot.
+ *
+ * Executed once by nsh_initscript() (idempotent via g_nsh_script_initialized)
+ * after BOARDCTL_INIT and BOARDCTL_FINALINIT have completed, so all kernel
+ * drivers are ready.  btnsh sessions reach NSH via nsh_session() directly
+ * and never re-enter this script.
+ ****************************************************************************/
+
+#include <nuttx/config.h>
+
+#ifdef CONFIG_APP_BTSENSOR
+btsensor start
+#endif
