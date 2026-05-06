@@ -83,6 +83,17 @@ void db_pid_pause(struct db_pid_state_s *st, bool paused)
   st->paused = paused;
 }
 
+void db_pid_stop_passive(struct db_pid_state_s *st)
+{
+  /* db_pid_reset() clears paused=false and done=false; reapply both
+   * here so the order dependency stays inside this helper.
+   */
+
+  db_pid_reset(st);
+  st->paused = true;
+  st->done   = true;
+}
+
 void db_pid_update(struct db_pid_state_s *st,
                    const struct db_pid_input_s *in,
                    struct db_pid_output_s *out)

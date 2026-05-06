@@ -105,6 +105,14 @@ void db_pid_init(struct db_pid_state_s *st);
 void db_pid_reset(struct db_pid_state_s *st);
 void db_pid_pause(struct db_pid_state_s *st, bool paused);
 
+/* Passive stop: clear integrator/error, freeze I update, mark done.
+ * Used when the controller transitions out of an active trajectory
+ * (explicit STOP) and the caller wants get-state.is_done == true while
+ * keeping PID inputs from re-driving the motor on the next tick.
+ */
+
+void db_pid_stop_passive(struct db_pid_state_s *st);
+
 void db_pid_update(struct db_pid_state_s *st,
                    const struct db_pid_input_s *in,
                    struct db_pid_output_s *out);

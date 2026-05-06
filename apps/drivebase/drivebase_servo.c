@@ -171,6 +171,12 @@ int db_servo_forever(struct db_servo_s *s,
 int db_servo_stop(struct db_servo_s *s, uint64_t now_us,
                   uint8_t on_completion)
 {
+  /* Explicit STOP is always immediate — SMART variants degrade to plain
+   * coast/brake here, since `smart_passive_hold_ms` is a *natural*
+   * completion behaviour and an explicit STOP is a cancel/abort.  The
+   * kernel-side fast path also maps `*_SMART` to coast/brake on STOP.
+   */
+
   s->trajectory_active   = false;
   s->prev_endpoint_valid = false;
   s->on_completion       = on_completion;
@@ -185,12 +191,14 @@ int db_servo_stop(struct db_servo_s *s, uint64_t now_us,
     {
       case DRIVEBASE_ON_COMPLETION_COAST:
       case DRIVEBASE_ON_COMPLETION_COAST_SMART:
+        db_pid_stop_passive(&s->pid);
         s->last_applied_duty = 0;
         s->last_actuation    = DRIVEBASE_ON_COMPLETION_COAST;
         return drivebase_motor_coast(s->side);
 
       case DRIVEBASE_ON_COMPLETION_BRAKE:
       case DRIVEBASE_ON_COMPLETION_BRAKE_SMART:
+        db_pid_stop_passive(&s->pid);
         s->last_applied_duty = 0;
         s->last_actuation    = DRIVEBASE_ON_COMPLETION_BRAKE;
         return drivebase_motor_brake(s->side);
@@ -249,20 +257,20 @@ int db_servo_update(struct db_servo_s *s, uint64_t now_us)
 
   s->t_last_us = now_us;
 
-  /* 2. Reference from trajectory (if any). */
+  /* 2. Reference from trajectory.  When no trajectory is armed (after
+   * an explicit STOP coast/brake), skip PID + actuation entirely so the
+   * coast/brake issued by db_servo_stop() is not overwritten on the
+   * next tick.  Encoder/observer were already updated above so status
+   * queries keep reporting fresh act_x_mdeg / act_v_mdegps.
+   */
+
+  if (!s->trajectory_active)
+    {
+      return 0;
+    }
 
   struct db_trajectory_ref_s ref = { 0 };
-  if (s->trajectory_active)
-    {
-      db_trajectory_get_reference(&s->trajectory, now_us, &ref);
-    }
-  else
-    {
-      ref.x_mdeg    = s->x_actual_mdeg;
-      ref.v_mdegps  = 0;
-      ref.a_mdegps2 = 0;
-      ref.done      = true;
-    }
+  db_trajectory_get_reference(&s->trajectory, now_us, &ref);
 
   /* 3. PID update. */
 
