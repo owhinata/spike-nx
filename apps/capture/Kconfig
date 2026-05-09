@@ -1,0 +1,42 @@
+#
+# apps/capture/Kconfig
+#
+# Capture library: a thin userspace wrapper around the kernel chardev
+# /dev/btcap (Issue #122).  Used by apps/sensor's `do_capture` and any
+# future capture client.  Has no MAIN/builtin of its own; toggling this
+# Kconfig just builds the helpers into the apps library.
+#
+
+config APP_CAPTURE
+	tristate "Userspace capture library (Issue #122)"
+	default n
+	depends on BOARD_BTCAP_CHARDEV
+	---help---
+		Wrapper around /dev/btcap that exposes the four-function
+		capture lifecycle (init / write / deinit / abort) plus the
+		.cap file header builder.  capture clients link this library
+		statically; the library itself produces no NSH builtin.
+
+if APP_CAPTURE
+
+config APP_CAPTURE_MAX_HANDLES
+	int "Maximum concurrent capture handles in this build"
+	default 1
+	---help---
+		Process-wide cap on simultaneously active capture_init() calls.
+		v1 ships with 1 (single-client, single-session) per the design;
+		this knob is here so a future feature can bump it without
+		touching every caller.  Library will reject capture_init beyond
+		this count with -EMFILE.
+
+config APP_CAPTURE_MAX_HEAP_BYTES
+	int "Default heap budget per capture invocation (bytes)"
+	default 32768
+	---help---
+		Advisory upper bound that capture clients (apps/sensor) use
+		when sizing their malloc() for a capture buffer.  Set to a
+		value that fits the worst-case usram budget on the target
+		board.  The library itself does not enforce this — it is
+		surfaced here so all clients agree on the same default.
+
+endif # APP_CAPTURE

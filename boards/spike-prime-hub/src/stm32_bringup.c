@@ -391,5 +391,15 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_BOARD_BTCAP_CHARDEV
+  ret = stm32_btcap_chardev_register();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "ERROR: stm32_btcap_chardev_register() failed: %d\n",
+             ret);
+    }
+#endif
+
   return ret;
 }

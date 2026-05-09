@@ -164,3 +164,29 @@ config BOARD_DRIVEBASE_CHARDEV
 		tools can poll DRIVEBASE_GET_STATUS at any time, while the
 		motion ioctls return -ENOTCONN until the daemon attaches.
 
+config BOARD_BTCAP_CHARDEV
+	bool "/dev/btcap kernel chardev for the capture pipeline"
+	default n
+	---help---
+		Kernel-resident pipe-style chardev that bridges the apps/capture
+		writer (driven from apps/sensor `do_capture`) to the btsensor
+		MODE CAPTURE reader (Issue #122).  A single session is in flight
+		at a time, mediated by a small ring (BOARD_BTCAP_RING_BYTES) so
+		writer and reader run in lockstep without staging the whole
+		capture in kernel memory.
+
+		Enable this for boards that need lossless sensor capture export
+		over BT.  The chardev itself adds no peripheral or IRQ resource;
+		only RAM (default 1 KiB ring + a small handle).
+
+config BOARD_BTCAP_RING_BYTES
+	int "Internal pipe ring size for /dev/btcap (bytes)"
+	default 1024
+	depends on BOARD_BTCAP_CHARDEV
+	---help---
+		Size of the kernel-side ring that synchronises the /dev/btcap
+		writer and reader.  256 B (one BT chunk) × 4 ≈ 1024 B is enough
+		to keep the BT-side paced sender from stalling without burning
+		extra ksram; tune higher only if a specific capture profile
+		shows excessive sleep/wake churn.
+

@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -40,11 +41,18 @@
 #include <arch/board/board_legosensor.h>
 #include <arch/board/board_lump.h>
 
+#ifdef CONFIG_APP_CAPTURE
+#  include "capture.h"
+#  include "capture_schema_color_reflection_run.h"
+#  include "capture_schema_color_rgbi_run.h"
+#endif
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
 
 #define WATCH_DEFAULT_MS    1000
+#define CAPTURE_DEFAULT_MS  1000
 #define SELECT_POLL_MS       500
 
 /****************************************************************************
@@ -617,6 +625,399 @@ static int do_fps(const struct class_entry_s *c, int duration_ms)
   return 0;
 }
 
+#ifdef CONFIG_APP_CAPTURE
+
+/****************************************************************************
+ * Private Functions — `<class> capture` (Issue #122)
+ *
+ * Records uORB samples into a heap buffer for the requested duration,
+ * then exports the buffer through /dev/btcap.  The export call blocks
+ * until the BT-side reader (btsensor MODE CAPTURE) drains the chardev,
+ * by design: there is no timeout knob, the user kills the task with
+ * `kill <pid>` if they no longer want the capture.
+ *
+ * Mode is implicit — we read the first sample to learn `mode_id`, then
+ * resolve the schema from a small `(class_id, mode_id)` table.  This
+ * matches the existing `select` -> `watch` workflow where the mode is
+ * configured separately from the per-call verb.
+ ****************************************************************************/
+
+/* SIGINT/SIGTERM abort flag.  Handler is flag-only (signal-async-safe);
+ * the capture loop polls this between samples to short-circuit a long
+ * `duration_ms`.  Per-task task-side double-invocation is prevented by
+ * the kernel chardev: REGISTER_SESSION returns -EBUSY when another
+ * session is in flight, so an apps-process-wide `g_capture_busy` is
+ * not needed (and would leak on `kill -9`).
+ */
+
+static volatile sig_atomic_t g_capture_aborting;
+
+struct capture_schema_entry_s
+{
+  enum legosensor_class_e        class_id;
+  uint8_t                        mode_id;
+  FAR const capture_schema_t    *schema;
+};
+
+static const struct capture_schema_entry_s g_capture_schemas[] =
+{
+  { LEGOSENSOR_CLASS_COLOR, 1, &g_capture_schema_color_reflection_run },
+  { LEGOSENSOR_CLASS_COLOR, 5, &g_capture_schema_color_rgbi_run        },
+};
+
+#define CAPTURE_SCHEMA_COUNT \
+  (int)(sizeof(g_capture_schemas) / sizeof(g_capture_schemas[0]))
+
+static FAR const capture_schema_t *
+resolve_capture_schema(enum legosensor_class_e class_id, uint8_t mode_id)
+{
+  for (int i = 0; i < CAPTURE_SCHEMA_COUNT; i++)
+    {
+      if (g_capture_schemas[i].class_id == class_id &&
+          g_capture_schemas[i].mode_id  == mode_id)
+        {
+          return g_capture_schemas[i].schema;
+        }
+    }
+
+  return NULL;
+}
+
+static void capture_sigint_handler(int sig)
+{
+  (void)sig;
+  g_capture_aborting = 1;
+}
+
+/* Translate a fresh `lump_sample_s` into a per-schema record.  The
+ * schema table is kept narrow (color reflection + color RGBI) for v1
+ * so a `switch` on schema magic is enough; the table grows in lock-
+ * step with new schemas.  Caller passes the running `t0` so every row
+ * carries a CLOCK_BOOTTIME-equivalent us timestamp.
+ */
+
+static int convert_sample(FAR const capture_schema_t *schema,
+                          FAR const struct lump_sample_s *s,
+                          uint64_t t0_us, uint64_t now_us,
+                          FAR void *out_record)
+{
+  uint32_t ts_us = (uint32_t)(now_us - t0_us);
+
+  if (schema->magic == 0x0010)         /* color_reflection_run */
+    {
+      struct capture_color_reflection_run_record_s rec = {0};
+      rec.ts_us          = ts_us;
+      rec.distance_mm    = 0;          /* reserved (future: drivebase) */
+
+      if (s->data_type == LUMP_DATA_INT8 && s->num_values >= 1)
+        {
+          int v = s->data.i8[0];
+          if (v < 0)   v = 0;
+          if (v > 100) v = 100;
+          rec.reflection_pct = (uint8_t)v;
+        }
+
+      memcpy(out_record, &rec, sizeof(rec));
+      return (int)sizeof(rec);
+    }
+
+  if (schema->magic == 0x0011)         /* color_rgbi_run */
+    {
+      struct capture_color_rgbi_run_record_s rec = {0};
+      rec.ts_us       = ts_us;
+      rec.distance_mm = 0;
+
+      if (s->data_type == LUMP_DATA_INT8 && s->num_values >= 4)
+        {
+          rec.red       = (uint8_t)(s->data.i8[0] < 0 ? 0 : s->data.i8[0]);
+          rec.green     = (uint8_t)(s->data.i8[1] < 0 ? 0 : s->data.i8[1]);
+          rec.blue      = (uint8_t)(s->data.i8[2] < 0 ? 0 : s->data.i8[2]);
+          rec.intensity = (uint8_t)(s->data.i8[3] < 0 ? 0 : s->data.i8[3]);
+        }
+
+      memcpy(out_record, &rec, sizeof(rec));
+      return (int)sizeof(rec);
+    }
+
+  return -ENOTSUP;
+}
+
+static int do_capture(const struct class_entry_s *c, int duration_ms)
+{
+  int rc = 0;
+  int sensor_fd = -1;
+  uint8_t *buf  = NULL;
+  size_t bufsize = 0;
+  size_t offset  = 0;
+  bool sigint_installed = false;
+  bool sigterm_installed = false;
+  bool init_done = false;
+  capture_handle_t h;
+  struct sigaction old_sa;
+  struct sigaction old_term_sa;
+
+  /* 2. Open the uORB topic and read the first sample to learn the
+   * current mode (`select` is a separate verb).
+   */
+
+  sensor_fd = open(c->path, O_RDONLY | O_NONBLOCK);
+  if (sensor_fd < 0)
+    {
+      fprintf(stderr, "open(%s): %s\n", c->path, strerror(errno));
+      rc = -errno;
+      goto out;
+    }
+
+  struct pollfd pfd = { .fd = sensor_fd, .events = POLLIN };
+  struct lump_sample_s first;
+
+  /* Wait up to the user's duration for the first sample.  If the LUMP
+   * port has not finished syncing yet we time out and bail rather than
+   * blocking forever.
+   */
+
+  int pr = poll(&pfd, 1, duration_ms);
+  if (pr <= 0 || (pfd.revents & POLLIN) == 0)
+    {
+      fprintf(stderr, "capture: no sample within %d ms\n", duration_ms);
+      rc = -ETIMEDOUT;
+      goto out;
+    }
+
+  ssize_t n = read(sensor_fd, &first, sizeof(first));
+  if (n != sizeof(first))
+    {
+      fprintf(stderr, "capture: short read (%ld)\n", (long)n);
+      rc = -EIO;
+      goto out;
+    }
+
+  /* 3. Resolve the (class, mode) -> schema. */
+
+  FAR const capture_schema_t *schema =
+    resolve_capture_schema(c->id, first.mode_id);
+  if (schema == NULL)
+    {
+      fprintf(stderr,
+              "capture: no schema for class=%s mode=%u\n",
+              c->name, first.mode_id);
+      rc = -ENOENT;
+      goto out;
+    }
+
+  /* 4. Heap budget.  rate_hz_hint * duration_ms / 1000 with 1.5x
+   * head-room, capped by CONFIG_APP_CAPTURE_MAX_HEAP_BYTES.
+   */
+
+  uint32_t records_est = (schema->rate_hz_hint > 0)
+    ? ((uint32_t)duration_ms * schema->rate_hz_hint + 999) / 1000 + 16
+    : 256;
+
+  bufsize = (size_t)records_est * schema->record_size;
+  if (bufsize > CONFIG_APP_CAPTURE_MAX_HEAP_BYTES)
+    {
+      bufsize = CONFIG_APP_CAPTURE_MAX_HEAP_BYTES
+              / schema->record_size * schema->record_size;
+    }
+
+  if (bufsize < schema->record_size)
+    {
+      fprintf(stderr, "capture: record_size > MAX_HEAP_BYTES\n");
+      rc = -EINVAL;
+      goto out;
+    }
+
+  buf = (uint8_t *)malloc(bufsize);
+  if (buf == NULL)
+    {
+      fprintf(stderr, "capture: malloc(%zu) failed\n", bufsize);
+      rc = -ENOMEM;
+      goto out;
+    }
+
+  /* 5. SIGINT / SIGTERM handler (flag-only).  NuttX has no default
+   * "terminate task" action for SIGTERM, so without a handler `kill
+   * <pid>` (which sends SIGTERM) leaves the task stuck in usleep.  We
+   * catch both and let the loop / capture_deinit observe `g_aborting`
+   * to wind down cleanly.  `kill -9` (SIGKILL) is still the escape
+   * hatch — the kernel release fop reclaims /dev/btcap regardless.
+   */
+
+  struct sigaction new_sa = {0};
+  new_sa.sa_handler = capture_sigint_handler;
+  sigemptyset(&new_sa.sa_mask);
+
+  if (sigaction(SIGINT, &new_sa, &old_sa) == 0)
+    {
+      sigint_installed = true;
+    }
+
+  if (sigaction(SIGTERM, &new_sa, &old_term_sa) == 0)
+    {
+      sigterm_installed = true;
+    }
+
+  /* 6. Capture phase.  The first sample we already read becomes the
+   * first row; subsequent rows come from the poll loop.  CLOCK_BOOTTIME
+   * timestamps are relative to the first sample so the .cap viewer
+   * gets a 0-based time axis.
+   */
+
+  struct timespec ts_now;
+  clock_gettime(CLOCK_BOOTTIME, &ts_now);
+  uint64_t t0_us = (uint64_t)ts_now.tv_sec * 1000000ull
+                 + (uint64_t)ts_now.tv_nsec / 1000ull;
+  uint64_t now_us = t0_us;
+
+  int rec_bytes = convert_sample(schema, &first, t0_us, now_us,
+                                 &buf[offset]);
+  if (rec_bytes < 0)
+    {
+      rc = rec_bytes;
+      goto out;
+    }
+
+  offset += (size_t)rec_bytes;
+
+  while (!g_capture_aborting && (offset + schema->record_size) <= bufsize)
+    {
+      clock_gettime(CLOCK_BOOTTIME, &ts_now);
+      uint64_t cur_us = (uint64_t)ts_now.tv_sec * 1000000ull
+                      + (uint64_t)ts_now.tv_nsec / 1000ull;
+
+      long elapsed_ms = (long)((cur_us - t0_us) / 1000ull);
+      if (elapsed_ms >= duration_ms)
+        {
+          break;
+        }
+
+      int remaining_ms = duration_ms - (int)elapsed_ms;
+      pr = poll(&pfd, 1, remaining_ms);
+      if (pr < 0)
+        {
+          if (errno == EINTR) continue;
+          rc = -errno;
+          break;
+        }
+
+      if (pr == 0)
+        {
+          break;
+        }
+
+      struct lump_sample_s s;
+      n = read(sensor_fd, &s, sizeof(s));
+      if (n != sizeof(s))
+        {
+          continue;
+        }
+
+      if (s.mode_id != first.mode_id)
+        {
+          fprintf(stderr,
+                  "capture: mode changed mid-capture (was %u, now %u)\n",
+                  first.mode_id, s.mode_id);
+          rc = -EILSEQ;
+          break;
+        }
+
+      clock_gettime(CLOCK_BOOTTIME, &ts_now);
+      now_us = (uint64_t)ts_now.tv_sec * 1000000ull
+             + (uint64_t)ts_now.tv_nsec / 1000ull;
+
+      rec_bytes = convert_sample(schema, &s, t0_us, now_us, &buf[offset]);
+      if (rec_bytes < 0)
+        {
+          rc = rec_bytes;
+          break;
+        }
+
+      offset += (size_t)rec_bytes;
+    }
+
+  if (rc < 0)
+    {
+      goto out;
+    }
+
+  uint32_t nrec = (uint32_t)(offset / schema->record_size);
+  if (nrec == 0)
+    {
+      fprintf(stderr, "capture: no records collected\n");
+      rc = -ENODATA;
+      goto out;
+    }
+
+  printf("capture: %lu records over %d ms (schema=%s)\n",
+         (unsigned long)nrec, duration_ms, schema->name);
+  printf("capture: waiting for `btsensor mode capture` (or BT MODE "
+         "CAPTURE) to drain /dev/btcap...\n");
+
+  /* 7. Export.  capture_write() blocks until the reader engages — that
+   * is the user's cue to invoke `btsensor mode capture` from a second
+   * NSH session (or send `MODE CAPTURE` over BT).
+   */
+
+  rc = capture_init(&h, schema, nrec);
+  if (rc < 0)
+    {
+      fprintf(stderr, "capture_init: %d\n", rc);
+      goto out;
+    }
+
+  init_done = true;
+
+  rc = capture_write(&h, buf, (size_t)nrec * schema->record_size);
+  if (rc < 0)
+    {
+      fprintf(stderr, "capture_write: %d\n", rc);
+      capture_abort(&h);
+      init_done = false;
+      goto out;
+    }
+
+  rc = capture_deinit(&h);
+  init_done = false;
+  if (rc < 0)
+    {
+      fprintf(stderr, "capture_deinit: %d\n", rc);
+      goto out;
+    }
+
+  printf("capture: done\n");
+
+out:
+  if (init_done)
+    {
+      capture_abort(&h);
+    }
+
+  if (sigint_installed)
+    {
+      sigaction(SIGINT, &old_sa, NULL);
+    }
+
+  if (sigterm_installed)
+    {
+      sigaction(SIGTERM, &old_term_sa, NULL);
+    }
+
+  if (buf != NULL)
+    {
+      free(buf);
+    }
+
+  if (sensor_fd >= 0)
+    {
+      close(sensor_fd);
+    }
+
+  g_capture_aborting = 0;
+  return rc;
+}
+
+#endif /* CONFIG_APP_CAPTURE */
+
 static int do_select(const struct class_entry_s *c, uint8_t mode)
 {
   int fd = open(c->path, O_RDONLY | O_NONBLOCK);
@@ -875,6 +1276,10 @@ static void usage(void)
           "  sensor <class> status                  engine + traffic counters\n"
           "  sensor <class> watch [ms]              decode samples (default 1000)\n"
           "  sensor <class> fps [ms]                rate-only count, no per-sample print\n"
+#ifdef CONFIG_APP_CAPTURE
+          "  sensor <class> capture [ms]            capture to /dev/btcap (Issue #122);\n"
+          "                                         needs `btsensor mode capture` to drain\n"
+#endif
           "  sensor <class> select <mode>           SELECT mode\n"
           "  sensor <class> send <mode> <hex>...    SEND writable-mode payload\n"
           "  sensor <class> pwm <ch0> [ch1 ch2 ch3] LED brightness / motor duty\n"
@@ -957,6 +1362,22 @@ int main(int argc, FAR char *argv[])
         }
       return do_fps(c, ms) < 0 ? 1 : 0;
     }
+
+#ifdef CONFIG_APP_CAPTURE
+  if (strcmp(verb, "capture") == 0)
+    {
+      int ms = CAPTURE_DEFAULT_MS;
+      if (argc >= 4)
+        {
+          ms = atoi(argv[3]);
+          if (ms <= 0)
+            {
+              ms = CAPTURE_DEFAULT_MS;
+            }
+        }
+      return do_capture(c, ms) < 0 ? 1 : 0;
+    }
+#endif
 
   if (strcmp(verb, "select") == 0)
     {

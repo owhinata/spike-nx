@@ -375,5 +375,23 @@ int stm32_legoport_pwm_brake(int idx);
 int stm32_drivebase_chardev_register(void);
 #endif
 
+#ifdef CONFIG_BOARD_BTCAP_CHARDEV
+/****************************************************************************
+ * Name: stm32_btcap_chardev_register
+ *
+ * Description:
+ *   Register /dev/btcap, the kernel-resident pipe-style chardev that
+ *   carries lossless capture sessions from the apps/capture writer to
+ *   the btsensor MODE CAPTURE reader (Issue #122).  Single-instance,
+ *   single open per direction, internal ring buffer
+ *   (CONFIG_BOARD_BTCAP_RING_BYTES, default 1024 B).
+ *
+ * Returned Value:
+ *   Zero on success, negated errno on failure.
+ ****************************************************************************/
+
+int stm32_btcap_chardev_register(void);
+#endif
+
 #endif /* __ASSEMBLY__ */
 #endif /* __BOARDS_SPIKE_PRIME_HUB_SRC_SPIKE_PRIME_HUB_H */
