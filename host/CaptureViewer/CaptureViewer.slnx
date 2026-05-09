@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CaptureViewer.Core/CaptureViewer.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CaptureViewer.Core.Tests/CaptureViewer.Core.Tests.csproj" />
+  </Folder>
+</Solution>
