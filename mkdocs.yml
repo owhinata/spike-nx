@@ -83,6 +83,8 @@ nav:
       - development/nsh-boot-script.md
       - development/pc-receive-spp.md
       - development/bt-nsh-shell.md
+      - development/capture.md
+      - development/capture-schemas.md
   - NuttX:
       - nuttx/f413-support.md
       - nuttx/tickless-timer.md
