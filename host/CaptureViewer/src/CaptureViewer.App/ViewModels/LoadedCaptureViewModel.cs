@@ -25,6 +25,7 @@ namespace CaptureViewer.App.ViewModels;
 public sealed partial class LoadedCaptureViewModel : ObservableObject
 {
     private readonly Func<LoadedCaptureViewModel, Task>? _exportCsv;
+    private readonly Action<LoadedCaptureViewModel>? _remove;
 
     public CaptureFile Capture { get; }
 
@@ -49,13 +50,15 @@ public sealed partial class LoadedCaptureViewModel : ObservableObject
         CaptureFile capture,
         string label,
         uint colorArgb,
-        Func<LoadedCaptureViewModel, Task>? exportCsv = null)
+        Func<LoadedCaptureViewModel, Task>? exportCsv = null,
+        Action<LoadedCaptureViewModel>? remove = null)
     {
         Capture = capture;
         Label = label;
         ColorArgb = colorArgb;
         ColorBrush = new SolidColorBrush(Color.FromUInt32(colorArgb));
         _exportCsv = exportCsv;
+        _remove = remove;
     }
 
     public string SchemaName => Capture.SchemaName;
@@ -65,4 +68,7 @@ public sealed partial class LoadedCaptureViewModel : ObservableObject
     [RelayCommand]
     private Task ExportCsv() =>
         _exportCsv?.Invoke(this) ?? Task.CompletedTask;
+
+    [RelayCommand]
+    private void Remove() => _remove?.Invoke(this);
 }

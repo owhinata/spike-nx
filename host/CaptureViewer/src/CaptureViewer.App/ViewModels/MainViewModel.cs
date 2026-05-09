@@ -12,6 +12,21 @@ using CommunityToolkit.Mvvm.Input;
 
 namespace CaptureViewer.App.ViewModels;
 
+/// <summary>How the time axis is laid out across multiple captures.</summary>
+public enum TimeAxisMode
+{
+    /// <summary>Each capture starts at t=0 (good for shape comparison).</summary>
+    Relative,
+
+    /// <summary>
+    /// All captures share a wall-clock-equivalent timeline: the
+    /// earliest <c>start_ts_us</c> among the visible captures becomes
+    /// t=0 and later captures' samples shift right by their
+    /// <c>start_ts_us</c> delta.  Useful for back-to-back run timelines.
+    /// </summary>
+    Sequence,
+}
+
 /// <summary>
 /// Top-level VM.  Holds the list of loaded captures, the selected
 /// channel/field name, and the BT connection state.  The view binds
@@ -35,13 +50,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         0xFFE090C0u,    // pink
     ];
 
-    private readonly BtConnection _btConnection;
-    private readonly CaptureFileWriter _captureWriter;
+    private BtConnection _btConnection;
+    private CaptureFileWriter _captureWriter;
     private int _liveCounter;
 
     public ObservableCollection<LoadedCaptureViewModel> Loaded { get; } = new();
     public ObservableCollection<string> LogLines { get; } = new();
     public ObservableCollection<string> AvailableFields { get; } = new();
+
+    public IReadOnlyList<TimeAxisMode> TimeAxisModes { get; } =
+        new[] { TimeAxisMode.Relative, TimeAxisMode.Sequence };
 
     [ObservableProperty]
     private string _bdAddr = string.Empty;
@@ -55,10 +73,25 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private string? _selectedFieldName;
 
     [ObservableProperty]
+    private TimeAxisMode _timeAxis = TimeAxisMode.Relative;
+
+    [ObservableProperty]
     private bool _isConnected;
 
     [ObservableProperty]
     private string _statusText = "Idle";
+
+    /// <summary>
+    /// Color shown next to the BT bar — green when connected, gray
+    /// otherwise.  The view binds <c>BtIndicatorBrush</c> to a Border
+    /// fill.
+    /// </summary>
+    public Avalonia.Media.IBrush BtIndicatorBrush =>
+        IsConnected
+            ? new Avalonia.Media.SolidColorBrush(
+                Avalonia.Media.Color.FromUInt32(0xFF80E090))
+            : new Avalonia.Media.SolidColorBrush(
+                Avalonia.Media.Color.FromUInt32(0xFF606060));
 
     /// <summary>
     /// Raised whenever the plot needs to redraw — new capture loaded,
@@ -76,10 +109,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     [RelayCommand]
     private async Task OpenFileAsync()
     {
-        var top = Avalonia.Application.Current?.ApplicationLifetime
-            is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
-            ? desktop.MainWindow
-            : null;
+        var top = GetMainWindow();
         if (top is null) return;
 
         var files = await top.StorageProvider.OpenFilePickerAsync(
@@ -98,18 +128,55 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
         foreach (var file in files)
         {
-            try
-            {
-                var path = file.Path.LocalPath;
-                var bytes = await File.ReadAllBytesAsync(path);
-                AddCapture(CaptureFile.Parse(bytes), Path.GetFileName(path));
-            }
-            catch (Exception ex)
-            {
-                AppendLog($"Open failed: {ex.Message}");
-            }
+            await LoadCaptureFromPathAsync(file.Path.LocalPath);
         }
     }
+
+    /// <summary>
+    /// Parse a single .cap file and add it to <see cref="Loaded"/>.
+    /// Used by both the file-picker command and the drag-drop handler
+    /// in MainWindow.axaml.cs.  Errors are surfaced through the log
+    /// pane only — the rest of the workflow keeps running.
+    /// </summary>
+    public async Task LoadCaptureFromPathAsync(string path)
+    {
+        try
+        {
+            var bytes = await File.ReadAllBytesAsync(path);
+            AddCapture(CaptureFile.Parse(bytes), Path.GetFileName(path));
+            StatusText =
+                $"Loaded {Path.GetFileName(path)} ({Loaded[^1].Capture.SchemaName}, " +
+                $"{Loaded[^1].Capture.RecordCount} records)";
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Open `{path}` failed: {ex.Message}");
+        }
+    }
+
+    [RelayCommand]
+    private async Task BrowseSaveDirAsync()
+    {
+        var top = GetMainWindow();
+        if (top is null) return;
+
+        var folders = await top.StorageProvider.OpenFolderPickerAsync(
+            new Avalonia.Platform.Storage.FolderPickerOpenOptions
+            {
+                Title = "Choose a folder for live BT captures",
+                AllowMultiple = false,
+            });
+
+        if (folders.Count == 0) return;
+        var picked = folders[0].Path.LocalPath;
+        OutputDirectory = picked;
+    }
+
+    private static Avalonia.Controls.Window? GetMainWindow() =>
+        Avalonia.Application.Current?.ApplicationLifetime
+            is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
+            ? desktop.MainWindow
+            : null;
 
     [RelayCommand]
     private void ClearAll()
@@ -137,6 +204,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        // Refresh the live counter so each connect session starts at
+        // "live #1".  The counter is per-VM, not per-row, so without
+        // this reconnects would silently keep counting up.
+        _liveCounter = 0;
+
+        // Re-create the writer in case OutputDirectory changed since
+        // the App started.  Cheap (mkdir -p only).
+        _captureWriter = new CaptureFileWriter(OutputDirectory);
+
         try
         {
             StatusText = $"Connecting to {BdAddr}...";
@@ -157,6 +233,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private async Task DisconnectAsync()
     {
         await _btConnection.DisposeAsync();
+        // Replace the connection so a subsequent Connect is fresh.
+        _btConnection = new BtConnection(OnLiveSession, AppendLog);
         IsConnected = false;
         StatusText = "Disconnected";
     }
@@ -185,10 +263,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     /// </summary>
     private async Task ExportRowCsvAsync(LoadedCaptureViewModel row)
     {
-        var top = Avalonia.Application.Current?.ApplicationLifetime
-            is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
-            ? desktop.MainWindow
-            : null;
+        var top = GetMainWindow();
         if (top is null) return;
 
         var file = await top.StorageProvider.SaveFilePickerAsync(
@@ -210,6 +285,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         {
             AppendLog($"CSV export failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Drop a single capture from the loaded list.  Wired per-row in
+    /// <see cref="AddCapture"/>.
+    /// </summary>
+    private void RemoveRow(LoadedCaptureViewModel row)
+    {
+        if (!Loaded.Remove(row)) return;
+        RefreshAvailableFields();
+        StatusText = $"Removed {row.Label}";
+        PlotInvalidated?.Invoke();
     }
 
     public async ValueTask DisposeAsync()
@@ -244,11 +331,18 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private void AddCapture(CaptureFile capture, string label)
     {
         var color = Palette[Loaded.Count % Palette.Length];
-        Loaded.Add(new LoadedCaptureViewModel(capture, label, color, ExportRowCsvAsync));
+        Loaded.Add(new LoadedCaptureViewModel(
+            capture, label, color, ExportRowCsvAsync, RemoveRow));
+        RefreshAvailableFields();
+        StatusText = $"Loaded {label} ({capture.SchemaName}, {capture.RecordCount} records)";
+        PlotInvalidated?.Invoke();
+    }
 
-        // Refresh the field selector with the union of all currently
-        // loaded captures' field names (excluding ts_us, which is the
-        // x-axis).
+    private void RefreshAvailableFields()
+    {
+        // Re-derive the field selector from the union of every still-
+        // loaded capture's fields.  Drops `ts_us` since that is always
+        // the x-axis.
         var union = new SortedSet<string>(StringComparer.Ordinal);
         foreach (var lc in Loaded)
         {
@@ -257,15 +351,21 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
                 if (f.Name != "ts_us") union.Add(f.Name);
             }
         }
+
+        var oldSelected = SelectedFieldName;
         AvailableFields.Clear();
         foreach (var name in union) AvailableFields.Add(name);
-        if (SelectedFieldName is null && AvailableFields.Count > 0)
-        {
-            SelectedFieldName = AvailableFields[0];
-        }
 
-        StatusText = $"Loaded {label} ({capture.SchemaName}, {capture.RecordCount} records)";
-        PlotInvalidated?.Invoke();
+        if (oldSelected is not null && AvailableFields.Contains(oldSelected))
+        {
+            SelectedFieldName = oldSelected;
+        }
+        else
+        {
+            SelectedFieldName = AvailableFields.Count > 0
+                ? AvailableFields[0]
+                : null;
+        }
     }
 
     private void AppendLog(string line)
@@ -282,10 +382,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         PlotInvalidated?.Invoke();
     }
 
+    partial void OnTimeAxisChanged(TimeAxisMode value)
+    {
+        PlotInvalidated?.Invoke();
+    }
+
     partial void OnIsConnectedChanged(bool value)
     {
         ConnectCommand.NotifyCanExecuteChanged();
         DisconnectCommand.NotifyCanExecuteChanged();
         TriggerCaptureModeCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(BtIndicatorBrush));
     }
 }

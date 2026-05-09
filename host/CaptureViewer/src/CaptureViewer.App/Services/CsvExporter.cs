@@ -20,9 +20,20 @@ public static class CsvExporter
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
         var sb = new StringBuilder();
+        var ci = CultureInfo.InvariantCulture;
+
+        // Locate ts_us so we can synthesize a friendlier `t_seconds`
+        // column up front.  Plot tools (gnuplot / Excel / pandas) are
+        // happier with seconds than with microseconds-as-int.
+        FieldDescriptor? tsField = null;
+        foreach (var f in capture.Fields)
+        {
+            if (f.Name == "ts_us") { tsField = f; break; }
+        }
 
         // Header row
-        var headers = new List<string>(capture.Fields.Count);
+        var headers = new List<string>(capture.Fields.Count + 1);
+        if (tsField is not null) headers.Add("t_seconds");
         foreach (var f in capture.Fields)
         {
             headers.Add(string.IsNullOrEmpty(f.Unit)
@@ -32,11 +43,16 @@ public static class CsvExporter
         sb.AppendLine(string.Join(",", headers));
 
         // Rows
-        var ci = CultureInfo.InvariantCulture;
         for (var i = 0; i < capture.RecordCount; i++)
         {
             var rec = capture.Records(i).Span;
             var first = true;
+            if (tsField is not null)
+            {
+                var tsec = FieldReader.ReadRawDouble(rec, tsField) / 1_000_000.0;
+                sb.Append(tsec.ToString("G", ci));
+                first = false;
+            }
             foreach (var f in capture.Fields)
             {
                 if (!first) sb.Append(',');

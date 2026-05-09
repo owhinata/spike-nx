@@ -29,99 +29,162 @@
       <Setter Property="VerticalAlignment" Value="Center" />
       <Setter Property="CornerRadius" Value="2" />
     </Style>
+    <Style Selector="Border.statusDot">
+      <Setter Property="Width" Value="9" />
+      <Setter Property="Height" Value="9" />
+      <Setter Property="CornerRadius" Value="5" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Margin" Value="0,0,6,0" />
+    </Style>
   </Window.Styles>
 
   <Grid ColumnDefinitions="320,*" RowDefinitions="*,Auto">
 
-    <!-- Left sidebar -->
-    <ScrollViewer Grid.Column="0" Grid.Row="0" Background="#222222" Padding="12">
-      <StackPanel Spacing="6">
+    <!-- Left sidebar — outer Grid keeps the log pinned to a fixed
+         height at the bottom while the rest scrolls.  This stops the
+         log from elbowing the loaded-captures list out of view once
+         a few hundred lines pile up. -->
+    <Grid Grid.Column="0" Grid.Row="0" Background="#222222"
+          RowDefinitions="*,180">
 
-        <TextBlock Classes="header" Text="Files" />
-        <StackPanel Orientation="Horizontal" Spacing="6">
-          <Button Content="Open .cap..."
-                  Command="{Binding OpenFileCommand}" />
-          <Button Content="Clear all"
-                  Command="{Binding ClearAllCommand}" />
-        </StackPanel>
+      <ScrollViewer Grid.Row="0" Padding="12,12,12,4">
+        <StackPanel Spacing="6">
 
-        <TextBlock Classes="header" Text="Bluetooth (Linux only)" />
-        <StackPanel Spacing="4">
-          <TextBox Watermark="BD addr (XX:XX:XX:XX:XX:XX)"
-                   Text="{Binding BdAddr, Mode=TwoWay}" />
+          <TextBlock Classes="header" Text="Files" />
           <StackPanel Orientation="Horizontal" Spacing="6">
-            <Button Content="Connect"
-                    Command="{Binding ConnectCommand}" />
-            <Button Content="Disconnect"
-                    Command="{Binding DisconnectCommand}" />
+            <Button Content="Open .cap..."
+                    Command="{Binding OpenFileCommand}" />
+            <Button Content="Clear all"
+                    Command="{Binding ClearAllCommand}" />
           </StackPanel>
-          <Button Content="Send `MODE CAPTURE`"
-                  Command="{Binding TriggerCaptureModeCommand}" />
-        </StackPanel>
+          <TextBlock Classes="label"
+                     Text="(or drag &amp; drop .cap files onto the plot area)" />
 
-        <TextBlock Classes="label" Text="Save dir" />
-        <TextBox Text="{Binding OutputDirectory, Mode=TwoWay}"
-                 IsEnabled="False" />
+          <Grid ColumnDefinitions="Auto,*" Margin="0,8,0,4">
+            <Border Grid.Column="0" Classes="statusDot"
+                    Background="{Binding BtIndicatorBrush}" />
+            <TextBlock Grid.Column="1"
+                       Classes="header" Margin="0"
+                       Text="Bluetooth (Linux only)" />
+          </Grid>
+          <StackPanel Spacing="4">
+            <TextBox Watermark="BD addr (XX:XX:XX:XX:XX:XX)"
+                     Text="{Binding BdAddr, Mode=TwoWay}" />
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <Button Content="Connect"
+                      Command="{Binding ConnectCommand}" />
+              <Button Content="Disconnect"
+                      Command="{Binding DisconnectCommand}" />
+            </StackPanel>
+            <Button Content="Send `MODE CAPTURE`"
+                    Command="{Binding TriggerCaptureModeCommand}" />
+          </StackPanel>
 
-        <TextBlock Classes="header" Text="Loaded captures" />
-        <ItemsControl ItemsSource="{Binding Loaded}">
-          <ItemsControl.ItemTemplate>
-            <DataTemplate x:DataType="vm:LoadedCaptureViewModel">
-              <Border Background="#2A2A2A"
-                      Padding="6"
-                      Margin="0,0,0,4"
-                      CornerRadius="3">
-                <StackPanel Spacing="2">
-                  <StackPanel Orientation="Horizontal" Spacing="0">
-                    <Border Classes="swatch" Background="{Binding ColorBrush}" />
-                    <CheckBox IsChecked="{Binding IsVisible, Mode=TwoWay}"
-                              VerticalAlignment="Center" />
-                    <TextBlock Classes="value"
-                               Text="{Binding Label}"
-                               Margin="6,0,0,0"
-                               VerticalAlignment="Center" />
+          <TextBlock Classes="label" Text="Save dir" />
+          <Grid ColumnDefinitions="*,Auto" >
+            <TextBox Grid.Column="0"
+                     Text="{Binding OutputDirectory, Mode=TwoWay}" />
+            <Button Grid.Column="1" Content="..."
+                    Margin="4,0,0,0"
+                    Command="{Binding BrowseSaveDirCommand}" />
+          </Grid>
+
+          <TextBlock Classes="header" Text="Loaded captures" />
+          <ItemsControl ItemsSource="{Binding Loaded}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:LoadedCaptureViewModel">
+                <Border Background="#2A2A2A"
+                        Padding="6"
+                        Margin="0,0,0,4"
+                        CornerRadius="3">
+                  <StackPanel Spacing="2">
+                    <Grid ColumnDefinitions="Auto,Auto,*,Auto">
+                      <Border Grid.Column="0" Classes="swatch"
+                              Background="{Binding ColorBrush}" />
+                      <CheckBox Grid.Column="1"
+                                IsChecked="{Binding IsVisible, Mode=TwoWay}"
+                                VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="2"
+                                 Classes="value"
+                                 Text="{Binding Label}"
+                                 Margin="6,0,0,0"
+                                 VerticalAlignment="Center"
+                                 TextTrimming="CharacterEllipsis" />
+                      <Button Grid.Column="3" Content="X"
+                              Padding="6,1"
+                              FontSize="10"
+                              ToolTip.Tip="Remove this capture from the list"
+                              Command="{Binding RemoveCommand}" />
+                    </Grid>
+                    <TextBlock Classes="label"
+                               Text="{Binding SchemaName, StringFormat='schema: {0}'}" />
+                    <TextBlock Classes="label"
+                               Text="{Binding RecordCount, StringFormat='records: {0}'}" />
+                    <Button Content="CSV..."
+                            Padding="4,1"
+                            HorizontalAlignment="Left"
+                            Command="{Binding ExportCsvCommand}" />
                   </StackPanel>
-                  <TextBlock Classes="label"
-                             Text="{Binding SchemaName, StringFormat='schema: {0}'}" />
-                  <TextBlock Classes="label"
-                             Text="{Binding RecordCount, StringFormat='records: {0}'}" />
-                  <Button Content="CSV..."
-                          Padding="4,1"
-                          HorizontalAlignment="Left"
-                          Command="{Binding ExportCsvCommand}" />
-                </StackPanel>
-              </Border>
-            </DataTemplate>
-          </ItemsControl.ItemTemplate>
-        </ItemsControl>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
 
-        <TextBlock Classes="header" Text="Log" />
-        <ItemsControl ItemsSource="{Binding LogLines}">
-          <ItemsControl.ItemTemplate>
-            <DataTemplate>
-              <TextBlock Classes="value"
-                         FontSize="10"
-                         Text="{Binding}"
-                         TextWrapping="Wrap" />
-            </DataTemplate>
-          </ItemsControl.ItemTemplate>
-        </ItemsControl>
+        </StackPanel>
+      </ScrollViewer>
 
-      </StackPanel>
-    </ScrollViewer>
+      <!-- Log pane: fixed-height scroller pinned at the bottom of the
+           sidebar so it does not push the rest of the controls
+           around. -->
+      <Border Grid.Row="1" Background="#181818"
+              Padding="8,4" BorderBrush="#303030" BorderThickness="0,1,0,0">
+        <Grid RowDefinitions="Auto,*">
+          <TextBlock Grid.Row="0" Classes="header"
+                     Margin="0,0,0,4" Text="Log" />
+          <ScrollViewer Grid.Row="1"
+                        x:Name="LogScroller"
+                        HorizontalScrollBarVisibility="Disabled"
+                        VerticalScrollBarVisibility="Auto">
+            <ItemsControl ItemsSource="{Binding LogLines}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <TextBlock Classes="value"
+                             FontSize="10"
+                             Text="{Binding}"
+                             TextWrapping="Wrap" />
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </Grid>
+      </Border>
+    </Grid>
 
-    <!-- Plot area -->
-    <Grid Grid.Column="1" Grid.Row="0" RowDefinitions="Auto,*"
-          Background="#1A1A1A" Margin="6">
+    <!-- Plot area (also accepts .cap drag-and-drop). -->
+    <Grid Grid.Column="1" Grid.Row="0"
+          x:Name="PlotHost"
+          Background="#1A1A1A" Margin="6"
+          RowDefinitions="Auto,*"
+          DragDrop.AllowDrop="True">
       <StackPanel Grid.Row="0" Orientation="Horizontal"
-                  Spacing="8" Margin="0,0,0,6">
-        <TextBlock Classes="label" Text="Field:" VerticalAlignment="Center" />
-        <ComboBox MinWidth="180"
-                  ItemsSource="{Binding AvailableFields}"
-                  SelectedItem="{Binding SelectedFieldName, Mode=TwoWay}"
-                  PlaceholderText="(no field)" />
+                  Spacing="12" Margin="0,0,0,6">
+        <StackPanel Orientation="Horizontal" Spacing="6"
+                    VerticalAlignment="Center">
+          <TextBlock Classes="label" Text="Field:" VerticalAlignment="Center" />
+          <ComboBox MinWidth="180"
+                    ItemsSource="{Binding AvailableFields}"
+                    SelectedItem="{Binding SelectedFieldName, Mode=TwoWay}"
+                    PlaceholderText="(no field)" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="6"
+                    VerticalAlignment="Center">
+          <TextBlock Classes="label" Text="Time axis:" VerticalAlignment="Center" />
+          <ComboBox MinWidth="120"
+                    ItemsSource="{Binding TimeAxisModes}"
+                    SelectedItem="{Binding TimeAxis, Mode=TwoWay}" />
+        </StackPanel>
       </StackPanel>
-      <scp:AvaPlot x:Name="AvaPlot1" Grid.Row="1" />
+      <scp:AvaPlot Grid.Row="1" x:Name="AvaPlot1" />
     </Grid>
 
     <!-- Status bar -->
