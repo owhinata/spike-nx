@@ -176,10 +176,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    [RelayCommand]
-    private async Task ExportSelectedCsvAsync(LoadedCaptureViewModel? row)
+    /// <summary>
+    /// Invoked by the per-row CSV button — pops a save-file picker
+    /// and writes the selected capture out as CSV.  Wired into each
+    /// <see cref="LoadedCaptureViewModel"/> at construction time so
+    /// the row VM can bind to a local command and dodge Avalonia's
+    /// cross-DataTemplate binding cast issue.
+    /// </summary>
+    private async Task ExportRowCsvAsync(LoadedCaptureViewModel row)
     {
-        if (row is null) return;
         var top = Avalonia.Application.Current?.ApplicationLifetime
             is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
             ? desktop.MainWindow
@@ -239,7 +244,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private void AddCapture(CaptureFile capture, string label)
     {
         var color = Palette[Loaded.Count % Palette.Length];
-        Loaded.Add(new LoadedCaptureViewModel(capture, label, color));
+        Loaded.Add(new LoadedCaptureViewModel(capture, label, color, ExportRowCsvAsync));
 
         // Refresh the field selector with the union of all currently
         // loaded captures' field names (excluding ts_us, which is the

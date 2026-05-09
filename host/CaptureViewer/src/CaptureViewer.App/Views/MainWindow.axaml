@@ -88,8 +88,7 @@
                   <Button Content="CSV..."
                           Padding="4,1"
                           HorizontalAlignment="Left"
-                          Command="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).ExportSelectedCsvCommand}"
-                          CommandParameter="{Binding}" />
+                          Command="{Binding ExportCsvCommand}" />
                 </StackPanel>
               </Border>
             </DataTemplate>

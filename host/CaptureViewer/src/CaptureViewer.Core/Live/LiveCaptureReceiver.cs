@@ -73,6 +73,15 @@ public sealed class LiveCaptureReceiver : IAsyncDisposable
     public event Action<Exception>? ReceiveError;
 
     /// <summary>
+    /// Fired (on the reader task thread) for every successful read
+    /// from the underlying stream — payload of <c>chunkBytes</c>
+    /// bytes, <see cref="BytesRead"/> already updated.  Useful for
+    /// status heartbeats so the operator can see traffic even when no
+    /// session has fully landed yet.
+    /// </summary>
+    public event Action<int>? BytesReceived;
+
+    /// <summary>
     /// Total bytes the receiver has read from <see cref="_stream"/>
     /// so far.  Useful for status displays / regression assertions.
     /// </summary>
@@ -212,6 +221,7 @@ public sealed class LiveCaptureReceiver : IAsyncDisposable
 
                 Append(chunk, n);
                 BytesRead += n;
+                BytesReceived?.Invoke(n);
                 DrainSessions();
             }
         }
