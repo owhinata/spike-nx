@@ -382,6 +382,12 @@ bool btsensor_tx_frame_ring_empty(void)
   return ring_empty();
 }
 
+bool btsensor_tx_frame_ring_full(void)
+{
+  uint8_t next = (g_ring_head + 1) % BTSENSOR_TX_RING_DEPTH;
+  return ring_full(next);
+}
+
 int btsensor_tx_arm_post_drain_callback(btsensor_tx_drain_cb_t cb,
                                         btsensor_tx_drain_cb_t timeout_cb,
                                         void *ctx,

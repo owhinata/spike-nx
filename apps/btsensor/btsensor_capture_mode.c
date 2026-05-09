@@ -49,6 +49,17 @@
 
 #define CAP_CHUNK_BYTES        256
 
+/* Inter-frame pacing for the capture forwarder.  CONFIG_APP_CAPTURE_MAX_
+ * HEAP_BYTES defaults to 32 KB so a worst-case session ships ~130 frames
+ * at 256 B chunks; bursting them back-to-back floods the CC2564C 4-slot
+ * ACL TX queue and triggers the same controller stall shell mode worked
+ * around in Issue #109/#110.  Disable the chardev poll callback after
+ * each enqueue and re-arm it CAP_TX_THROTTLE_MS later so successive
+ * rfcomm_send calls land at a controller-friendly cadence.
+ */
+
+#define CAP_TX_THROTTLE_MS     5
+
 static const uint8_t BTCS_MAGIC[4] = { 'B', 'T', 'C', 'S' };
 static const uint8_t BTCE_MAGIC[4] = { 'B', 'T', 'C', 'E' };
 static const uint8_t BTAB_MAGIC[4] = { 'B', 'T', 'A', 'B' };
@@ -61,12 +72,15 @@ struct cap_state_s
 {
   bool                          active;
   bool                          ds_registered;
+  bool                          ds_callbacks_on;
+  bool                          throttle_armed;
   bool                          paused_imu;
   bool                          paused_sensor;
   int                           fd;
   uint32_t                      total_bytes;
   uint32_t                      bytes_sent;
   btstack_data_source_t         ds;
+  btstack_timer_source_t        throttle_timer;
 };
 
 /****************************************************************************
@@ -83,6 +97,9 @@ static void cap_send_marker(const uint8_t magic[4]);
 static void cap_exit_locked(void);
 static void on_read(btstack_data_source_t *ds,
                     btstack_data_source_callback_type_t type);
+static void cap_throttle_disable_callbacks(void);
+static void cap_throttle_arm(void);
+static void cap_throttle_timer_handler(btstack_timer_source_t *ts);
 
 /****************************************************************************
  * Private Functions
@@ -98,6 +115,49 @@ static void cap_send_marker(const uint8_t magic[4])
   (void)btsensor_tx_try_enqueue_frame(magic, 4);
 }
 
+static void cap_throttle_disable_callbacks(void)
+{
+  if (g_cap.ds_registered && g_cap.ds_callbacks_on)
+    {
+      btstack_run_loop_disable_data_source_callbacks(
+          &g_cap.ds, DATA_SOURCE_CALLBACK_READ);
+      g_cap.ds_callbacks_on = false;
+    }
+}
+
+static void cap_throttle_arm(void)
+{
+  if (g_cap.throttle_armed)
+    {
+      return;
+    }
+
+  btstack_run_loop_remove_timer(&g_cap.throttle_timer);
+  btstack_run_loop_set_timer_handler(&g_cap.throttle_timer,
+                                     cap_throttle_timer_handler);
+  btstack_run_loop_set_timer(&g_cap.throttle_timer, CAP_TX_THROTTLE_MS);
+  btstack_run_loop_add_timer(&g_cap.throttle_timer);
+  g_cap.throttle_armed = true;
+}
+
+static void cap_throttle_timer_handler(btstack_timer_source_t *ts)
+{
+  (void)ts;
+  g_cap.throttle_armed = false;
+
+  if (!g_cap.active || g_cap.fd < 0 || !g_cap.ds_registered)
+    {
+      return;
+    }
+
+  if (!g_cap.ds_callbacks_on)
+    {
+      btstack_run_loop_enable_data_source_callbacks(
+          &g_cap.ds, DATA_SOURCE_CALLBACK_READ);
+      g_cap.ds_callbacks_on = true;
+    }
+}
+
 static void cap_exit_locked(void)
 {
   if (!g_cap.active)
@@ -105,10 +165,17 @@ static void cap_exit_locked(void)
       return;
     }
 
+  if (g_cap.throttle_armed)
+    {
+      btstack_run_loop_remove_timer(&g_cap.throttle_timer);
+      g_cap.throttle_armed = false;
+    }
+
   if (g_cap.ds_registered)
     {
       btstack_run_loop_remove_data_source(&g_cap.ds);
-      g_cap.ds_registered = false;
+      g_cap.ds_registered   = false;
+      g_cap.ds_callbacks_on = false;
     }
 
   if (g_cap.fd >= 0)
@@ -147,6 +214,21 @@ static void on_read(btstack_data_source_t *ds,
       return;
     }
 
+  /* Back-pressure: if the btsensor_tx ring is already full, do NOT
+   * pull bytes off the chardev — leaving them there blocks the writer
+   * (apps/sensor) inside its write() and propagates the slowdown all
+   * the way up to the producer.  Re-arm the throttle so we re-check
+   * after the next CAN_SEND_NOW drain cycle.  This is the lossless
+   * path the design plan calls NFR-9.
+   */
+
+  if (btsensor_tx_frame_ring_full())
+    {
+      cap_throttle_disable_callbacks();
+      cap_throttle_arm();
+      return;
+    }
+
   uint8_t buf[CAP_CHUNK_BYTES];
   ssize_t n = read(g_cap.fd, buf, sizeof(buf));
 
@@ -154,6 +236,14 @@ static void on_read(btstack_data_source_t *ds,
     {
       (void)btsensor_tx_try_enqueue_frame(buf, (size_t)n);
       g_cap.bytes_sent += (uint32_t)n;
+
+      /* Pace the next read: disable the data source poll until the
+       * throttle timer fires so the CC2564C ACL TX queue has time to
+       * drain before we offer the next frame.
+       */
+
+      cap_throttle_disable_callbacks();
+      cap_throttle_arm();
       return;
     }
 
@@ -284,14 +374,17 @@ int btsensor_capture_mode_enter(void)
   memcpy(&header_buf[sizeof(BTCS_MAGIC)], &meta, sizeof(meta));
   (void)btsensor_tx_try_enqueue_frame(header_buf, sizeof(header_buf));
 
-  /* Hand the fd off to the run-loop poll. */
+  /* Hand the fd off to the run-loop poll, but defer the first read by
+   * CAP_TX_THROTTLE_MS so BTCS+meta gets one queue slot of breathing
+   * room before we start enqueueing payload chunks behind it.
+   */
 
   btstack_run_loop_set_data_source_fd(&g_cap.ds, fd);
   btstack_run_loop_set_data_source_handler(&g_cap.ds, on_read);
   btstack_run_loop_add_data_source(&g_cap.ds);
-  btstack_run_loop_enable_data_source_callbacks(
-      &g_cap.ds, DATA_SOURCE_CALLBACK_READ);
-  g_cap.ds_registered = true;
+  g_cap.ds_callbacks_on = false;
+  g_cap.ds_registered   = true;
+  cap_throttle_arm();
 
   return 0;
 }

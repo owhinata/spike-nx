@@ -31,12 +31,16 @@ config APP_CAPTURE_MAX_HANDLES
 
 config APP_CAPTURE_MAX_HEAP_BYTES
 	int "Default heap budget per capture invocation (bytes)"
-	default 32768
+	default 65536
 	---help---
 		Advisory upper bound that capture clients (apps/sensor) use
 		when sizing their malloc() for a capture buffer.  Set to a
 		value that fits the worst-case usram budget on the target
 		board.  The library itself does not enforce this — it is
 		surfaced here so all clients agree on the same default.
+
+		On spike-prime-hub the user heap has ~100 KB free at idle so
+		64 KB is safe for a single in-flight session.  At 100 Hz with
+		a 9 B record this lets `sensor color capture` go for ~72 s.
 
 endif # APP_CAPTURE

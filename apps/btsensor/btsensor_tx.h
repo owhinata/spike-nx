@@ -93,6 +93,17 @@ bool btsensor_tx_response_queue_empty(void);
 
 bool btsensor_tx_frame_ring_empty(void);
 
+/* True iff the telemetry frame ring has no slot available for a new
+ * frame.  Used by the lossless capture forwarder to decide whether to
+ * read the next chunk from /dev/btcap or back-pressure the producer
+ * (Issue #122 follow-up): if the ring is full, on_read returns without
+ * touching the chardev, the chardev write side blocks naturally, and
+ * the kernel chardev's pipe-style back-pressure propagates all the way
+ * up to the apps/sensor writer.
+ */
+
+bool btsensor_tx_frame_ring_full(void);
+
 /* Post-drain single-shot callback.
  *
  * Stores `cb(ctx)` to fire once both the response queue and the frame
