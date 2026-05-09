@@ -1,0 +1,135 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:CaptureViewer.App.ViewModels"
+        xmlns:scp="using:ScottPlot.Avalonia"
+        x:Class="CaptureViewer.App.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="CaptureViewer"
+        Width="1400" Height="900"
+        Background="#1A1A1A">
+  <Window.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Foreground" Value="#A0A0A0" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="TextBlock.value">
+      <Setter Property="FontFamily" Value="Inter, monospace" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Foreground" Value="#E0E0E0" />
+    </Style>
+    <Style Selector="TextBlock.header">
+      <Setter Property="Foreground" Value="#80B0FF" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Margin" Value="0,8,0,4" />
+    </Style>
+    <Style Selector="Border.swatch">
+      <Setter Property="Width" Value="10" />
+      <Setter Property="Height" Value="10" />
+      <Setter Property="Margin" Value="0,0,6,0" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="CornerRadius" Value="2" />
+    </Style>
+  </Window.Styles>
+
+  <Grid ColumnDefinitions="320,*" RowDefinitions="*,Auto">
+
+    <!-- Left sidebar -->
+    <ScrollViewer Grid.Column="0" Grid.Row="0" Background="#222222" Padding="12">
+      <StackPanel Spacing="6">
+
+        <TextBlock Classes="header" Text="Files" />
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <Button Content="Open .cap..."
+                  Command="{Binding OpenFileCommand}" />
+          <Button Content="Clear all"
+                  Command="{Binding ClearAllCommand}" />
+        </StackPanel>
+
+        <TextBlock Classes="header" Text="Bluetooth (Linux only)" />
+        <StackPanel Spacing="4">
+          <TextBox Watermark="BD addr (XX:XX:XX:XX:XX:XX)"
+                   Text="{Binding BdAddr, Mode=TwoWay}" />
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <Button Content="Connect"
+                    Command="{Binding ConnectCommand}" />
+            <Button Content="Disconnect"
+                    Command="{Binding DisconnectCommand}" />
+          </StackPanel>
+          <Button Content="Send `MODE CAPTURE`"
+                  Command="{Binding TriggerCaptureModeCommand}" />
+        </StackPanel>
+
+        <TextBlock Classes="label" Text="Save dir" />
+        <TextBox Text="{Binding OutputDirectory, Mode=TwoWay}"
+                 IsEnabled="False" />
+
+        <TextBlock Classes="header" Text="Loaded captures" />
+        <ItemsControl ItemsSource="{Binding Loaded}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:LoadedCaptureViewModel">
+              <Border Background="#2A2A2A"
+                      Padding="6"
+                      Margin="0,0,0,4"
+                      CornerRadius="3">
+                <StackPanel Spacing="2">
+                  <StackPanel Orientation="Horizontal" Spacing="0">
+                    <Border Classes="swatch" Background="{Binding ColorBrush}" />
+                    <CheckBox IsChecked="{Binding IsVisible, Mode=TwoWay}"
+                              VerticalAlignment="Center" />
+                    <TextBlock Classes="value"
+                               Text="{Binding Label}"
+                               Margin="6,0,0,0"
+                               VerticalAlignment="Center" />
+                  </StackPanel>
+                  <TextBlock Classes="label"
+                             Text="{Binding SchemaName, StringFormat='schema: {0}'}" />
+                  <TextBlock Classes="label"
+                             Text="{Binding RecordCount, StringFormat='records: {0}'}" />
+                  <Button Content="CSV..."
+                          Padding="4,1"
+                          HorizontalAlignment="Left"
+                          Command="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).ExportSelectedCsvCommand}"
+                          CommandParameter="{Binding}" />
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <TextBlock Classes="header" Text="Log" />
+        <ItemsControl ItemsSource="{Binding LogLines}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate>
+              <TextBlock Classes="value"
+                         FontSize="10"
+                         Text="{Binding}"
+                         TextWrapping="Wrap" />
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+      </StackPanel>
+    </ScrollViewer>
+
+    <!-- Plot area -->
+    <Grid Grid.Column="1" Grid.Row="0" RowDefinitions="Auto,*"
+          Background="#1A1A1A" Margin="6">
+      <StackPanel Grid.Row="0" Orientation="Horizontal"
+                  Spacing="8" Margin="0,0,0,6">
+        <TextBlock Classes="label" Text="Field:" VerticalAlignment="Center" />
+        <ComboBox MinWidth="180"
+                  ItemsSource="{Binding AvailableFields}"
+                  SelectedItem="{Binding SelectedFieldName, Mode=TwoWay}"
+                  PlaceholderText="(no field)" />
+      </StackPanel>
+      <scp:AvaPlot x:Name="AvaPlot1" Grid.Row="1" />
+    </Grid>
+
+    <!-- Status bar -->
+    <Border Grid.Column="0" Grid.ColumnSpan="2" Grid.Row="1"
+            Background="#101010" Padding="8,4">
+      <TextBlock Classes="value"
+                 Text="{Binding StatusText}" />
+    </Border>
+  </Grid>
+</Window>
