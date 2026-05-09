@@ -322,20 +322,34 @@ static int btcap_close(FAR struct file *filep)
     {
       priv->reader_open = false;
 
-      /* Reader release: if the session is in DRAINING-equivalent state
-       * (READY+writer_done) and we are leaving without picking up any
-       * remaining bytes, treat that as a torn-down session.  The data
-       * is gone either way; the writer side has already seen FINALIZE
-       * succeed, so it is safe to come back to IDLE here.
+      /* Reader release.  Three sub-cases:
+       *   1. writer_done && (any) → reader has finished draining and is
+       *      handing the session back; transition to IDLE so the
+       *      writer's QUERY_STATE polling can observe completion and
+       *      close its end of the chardev.
+       *   2. !writer_done && !writer_open → writer disappeared mid-
+       *      stream and reader is gone too; reclaim immediately.
+       *   3. !writer_done && writer_open → reader bailed early on a
+       *      live writer; force ABORTED so the writer's next write()
+       *      returns -ECANCELED instead of hanging on backpressure.
        */
 
       if (priv->state == BTCAP_S_ABORTED && !priv->writer_open)
         {
           btcap_reset_locked(priv);
         }
+      else if (priv->state == BTCAP_S_READY && priv->writer_done)
+        {
+          btcap_reset_locked(priv);
+        }
       else if (priv->state == BTCAP_S_READY && !priv->writer_open)
         {
           btcap_reset_locked(priv);
+        }
+      else if (priv->state == BTCAP_S_READY)
+        {
+          priv->state = BTCAP_S_ABORTED;
+          pollset |= POLLERR | POLLHUP;
         }
     }
 
@@ -545,12 +559,16 @@ static ssize_t btcap_read(FAR struct file *filep, FAR char *buffer,
   uint32_t generation = priv->session_generation;
   size_t   nread      = 0;
 
-  /* If the writer has finalised and the ring is empty, return EOF (0). */
+  /* If the writer has finalised and the ring is empty, return EOF (0).
+   * Do NOT reset to IDLE here — the reader is still attached and may
+   * read a few more zero-byte returns from this fd before it closes
+   * (cf. cat / `read until EOF` semantics).  The IDLE transition fires
+   * in the release fop when the reader drops the fd; that is what the
+   * writer-side QUERY_STATE polling waits on.
+   */
 
   if (priv->writer_done && btcap_ring_used_locked(priv) == 0)
     {
-      btcap_reset_locked(priv);
-      btcap_notify_all_locked(priv, POLLHUP);
       nxmutex_unlock(&priv->lock);
       return 0;
     }
@@ -602,14 +620,19 @@ static ssize_t btcap_read(FAR struct file *filep, FAR char *buffer,
       btcap_notify_all_locked(priv, POLLOUT);
     }
 
-  /* If we hit EOF (writer_done && ring empty) while filling the user
-   * buffer, recycle the session now so the next REGISTER finds IDLE.
+  /* If the writer has finalised and the ring just emptied, leave the
+   * session in READY (writer_done==true, used==0) and notify POLLIN so
+   * the reader's next poll wakes for an EOF read.  The IDLE
+   * transition is reserved for the release fop when the reader drops
+   * its fd; doing it here would cause the next poll() to see
+   * state==IDLE with no POLLIN attached and the reader would never
+   * fire on_read again, which is exactly the bug that masked Test 2's
+   * stale-session forwarding.
    */
 
   if (priv->writer_done && btcap_ring_used_locked(priv) == 0)
     {
-      btcap_reset_locked(priv);
-      btcap_notify_all_locked(priv, POLLHUP);
+      btcap_notify_all_locked(priv, POLLIN | POLLHUP);
     }
 
   nxmutex_unlock(&priv->lock);

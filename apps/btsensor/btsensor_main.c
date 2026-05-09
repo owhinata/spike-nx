@@ -69,6 +69,10 @@
 #  include "btsensor_shell.h"
 #endif
 
+#ifdef CONFIG_APP_CAPTURE
+#  include "btsensor_capture_mode.h"
+#endif
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -689,6 +693,15 @@ static int btsensor_daemon(int argc, char **argv)
     }
 #endif
 
+#ifdef CONFIG_APP_CAPTURE
+  /* MODE CAPTURE handler (Issue #122).  No FIFOs to create; the kernel
+   * chardev /dev/btcap is registered from board boot.  init() just
+   * zeroes the local state struct.
+   */
+
+  (void)btsensor_capture_mode_init();
+#endif
+
   if (imu_sampler_init() != 0)
     {
       syslog(LOG_ERR, "btsensor: imu sampler init failed, "
@@ -837,6 +850,9 @@ enum btsensor_action_kind
   ACTION_MODE_SHELL,
   ACTION_MODE_TELEMETRY,
 #endif
+#ifdef CONFIG_APP_CAPTURE
+  ACTION_MODE_CAPTURE,
+#endif
 };
 
 /* Heap-allocated action struct with explicit ownership transfer
@@ -947,6 +963,25 @@ static void action_runner(void *ctx)
         a->rc = 0;
         break;
 #endif
+#ifdef CONFIG_APP_CAPTURE
+      case ACTION_MODE_CAPTURE:
+        /* Refuse if a SHELL session is in flight; the user must exit
+         * the shell first.  Pumps-on is fine: the CAPTURE handler
+         * pauses BUNDLE emission and restores it when the session
+         * ends, so we do not gate on bundle_emitter_is_*_enabled().
+         */
+
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+        if (btsensor_shell_is_active())
+          {
+            a->rc = -EBUSY;
+            break;
+          }
+#endif
+
+        a->rc = btsensor_capture_mode_enter();
+        break;
+#endif
       default:
         a->rc = -ENOSYS;
         break;
@@ -1038,6 +1073,10 @@ static void print_action_result(int rc)
   else if (rc == -ENXIO)
     {
       printf("btsensor: daemon is stopping\n");
+    }
+  else if (rc == -ENOENT)
+    {
+      printf("btsensor: no capture session in flight\n");
     }
   else if (rc == -ETIMEDOUT)
     {
@@ -1337,7 +1376,11 @@ static int cmd_mode_builtin(int argc, char **argv)
 {
   if (argc < 3)
     {
-      printf("Usage: btsensor mode <shell|telemetry>\n");
+      printf("Usage: btsensor mode <shell|telemetry"
+#ifdef CONFIG_APP_CAPTURE
+             "|capture"
+#endif
+             ">\n");
       return 1;
     }
 
@@ -1350,9 +1393,19 @@ static int cmd_mode_builtin(int argc, char **argv)
     {
       kind = ACTION_MODE_TELEMETRY;
     }
+#ifdef CONFIG_APP_CAPTURE
+  else if (strcmp(argv[2], "capture") == 0)
+    {
+      kind = ACTION_MODE_CAPTURE;
+    }
+#endif
   else
     {
-      printf("btsensor: invalid mode '%s' (expected shell|telemetry)\n",
+      printf("btsensor: invalid mode '%s' (expected shell|telemetry"
+#ifdef CONFIG_APP_CAPTURE
+             "|capture"
+#endif
+             ")\n",
              argv[2]);
       return 1;
     }

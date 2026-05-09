@@ -43,6 +43,10 @@
 #  include "btsensor_shell.h"
 #endif
 
+#ifdef CONFIG_APP_CAPTURE
+#  include "btsensor_capture_mode.h"
+#endif
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -489,6 +493,41 @@ static void cmd_mode(char *arg)
       reply("OK\n");
       return;
     }
+
+#ifdef CONFIG_APP_CAPTURE
+  if (strcasecmp(arg, "CAPTURE") == 0)
+    {
+      /* Drain whatever session apps/capture has staged on /dev/btcap.
+       * The handler returns immediately after registering its data
+       * source; the actual byte-stream forwarding happens off the
+       * run-loop poll, framed by BTCS / BTCE on the BT side.  -ENOENT
+       * means there was no writer in flight; -EBUSY means another
+       * MODE switch (typically SHELL) is in progress.
+       */
+
+      int rc = btsensor_capture_mode_enter();
+      if (rc == 0)
+        {
+          reply("OK\n");
+        }
+      else if (rc == -ENOENT)
+        {
+          reply("ERR no_capture_session\n");
+        }
+      else if (rc == -EBUSY)
+        {
+          reply("ERR busy\n");
+        }
+      else
+        {
+          char rbuf[BTSENSOR_CMD_MAX_LINE];
+          snprintf(rbuf, sizeof(rbuf), "ERR mode_capture %d\n", rc);
+          reply(rbuf);
+        }
+
+      return;
+    }
+#endif
 
   char buf[BTSENSOR_CMD_MAX_LINE];
   snprintf(buf, sizeof(buf), "ERR invalid MODE %s\n", arg);

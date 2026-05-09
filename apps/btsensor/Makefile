@@ -38,6 +38,15 @@ CSRCS  += btsensor_shell.c btnsh_main.c
 CFLAGS += -I$(APPDIR)/nshlib
 endif
 
+# MODE CAPTURE handler (Issue #122).  Activates only when the capture
+# library is also enabled — the chardev /dev/btcap is the only thing the
+# handler talks to and it has no other client.
+
+ifeq ($(CONFIG_APP_CAPTURE),y)
+CSRCS  += btsensor_capture_mode.c
+CFLAGS += -I$(APPDIR)/external/capture/include
+endif
+
 # Pulled-in chipset init script (TI v1.4 service pack, eHCILL disabled —
 # originally from pybricks, see apps/btsensor/chipset/cc256x_init_script.c).
 CSRCS  += chipset/cc256x_init_script.c
