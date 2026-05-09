@@ -508,7 +508,14 @@ static void cmd_mode(char *arg)
       int rc = btsensor_capture_mode_enter();
       if (rc == 0)
         {
-          reply("OK\n");
+          /* No "OK\n" reply on success.  mode_enter has already
+           * queued the BTCS + 40-byte meta blob; appending an "OK\n"
+           * here would sandwich those three bytes between the meta
+           * and the .cap "CAPB" header, causing the host scanner's
+           * `total_bytes` slice to misalign and reject the session
+           * (Issue #122 follow-up).  The BTCS marker frame itself is
+           * the implicit ack — host code keys off that.
+           */
         }
       else if (rc == -ENOENT)
         {
