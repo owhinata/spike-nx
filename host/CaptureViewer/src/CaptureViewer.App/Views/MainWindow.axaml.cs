@@ -16,6 +16,22 @@ namespace CaptureViewer.App.Views;
 
 public partial class MainWindow : Window
 {
+    /// <summary>
+    /// Marker shapes used for the i-th visible capture in the overlay
+    /// list.  Cycles so even with similar colors, captures stay
+    /// distinguishable (and works in monochrome printouts of the
+    /// rendered plot).
+    /// </summary>
+    private static readonly MarkerShape[] MarkerPalette =
+    [
+        MarkerShape.FilledCircle,
+        MarkerShape.FilledSquare,
+        MarkerShape.FilledTriangleUp,
+        MarkerShape.FilledDiamond,
+        MarkerShape.OpenCircle,
+        MarkerShape.FilledTriangleDown,
+    ];
+
     private AvaPlot? _avaPlot;
     private ScrollViewer? _logScroller;
 
@@ -160,6 +176,7 @@ public partial class MainWindow : Window
 
         var anyPlotted = false;
         string? sampleUnit = null;
+        var visibleIndex = 0;
         foreach (var row in vm.Loaded)
         {
             if (!row.IsVisible) continue;
@@ -187,12 +204,29 @@ public partial class MainWindow : Window
                 ys[i] = FieldReader.ReadScaledDouble(rec, targetField!);
             }
 
+            // Pick a marker shape that rotates per-capture in addition
+            // to the color palette so two captures with similar
+            // colours (or printed monochrome) stay distinguishable.
+            // Marker size scales down with record count: dense traces
+            // get small dots so the line shape stays visible, sparse
+            // traces get bigger markers so individual samples land.
+            var markerShape = MarkerPalette[visibleIndex % MarkerPalette.Length];
+            var markerSize = n switch
+            {
+                <= 50 => 6f,
+                <= 200 => 4f,
+                _ => 3f,
+            };
+
             var scatter = plot.Add.Scatter(xs, ys);
             scatter.LegendText = row.Label;
             scatter.LineColor = ArgbToScottColor(row.ColorArgb);
+            scatter.LineWidth = 1.5f;
+            scatter.MarkerShape = markerShape;
             scatter.MarkerColor = scatter.LineColor;
-            scatter.MarkerSize = 3;
+            scatter.MarkerSize = markerSize;
             anyPlotted = true;
+            visibleIndex++;
         }
 
         plot.Axes.Title.Label.Text = anyPlotted ? field : $"(no visible capture has `{field}`)";

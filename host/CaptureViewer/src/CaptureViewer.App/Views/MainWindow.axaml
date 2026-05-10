@@ -203,6 +203,10 @@
                     ItemsSource="{Binding TimeAxisModes}"
                     SelectedItem="{Binding TimeAxis, Mode=TwoWay}" />
         </StackPanel>
+        <Button Content="Auto-fit"
+                ToolTip.Tip="Reset zoom and pan to fit all visible data"
+                Command="{Binding AutoFitCommand}"
+                VerticalAlignment="Center" />
       </StackPanel>
       <scp:AvaPlot Grid.Row="1" x:Name="AvaPlot1" />
     </Grid>

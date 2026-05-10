@@ -273,6 +273,19 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         PlotInvalidated?.Invoke();
     }
 
+    /// <summary>
+    /// Fit-to-data shortcut.  Equivalent to right-clicking the plot
+    /// → "Auto Scale" but discoverable from the toolbar.  The redraw
+    /// already calls <c>plot.Axes.AutoScale()</c>, so simply
+    /// re-firing <see cref="PlotInvalidated"/> resets pan/zoom state.
+    /// </summary>
+    [RelayCommand]
+    private void AutoFit()
+    {
+        PlotInvalidated?.Invoke();
+        StatusText = "Auto-fit";
+    }
+
     [RelayCommand(CanExecute = nameof(CanConnect))]
     private async Task ConnectAsync()
     {
