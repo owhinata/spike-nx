@@ -12,9 +12,9 @@
  *   linetrace status                 print daemon state + last loop values
  *
  * The daemon owns the color sensor CLAIM and the /dev/drivebase fd.  The
- * 100 Hz loop reads /dev/uorb/sensor_color (REFLT mode), computes a P term
- * from the deviation against `target`, and issues DRIVEBASE_DRIVE_FOREVER
- * each iteration.
+ * 100 Hz loop reads /dev/uorb/sensor_color (RGB+I mode 5, INT16 channel 4 =
+ * intensity, 0..1024), computes a P term from the deviation against
+ * `target`, and issues DRIVEBASE_DRIVE_FOREVER each iteration.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -45,9 +45,9 @@
  ****************************************************************************/
 
 #define COLOR_DEVPATH       "/dev/uorb/sensor_color"
-#define COLOR_MODE_REFLT    1
+#define COLOR_MODE_RGBI     5
 
-#define DEFAULT_TARGET      50
+#define DEFAULT_TARGET      512
 #define DEFAULT_MAX_TURN    180
 #define DEFAULT_HZ          100
 
@@ -77,7 +77,7 @@ static struct
 
 /* PID observability state (Issue #118).
  *
- * Snapshot fields hold the most recent tick's value (refl, err, i_acc).
+ * Snapshot fields hold the most recent tick's value (intensity, err, i_acc).
  * Cumulative `sat_count` increments whenever the saturation clamp acts
  * during a PID tick.  Interval-aggregate fields track per-interval
  * statistics (min/max/abs-sum, zero-crossings, abs-max) that the
@@ -89,7 +89,7 @@ static struct
 static struct
 {
   uint64_t iter;
-  int      last_refl;
+  int      last_intensity;
   int      last_err;
   int      last_i_acc;
   int      last_ioctl_rc;
@@ -157,6 +157,20 @@ static struct
  * Sensor / drivebase helpers
  ****************************************************************************/
 
+/* RGBI sample shape gate.  data_type / num_values come from the mode-info
+ * cache and are decoupled from the actual payload byte count, so we also
+ * require `len >= 4 * sizeof(int16_t)` to defend against a short DATA
+ * frame leaving s.data.i16[3] zero-filled by legosensor_build_envelope().
+ */
+
+static bool color_sample_is_rgbi(const struct lump_sample_s *s)
+{
+  return s->mode_id    == COLOR_MODE_RGBI &&
+         s->data_type  == LUMP_DATA_INT16 &&
+         s->num_values >= 4 &&
+         s->len        >= 4 * sizeof(int16_t);
+}
+
 static int color_open_select(void)
 {
   int fd = open(COLOR_DEVPATH, O_RDONLY | O_NONBLOCK);
@@ -174,11 +188,11 @@ static int color_open_select(void)
       return -EIO;
     }
 
-  struct legosensor_select_arg_s sel = { .mode = COLOR_MODE_REFLT };
+  struct legosensor_select_arg_s sel = { .mode = COLOR_MODE_RGBI };
   if (ioctl(fd, LEGOSENSOR_SELECT, (unsigned long)&sel) < 0)
     {
       fprintf(stderr, "linetrace: SELECT mode %u: %s\n",
-              COLOR_MODE_REFLT, strerror(errno));
+              COLOR_MODE_RGBI, strerror(errno));
       close(fd);
       return -EIO;
     }
@@ -198,7 +212,7 @@ static int color_open_select(void)
 
       struct lump_sample_s s;
       ssize_t n = read(fd, &s, sizeof(s));
-      if (n == sizeof(s) && s.mode_id == COLOR_MODE_REFLT && s.len > 0)
+      if (n == sizeof(s) && color_sample_is_rgbi(&s))
         {
           return fd;
         }
@@ -212,7 +226,7 @@ static int color_open_select(void)
 
   fprintf(stderr,
           "linetrace: color SELECT mode %u not confirmed in %d ms\n",
-          COLOR_MODE_REFLT, SELECT_POLL_MS);
+          COLOR_MODE_RGBI, SELECT_POLL_MS);
   close(fd);
   return -ETIMEDOUT;
 }
@@ -229,9 +243,12 @@ static int color_read_latest(int fd)
           break;
         }
 
-      if (s.mode_id == COLOR_MODE_REFLT && s.len > 0)
+      if (color_sample_is_rgbi(&s))
         {
-          last = s.data.i8[0];
+          int v = s.data.i16[3];      /* intensity is the 4th channel */
+          if (v < 0)    v = 0;
+          if (v > 1024) v = 1024;
+          last = v;
         }
     }
   return last;
@@ -291,7 +308,7 @@ static int clamp_int(int v, int lo, int hi)
 
 static void run_calibration(int color_fd)
 {
-  int min_v = 100;
+  int min_v = 1024;
   int max_v = 0;
   int count = 0;
 
@@ -349,7 +366,7 @@ static int linetrace_daemon(int argc, char *argv[])
       return 1;
     }
 
-  int  last_refl   = -1;
+  int  last_intensity   = -1;
   bool was_engaged = false;   /* drivebase ownership intent (Issue #117) */
 
   struct timespec next;
@@ -414,7 +431,7 @@ static int linetrace_daemon(int argc, char *argv[])
             }
 
           /* Idle ticks still refresh sensor reading + err so the user
-           * can use `linetrace status` to inspect reflectance and
+           * can use `linetrace status` to inspect intensity and
            * error against the current target (e.g. positioning the
            * robot over the line before `run`).  PID outputs are
            * forced to 0 so status clearly indicates "no drive output"
@@ -425,13 +442,13 @@ static int linetrace_daemon(int argc, char *argv[])
           int v = color_read_latest(color_fd);
           if (v >= 0)
             {
-              last_refl = v;
+              last_intensity = v;
             }
-          int err = (last_refl >= 0) ? (g_params.target - last_refl) : 0;
+          int err = (last_intensity >= 0) ? (g_params.target - last_intensity) : 0;
 
           pthread_mutex_lock(&g_stats_lock);
           g_stats.iter++;
-          g_stats.last_refl  = last_refl;
+          g_stats.last_intensity  = last_intensity;
           g_stats.last_err   = err;
           g_stats.last_i_acc = 0;
 
@@ -485,10 +502,10 @@ static int linetrace_daemon(int argc, char *argv[])
       int v = color_read_latest(color_fd);
       if (v >= 0)
         {
-          last_refl = v;
+          last_intensity = v;
         }
 
-      int err    = (last_refl >= 0) ? (g_params.target - last_refl) : 0;
+      int err    = (last_intensity >= 0) ? (g_params.target - last_intensity) : 0;
       int dt_ms  = 1000 / g_params.hz;       /* hz validated 10..200    */
       int p_term = (g_params.kp_x100 * err) / 100;
 
@@ -538,7 +555,7 @@ static int linetrace_daemon(int argc, char *argv[])
 
       pthread_mutex_lock(&g_stats_lock);
       g_stats.iter++;
-      g_stats.last_refl        = last_refl;
+      g_stats.last_intensity        = last_intensity;
       g_stats.last_err         = err;
       g_stats.last_i_acc       = g_pid_i_acc;
       g_stats.last_ioctl_rc    = rc;
@@ -652,7 +669,7 @@ static int do_start(void)
   g_params.hz         = DEFAULT_HZ;
 
   memset(&g_stats, 0, sizeof(g_stats));
-  g_stats.last_refl = -1;
+  g_stats.last_intensity = -1;
 
   g_pid_i_acc         = 0;
   g_pid_prev_err      = 0;
@@ -741,7 +758,7 @@ static int do_cal(void)
     }
 
   printf("linetrace: sampling for %d ms — sweep the sensor over "
-         "black/white\n", CAL_DURATION_MS);
+         "dark/bright\n", CAL_DURATION_MS);
 
   g_cal_done    = false;
   g_cal_request = true;
@@ -767,7 +784,7 @@ static int do_cal(void)
     }
 
   int mid = (g_cal_result.min_v + g_cal_result.max_v) / 2;
-  printf("linetrace: cal %d samples: black=%d white=%d midpoint=%d\n",
+  printf("linetrace: cal %d samples: dark=%d bright=%d midpoint=%d\n",
          g_cal_result.count, g_cal_result.min_v, g_cal_result.max_v, mid);
   printf("           suggested: linetrace run <speed_mmps> <kp> %d\n", mid);
   return 0;
@@ -879,9 +896,9 @@ static int do_run(int argc, char **argv)
       return 1;
     }
 
-  if (target < 0 || target > 100)
+  if (target < 0 || target > 1024)
     {
-      fprintf(stderr, "linetrace: target must be in [0, 100]\n");
+      fprintf(stderr, "linetrace: target must be in [0, 1024]\n");
       return 1;
     }
 
@@ -912,7 +929,7 @@ static int do_run(int argc, char **argv)
  * Subcommand: target / max_turn (Issue #119)
  *
  * Mutate a single PID parameter without engaging the drivebase.  Lets
- * the user set the operational reflectance threshold before `run`, so
+ * the user set the operational intensity threshold before `run`, so
  * `linetrace status` shows last_err against the real target while
  * positioning the robot.  `max_turn` accepts live tuning during a run
  * (the anti-windup clamp re-derives from the new value next tick).
@@ -954,9 +971,9 @@ static int do_set_target(int argc, char **argv)
       return 1;
     }
 
-  if (target_new < 0 || target_new > 100)
+  if (target_new < 0 || target_new > 1024)
     {
-      fprintf(stderr, "linetrace: target must be in [0, 100]\n");
+      fprintf(stderr, "linetrace: target must be in [0, 1024]\n");
       return 1;
     }
 
@@ -1107,7 +1124,7 @@ static int do_pidstat(int argc, char **argv)
   pthread_mutex_unlock(&g_stats_lock);
 
   printf("%8s %9s %6s %7s %8s %8s %8s %5s %8s %8s %10s %9s %9s %6s\n",
-         "time_ms", "iter", "refl", "err",
+         "time_ms", "iter", "intens", "err",
          "err_min", "err_max", "err_avg", "zc",
          "d_max", "d_avg", "i_acc",
          "turn_max", "turn_avg", "sat");
@@ -1127,7 +1144,7 @@ static int do_pidstat(int argc, char **argv)
       pthread_mutex_lock(&g_stats_lock);
       bool     running      = g_daemon_running;
       uint64_t iter64       = g_stats.iter;
-      int      last_refl    = g_stats.last_refl;
+      int      last_intensity    = g_stats.last_intensity;
       int      last_err     = g_stats.last_err;
       int      last_i_acc   = g_stats.last_i_acc;
       uint32_t cur_sat      = g_stats.sat_count;
@@ -1192,7 +1209,7 @@ static int do_pidstat(int argc, char **argv)
       printf("%8ld %9lu %6d %7d %s %s %s %5u %s %s %10d %s %s %6lu\n",
              elapsed_ms,
              (unsigned long)(iter64 & 0xFFFFFFFFu),
-             last_refl, last_err,
+             last_intensity, last_err,
              b_emin, b_emax, b_eavg, (unsigned)zc,
              b_dmax, b_davg,
              last_i_acc,
@@ -1259,7 +1276,7 @@ static int do_status(void)
 
   pthread_mutex_lock(&g_stats_lock);
   uint64_t iter        = g_stats.iter;
-  int      last_refl   = g_stats.last_refl;
+  int      last_intensity   = g_stats.last_intensity;
   int      last_err    = g_stats.last_err;
   int      ioctl_rc    = g_stats.last_ioctl_rc;
   int      ioctl_errno = g_stats.last_ioctl_errno;
@@ -1275,7 +1292,7 @@ static int do_status(void)
   printf("max_turn:      %d dps\n", g_params.max_turn);
   printf("hz:            %d\n", g_params.hz);
   printf("iter:          %llu\n", (unsigned long long)iter);
-  printf("last_refl:     %d\n", last_refl);
+  printf("last_intensity: %d\n", last_intensity);
   printf("last_err:      %d\n", last_err);
   printf("last_ioctl_rc: %d (errno=%d)\n", ioctl_rc, ioctl_errno);
   printf("cal:           %s\n",
@@ -1302,27 +1319,27 @@ static void usage(void)
     "       linetrace status\n"
     "\n"
     "  start:   spawn resident daemon (idle: speed=0 kp=0 target=%d)\n"
-    "  cal:     daemon samples 3 s, prints black/white/midpoint\n"
+    "  cal:     daemon samples 3 s, prints dark/bright/midpoint\n"
     "           (requires speed=0; use 'linetrace run 0 0' if needed)\n"
     "  run:     update daemon params live\n"
-    "           run 100 0 61          straight at 100 mm/s\n"
-    "           run 100 3 61          P-control follow with kp=3\n"
-    "           run 100 3 61 --ki 0.5 --kd 0.1\n"
-    "                                 PID follow (kp=3 ki=0.5 kd=0.1)\n"
+    "           run 100 0 512         straight at 100 mm/s\n"
+    "           run 100 0.3 512       P-control follow with kp=0.3\n"
+    "           run 100 0.3 512 --ki 0.05 --kd 0.01\n"
+    "                                 PID follow (kp=0.3 ki=0.05 kd=0.01)\n"
     "           run 0 0               command stop (daemon stays alive)\n"
     "           gain ranges: kp/ki/kd in [-100.00, 100.00] (0.01 step)\n"
     "           defaults inherit from previous values; first run after\n"
     "           start uses target=%d, --max-turn=%d, --hz=%d\n"
-    "  target:   set target reflectance without engaging the drivebase\n"
-    "            (e.g. 'target 38' so 'status' shows last_err against\n"
-    "            the operational target while positioning).  [0, 100]\n"
+    "  target:   set target intensity without engaging the drivebase\n"
+    "            (e.g. 'target 400' so 'status' shows last_err against\n"
+    "            the operational target while positioning).  [0, 1024]\n"
     "  max_turn: set turn-rate clamp [1, 1000] dps; usable live to\n"
     "            re-derive the anti-windup limit on the next tick\n"
     "  brake:   FOREVER(0,0) + STOP{BRAKE}; reset speed=0 kp=0\n"
     "           daemon stays alive — 'linetrace run ...' to re-engage\n"
     "  stop:    coast wheels, daemon exits\n"
     "  pidstat: stream PID internals for gain tuning (default 1000ms)\n"
-    "           refl/err/i_acc are snapshots; err_min/max/avg, zc,\n"
+    "           intensity/err/i_acc are snapshots; err_min/max/avg, zc,\n"
     "           d_max/avg, turn_max/avg are aggregates over the\n"
     "           preceding interval.  err_avg is x10 fixed-point.\n"
     "           sat is cumulative delta from pidstat start.  '-'\n"
@@ -1331,7 +1348,7 @@ static void usage(void)
     "           a 1-interval engaged/idle straddle dilutes averages.\n"
     "           summary's reported_ticks counts only printed intervals\n"
     "           (a partial interval at end-of-stream is dropped).\n"
-    "  status:  print daemon state and last err/refl/i_acc snapshot\n",
+    "  status:  print daemon state and last err/intensity/i_acc snapshot\n",
     DEFAULT_TARGET, DEFAULT_TARGET, DEFAULT_MAX_TURN, DEFAULT_HZ);
 }
 

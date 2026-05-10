@@ -24,7 +24,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 _PIDSTAT_HEADER = (
-    "time_ms", "iter", "refl", "err",
+    "time_ms", "iter", "intens", "err",
     "err_min", "err_max", "err_avg", "zc",
     "d_max", "d_avg", "i_acc",
     "turn_max", "turn_avg", "sat",
@@ -223,7 +223,7 @@ def test_linetrace_status_drops_pid_term_fields(p):
                 f"legacy snapshot field {legacy} should be removed"
             )
         assert "last_err" in st
-        assert "last_refl" in st
+        assert "last_intensity" in st
         assert "target" in st
         assert "max_turn" in st
     finally:
@@ -273,7 +273,7 @@ def test_linetrace_set_rejects_out_of_range(p):
     time.sleep(0.3)
 
     try:
-        out = p.sendCommand("linetrace target 150", timeout=5)
+        out = p.sendCommand("linetrace target 1500", timeout=5)
         assert "target" in out, f"expected target rejection: {out!r}"
 
         out = p.sendCommand("linetrace target -1", timeout=5)
@@ -305,14 +305,14 @@ def test_linetrace_set_updates_target_and_max_turn(p):
     time.sleep(0.3)
 
     try:
-        # Defaults from do_start: target=50, max_turn=180
+        # Defaults from do_start: target=512, max_turn=180
         out = p.sendCommand("linetrace status", timeout=5)
         st = _parse_status(out)
-        assert st.get("target") == "50"
+        assert st.get("target") == "512"
         assert st.get("max_turn") == "180"
 
-        out = p.sendCommand("linetrace target 38", timeout=5)
-        assert "target=38" in out, f"unexpected target output: {out!r}"
+        out = p.sendCommand("linetrace target 400", timeout=5)
+        assert "target=400" in out, f"unexpected target output: {out!r}"
 
         out = p.sendCommand("linetrace max_turn 120", timeout=5)
         assert "max_turn=120" in out, (

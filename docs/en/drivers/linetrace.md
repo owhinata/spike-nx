@@ -1,6 +1,6 @@
 # linetrace (Issue #107)
 
-User-space NSH builtin that follows a line by issuing `DRIVEBASE_DRIVE_FOREVER` continuously while reading reflected-light samples from the LEGO color sensor.  Modeled on the canonical pybricks pattern (`pybricks/tests/motors/drivebase_line.py`): a tight `err = target - reflection(); drive(speed, err * Kp); wait(...)` loop that lives entirely in user space.
+User-space NSH builtin that follows a line by issuing `DRIVEBASE_DRIVE_FOREVER` continuously while reading the LEGO color sensor's RGB+I intensity channel (mode 5, INT16 channel 4, 0..1024).  Modeled on the canonical pybricks pattern (`pybricks/tests/motors/drivebase_line.py`): a tight `err = target - intensity(); drive(speed, err * Kp); wait(...)` loop that lives entirely in user space.  Issue #125 swapped the input source from mode 1 (REFLT, INT8 0..100) to mode 5 because the higher-resolution intensity channel removes the 1-LSB jitter Reflection produced near the line edge.
 
 ## 1. Why a separate app
 
@@ -23,41 +23,41 @@ linetrace run <speed_mmps> <kp> [target] \      # main command
 linetrace                                       # usage
 ```
 
-Defaults: `target=50`, `--max-turn=180`, `--hz=100`.  `kp` is fractional (e.g. `linetrace run 100 1.5`).
+Defaults: `target=512`, `--max-turn=180`, `--hz=100`.  `kp` is fractional (e.g. `linetrace run 100 0.3`).  Intensity-era kp values are roughly **1/10 of the reflection-era values** because err magnitudes are ~10× larger (range 0..1024 vs 0..100); start at ~0.15 instead of 1.5.
 
 ### 2.1 `linetrace cal`
 
-Opens `/dev/uorb/sensor_color`, CLAIM, SELECT mode 1 (REFLT), reads samples for 3 seconds while the operator sweeps the sensor over the line and the surrounding floor.  Prints the observed min / max / midpoint:
+Opens `/dev/uorb/sensor_color`, CLAIM, SELECT mode 5 (RGB+I; the loop reads the 4th INT16 channel = intensity, 0..1024), reads samples for 3 seconds while the operator sweeps the sensor over the line and the surrounding floor.  Prints the observed min / max / midpoint:
 
 ```
 nsh> linetrace cal
-linetrace: sampling for 3000 ms — sweep the sensor over black/white
-linetrace: cal 250 samples: black=4 white=72 midpoint=38
-           suggested: linetrace run <speed_mmps> <kp> 38
+linetrace: sampling for 3000 ms — sweep the sensor over dark/bright
+linetrace: cal 250 samples: dark=42 bright=982 midpoint=512
+           suggested: linetrace run <speed_mmps> <kp> 512
 ```
 
 ### 2.2 `linetrace run`
 
 1. Opens `/dev/drivebase`, calls `DRIVEBASE_GET_STATE`.  If `active_command != DRIVEBASE_ACTIVE_NONE` (some other drive verb is in flight), refuses to start.
-2. Opens `/dev/uorb/sensor_color`, CLAIM, SELECT mode 1 (REFLT).
+2. Opens `/dev/uorb/sensor_color`, CLAIM, SELECT mode 5 (RGB+I).  Sample reads gate on `mode_id == 5 && data_type == LUMP_DATA_INT16 && num_values >= 4 && len >= 8` so a short DATA frame cannot leak a zero-filled `i16[3]` as a valid intensity reading.
 3. Installs a SIGINT handler.
 4. Loop at `--hz` (default 100 Hz, `clock_nanosleep CLOCK_MONOTONIC TIMER_ABSTIME` so cumulative drift is zero):
-   - Drain the color sensor non-blocking, keep the latest reflection value
-   - `err = target - reflection`
+   - Drain the color sensor non-blocking, keep the latest intensity value (`s.data.i16[3]`, clamped to `[0, 1024]`)
+   - `err = target - intensity`
    - `turn_dps = clamp(kp * err, ±max_turn)`
    - `ioctl(DRIVEBASE_DRIVE_FOREVER, {speed_mmps, turn_dps})`
 5. On SIGINT: `ioctl(DRIVEBASE_STOP, {COAST})`, close fds, exit.
 
 ### 2.3 `linetrace target <N>` / `linetrace max_turn <DPS>` (Issue #119)
 
-Single-purpose subcommands that mutate `target` / `max_turn` without engaging the drivebase.  Lets the user set the operational reflectance threshold while still idle, so `linetrace status` shows last_err against the real target during robot positioning.  `max_turn` is also usable as live-tuning during a `run`: changing it makes the next tick re-derive the anti-windup clamp from the new value.
+Single-purpose subcommands that mutate `target` / `max_turn` without engaging the drivebase.  Lets the user set the operational intensity threshold while still idle, so `linetrace status` shows last_err against the real target during robot positioning.  `max_turn` is also usable as live-tuning during a `run`: changing it makes the next tick re-derive the anti-windup clamp from the new value.
 
 ```
-linetrace target 38            # apply the cal midpoint
+linetrace target 512           # apply the cal midpoint
 linetrace max_turn 120         # tighter output cap for aggressive damping
 ```
 
-Ranges: `target ∈ [0, 100]`, `max_turn ∈ [1, 1000]`.  Missing / extra / non-integer arguments are usage errors; query the current values with `linetrace status`.
+Ranges: `target ∈ [0, 1024]`, `max_turn ∈ [1, 1000]`.  Missing / extra / non-integer arguments are usage errors; query the current values with `linetrace status`.
 
 ### 2.4 `linetrace pidstat` (Issue #118)
 
@@ -74,15 +74,15 @@ Default `interval_ms = 1000` (1 Hz).  Shorter intervals load printf/USB-CDC onto
 #### Columns (14)
 
 ```
- time_ms      iter   refl     err   err_min   err_max  err_avg    zc    d_max    d_avg      i_acc  turn_max  turn_avg    sat
+ time_ms      iter intens     err   err_min   err_max  err_avg    zc    d_max    d_avg      i_acc  turn_max  turn_avg    sat
 ```
 
 | Column | Kind | Meaning |
 |---|---|---|
 | `time_ms` | snapshot | Elapsed since pidstat start (graph x-axis) |
 | `iter` | snapshot | Daemon control-tick counter (uint32, wraps ≈497 d) |
-| `refl` | snapshot | Color sensor reflection (0–100) |
-| `err` | snapshot | `target - refl` |
+| `intens` | snapshot | Color sensor RGB+I intensity channel (0–1024); short for "intensity", header width matches the `%6d` data column |
+| `err` | snapshot | `target - intens` |
 | `err_min/max` | interval agg | Min/max err over preceding interval (100 Hz ticks).  **Aliasing defense** |
 | `err_avg` | interval agg | **mean(\|err\|) × 10** (0.1 fixed-point).  IAE-style tracking quality |
 | `zc` | interval agg | Zero-crossings of err sign in the interval |
@@ -132,8 +132,8 @@ awk '!/^#/ && NR>1 {print $1, $4}' pidstat.log | gnuplot -p -e \
 
 ### 3.1 Core knobs
 
-- `target`: midpoint reflection between line (black) and floor (white).  Use `linetrace cal` first.
-- `kp`: start at 1.0 and double until the robot oscillates, then back off ~30 %.  Typical values 1.5–4.0.
+- `target`: midpoint intensity between line (dark) and floor (bright).  Use `linetrace cal` first.
+- `kp`: start at 0.1 and double until the robot oscillates, then back off ~30 %.  Typical values 0.15–0.4.  These are ~1/10 of the reflection-era kp because the err absolute value is now ~10× larger (intensity range 0–1024 vs reflection 0–100).
 - `--max-turn`: caps the turn rate so a brief lost-line spike (high `err`) cannot fling the robot.  Default 180 dps is safe for a 56 mm-wheel chassis.
 - `--hz`: the LPF2 color sensor publishes at ≈100 Hz; loops faster than that just re-issue the same sample.  Slower (e.g. 50 Hz) reduces CPU but adds latency.
 
@@ -145,7 +145,7 @@ awk '!/^#/ && NR>1 {print $1, $4}' pidstat.log | gnuplot -p -e \
 ## 5. Out of scope (future Issues)
 
 - D term — current loop is P-only.  Add if oscillation / overshoot becomes problematic at higher speeds.
-- Line-loss detection / search — the loop blindly drives at the most recent reflection forever.  pybricks does not handle this either; add a watchdog (no fresh sample within N ms → coast) when needed.
+- Line-loss detection / search — the loop blindly drives at the most recent intensity reading forever.  pybricks does not handle this either; add a watchdog (no fresh sample within N ms → coast) when needed.
 - Gain scheduling — at higher speeds `kp` should fall to keep the same closed-loop bandwidth; current CLI is constant-gain.
 - Junction recognition (T / cross intersections) — needs color classification + a state machine.
 - IMU heading correction — would conflict with color-driven steering; this app uses color alone.
@@ -154,4 +154,4 @@ awk '!/^#/ && NR>1 {print $1, $4}' pidstat.log | gnuplot -p -e \
 
 - pybricks canonical pattern: `pybricks/tests/motors/drivebase_line.py`
 - drivebase ABI: [drivebase.md](drivebase.md), `boards/spike-prime-hub/include/board_drivebase.h`
-- color sensor (LPF2 type 61, REFLT mode): [sensor.md](sensor.md), `boards/spike-prime-hub/include/board_legosensor.h`
+- color sensor (LPF2 type 61, RGB+I mode 5): [sensor.md](sensor.md), `boards/spike-prime-hub/include/board_legosensor.h`

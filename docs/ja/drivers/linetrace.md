@@ -1,6 +1,6 @@
 # linetrace (Issue #107)
 
-LEGO color sensor から反射光サンプルを読み取りつつ `DRIVEBASE_DRIVE_FOREVER` を連続発行してライントレースを行う、NSH builtin のユーザー空間アプリ。pybricks 公式パターン (`pybricks/tests/motors/drivebase_line.py`) — `err = target - reflection(); drive(speed, err * Kp); wait(...)` をユーザースクリプト側で回す手法 — をそのまま spike-nx に持ち込んだもの。
+LEGO color sensor の RGB+I intensity チャネル (mode 5、INT16 第4チャネル、0..1024) を読み取りつつ `DRIVEBASE_DRIVE_FOREVER` を連続発行してライントレースを行う、NSH builtin のユーザー空間アプリ。pybricks 公式パターン (`pybricks/tests/motors/drivebase_line.py`) — `err = target - intensity(); drive(speed, err * Kp); wait(...)` をユーザースクリプト側で回す手法 — をそのまま spike-nx に持ち込んだもの。Issue #125 で入力源を mode 1 (REFLT、INT8 0..100) から mode 5 に切り替えた (intensity の方が量子化が細かく、Reflection でライン端に出ていた 1 LSB ジッタが消える)。
 
 ## 1. なぜ別アプリで切り出すか
 
@@ -23,27 +23,27 @@ linetrace run <speed_mmps> <kp> [target] \      # 主コマンド
 linetrace                                       # usage 表示
 ```
 
-デフォルト: `target=50`, `--max-turn=180`, `--hz=100`。`kp` は実数 (`linetrace run 100 1.5` 等)。
+デフォルト: `target=512`, `--max-turn=180`, `--hz=100`。`kp` は実数 (`linetrace run 100 0.3` 等)。intensity モードでは err 絶対値が ~10× になるので、reflection 時代の `kp` 値の **1/10 程度から開始する** (例: 1.5 → 0.15)。
 
 ### 2.1 `linetrace cal`
 
-`/dev/uorb/sensor_color` を CLAIM → SELECT(mode=1, REFLT) → 3 秒サンプリングし、その間に手で線の上 / 床の上をなぞる。観測 min / max / midpoint を表示。
+`/dev/uorb/sensor_color` を CLAIM → SELECT(mode=5, RGB+I) → 第4 INT16 チャネル (intensity, 0..1024) を 3 秒サンプリングし、その間に手で線の上 / 床の上をなぞる。観測 min / max / midpoint を表示。
 
 ```
 nsh> linetrace cal
-linetrace: sampling for 3000 ms — sweep the sensor over black/white
-linetrace: cal 250 samples: black=4 white=72 midpoint=38
-           suggested: linetrace run <speed_mmps> <kp> 38
+linetrace: sampling for 3000 ms — sweep the sensor over dark/bright
+linetrace: cal 250 samples: dark=42 bright=982 midpoint=512
+           suggested: linetrace run <speed_mmps> <kp> 512
 ```
 
 ### 2.2 `linetrace run`
 
 1. `/dev/drivebase` を open し `DRIVEBASE_GET_STATE`。`active_command != DRIVEBASE_ACTIVE_NONE` (他の drive 系コマンドが進行中) なら refuse して exit。
-2. `/dev/uorb/sensor_color` を open、CLAIM、SELECT(mode=1, REFLT)。
+2. `/dev/uorb/sensor_color` を open、CLAIM、SELECT(mode=5, RGB+I)。サンプル読み取りは `mode_id == 5 && data_type == LUMP_DATA_INT16 && num_values >= 4 && len >= 8` でゲートし、短い DATA フレームで zero-fill された `i16[3]` を有効サンプル扱いしないようにする。
 3. SIGINT handler を登録。
 4. `--hz` (既定 100 Hz、`clock_nanosleep CLOCK_MONOTONIC TIMER_ABSTIME` で累積ドリフト 0) でループ:
-   - color sensor を non-blocking に drain、最新サンプルを保持
-   - `err = target - reflection`
+   - color sensor を non-blocking に drain、最新 intensity 値 (`s.data.i16[3]`、`[0, 1024]` にクランプ) を保持
+   - `err = target - intensity`
    - `turn_dps = clamp(kp * err, ±max_turn)`
    - `ioctl(DRIVEBASE_DRIVE_FOREVER, {speed_mmps, turn_dps})`
 5. SIGINT 受信時: `ioctl(DRIVEBASE_STOP, {COAST})` → fd close → exit。
@@ -53,11 +53,11 @@ linetrace: cal 250 samples: black=4 white=72 midpoint=38
 `run` を打たずに `target` / `max_turn` を更新するための単機能サブコマンド。`linetrace start` 直後の idle 状態でも、運用 target を反映した `last_err` を `linetrace status` で確認できるようにするため。走行中に `max_turn` を変えると anti-windup clamp 値が次 tick から再導出されるので live tuning にも使える。
 
 ```
-linetrace target 38            # cal で求めた midpoint を反映
+linetrace target 512           # cal で求めた midpoint を反映
 linetrace max_turn 120         # 出力上限を狭めてアグレッシブ抑制
 ```
 
-範囲: `target ∈ [0, 100]`, `max_turn ∈ [1, 1000]`。引数なし / 余剰引数 / 非整数は usage エラー (現在値は `linetrace status` で参照)。
+範囲: `target ∈ [0, 1024]`, `max_turn ∈ [1, 1000]`。引数なし / 余剰引数 / 非整数は usage エラー (現在値は `linetrace status` で参照)。
 
 ### 2.4 `linetrace pidstat` (Issue #118)
 
@@ -74,15 +74,15 @@ linetrace pidstat 5000 100              # 5 秒間 100 ms interval (= ~50 行 + 
 #### 出力列 (14 列)
 
 ```
- time_ms      iter   refl     err   err_min   err_max  err_avg    zc    d_max    d_avg      i_acc  turn_max  turn_avg    sat
+ time_ms      iter intens     err   err_min   err_max  err_avg    zc    d_max    d_avg      i_acc  turn_max  turn_avg    sat
 ```
 
 | 列 | 型 | 意味 |
 |---|---|---|
 | `time_ms` | snapshot | pidstat 開始からの経過時間 (グラフ横軸) |
 | `iter` | snapshot | daemon の制御 tick カウンタ (uint32 表示、≈497 日で wrap) |
-| `refl` | snapshot | カラーセンサ反射光 (0–100) |
-| `err` | snapshot | `target - refl` |
+| `intens` | snapshot | カラーセンサ RGB+I の intensity チャネル (0–1024)。`%6d` データ幅に合わせた省略表記 |
+| `err` | snapshot | `target - intens` |
 | `err_min/max` | interval 集計 | 直前 interval (100 Hz 全 tick) の偏差 min/max。**aliasing 回避** |
 | `err_avg` | interval 集計 | 直前 interval の **mean(\|err\|) × 10** (0.1 固定小数点)。IAE 系追従品質指標 |
 | `zc` | interval 集計 | 直前 interval の zero-crossing 回数 (符号反転) |
@@ -132,8 +132,8 @@ awk '!/^#/ && NR>1 {print $1, $4}' pidstat.log | gnuplot -p -e \
 
 ### 3.1 基本パラメータ
 
-- `target`: ライン (黒) と床 (白) の中間反射光。`linetrace cal` で実測してから決める。
-- `kp`: 1.0 から始めて発振するまで倍にしていき、発振したら 30 % 落とす。経験的に 1.5–4.0 が標準。
+- `target`: ライン (暗) と床 (明) の中間 intensity 値。`linetrace cal` で実測してから決める。
+- `kp`: 0.1 から始めて発振するまで倍にしていき、発振したら 30 % 落とす。経験的に 0.15–0.4 が標準。reflection 時代 (0..100) の kp の **約 1/10** に相当 — err 絶対値が intensity (0..1024) で ~10× になるため。
 - `--max-turn`: 一瞬ラインを失った時に巨大な err が出ても吹っ飛ばないよう turn rate を頭打ちにする。56 mm 車輪のシャシで既定 180 dps は安全側。
 - `--hz`: LPF2 カラーセンサの publish レートは ≈100 Hz なので、それ以上回しても同じサンプルを使い回すだけ。50 Hz 等に落とすと CPU は減るがレイテンシが増える。
 
@@ -154,4 +154,4 @@ awk '!/^#/ && NR>1 {print $1, $4}' pidstat.log | gnuplot -p -e \
 
 - pybricks カノニカルパターン: `pybricks/tests/motors/drivebase_line.py`
 - drivebase ABI: [drivebase.md](drivebase.md), `boards/spike-prime-hub/include/board_drivebase.h`
-- color sensor (LPF2 type 61, REFLT mode): [sensor.md](sensor.md), `boards/spike-prime-hub/include/board_legosensor.h`
+- color sensor (LPF2 type 61, RGB+I mode 5): [sensor.md](sensor.md), `boards/spike-prime-hub/include/board_legosensor.h`

@@ -5,11 +5,11 @@ config APP_LINETRACE
 	depends on LEGO_SENSOR
 	---help---
 		User-space NSH builtin that follows a line by issuing
-		DRIVEBASE_DRIVE_FOREVER continuously while reading reflected-
-		light samples from /dev/uorb/sensor_color (mode 1, REFLT,
-		INT8 0..100).  Modeled on the pybricks
+		DRIVEBASE_DRIVE_FOREVER continuously while reading intensity
+		samples from /dev/uorb/sensor_color (mode 5, RGB+I, INT16
+		channel 4 = intensity, 0..1024).  Modeled on the pybricks
 		`tests/motors/drivebase_line.py` pattern: a tight user-side
-		`err = target - reflection(); drive(speed, err * Kp); wait(...)`
+		`err = target - intensity(); drive(speed, err * Kp); wait(...)`
 		loop.
 
 		Subcommands:
