@@ -23,9 +23,9 @@ const struct capture_schema_s g_capture_schema_color_rgbi_run =
   .fields       =
   {
     CAPTURE_FIELD_INIT(color_rgbi_run, ts_us,     u32, "us",  0),
-    CAPTURE_FIELD_INIT(color_rgbi_run, red,       u8,  "raw", 0),
-    CAPTURE_FIELD_INIT(color_rgbi_run, green,     u8,  "raw", 0),
-    CAPTURE_FIELD_INIT(color_rgbi_run, blue,      u8,  "raw", 0),
-    CAPTURE_FIELD_INIT(color_rgbi_run, intensity, u8,  "raw", 0),
+    CAPTURE_FIELD_INIT(color_rgbi_run, red,       u16, "raw", 0),
+    CAPTURE_FIELD_INIT(color_rgbi_run, green,     u16, "raw", 0),
+    CAPTURE_FIELD_INIT(color_rgbi_run, blue,      u16, "raw", 0),
+    CAPTURE_FIELD_INIT(color_rgbi_run, intensity, u16, "raw", 0),
   },
 };

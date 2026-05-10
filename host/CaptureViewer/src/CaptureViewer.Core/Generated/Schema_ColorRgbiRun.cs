@@ -15,17 +15,17 @@ public static class SchemaColorRgbiRun
 {
     public const ushort Magic        = 0x0011;
     public const string Name         = "color_rgbi_run";
-    public const int    RecordSize   = 8;
+    public const int    RecordSize   = 12;
     public const int    FieldCount   = 5;
     public const int    RateHzHint   = 100;
 
     public static readonly IReadOnlyList<FieldDescriptor> Fields = new[]
     {
         new FieldDescriptor("ts_us", FieldType.U32, 0, 4, 0, "us"),
-        new FieldDescriptor("red", FieldType.U8, 4, 1, 0, "raw"),
-        new FieldDescriptor("green", FieldType.U8, 5, 1, 0, "raw"),
-        new FieldDescriptor("blue", FieldType.U8, 6, 1, 0, "raw"),
-        new FieldDescriptor("intensity", FieldType.U8, 7, 1, 0, "raw"),
+        new FieldDescriptor("red", FieldType.U16, 4, 2, 0, "raw"),
+        new FieldDescriptor("green", FieldType.U16, 6, 2, 0, "raw"),
+        new FieldDescriptor("blue", FieldType.U16, 8, 2, 0, "raw"),
+        new FieldDescriptor("intensity", FieldType.U16, 10, 2, 0, "raw"),
     };
 
     public static Record Parse(ReadOnlySpan<byte> data)
@@ -37,19 +37,19 @@ public static class SchemaColorRgbiRun
 
         var r = new Record();
         { var slice = data.Slice(0, 4); r.ts_us = BinaryPrimitives.ReadUInt32LittleEndian(slice); }
-        { var slice = data.Slice(4, 1); r.red = slice[0]; }
-        { var slice = data.Slice(5, 1); r.green = slice[0]; }
-        { var slice = data.Slice(6, 1); r.blue = slice[0]; }
-        { var slice = data.Slice(7, 1); r.intensity = slice[0]; }
+        { var slice = data.Slice(4, 2); r.red = BinaryPrimitives.ReadUInt16LittleEndian(slice); }
+        { var slice = data.Slice(6, 2); r.green = BinaryPrimitives.ReadUInt16LittleEndian(slice); }
+        { var slice = data.Slice(8, 2); r.blue = BinaryPrimitives.ReadUInt16LittleEndian(slice); }
+        { var slice = data.Slice(10, 2); r.intensity = BinaryPrimitives.ReadUInt16LittleEndian(slice); }
         return r;
     }
 
     public struct Record
     {
         public uint ts_us;
-        public byte red;
-        public byte green;
-        public byte blue;
-        public byte intensity;
+        public ushort red;
+        public ushort green;
+        public ushort blue;
+        public ushort intensity;
     }
 }

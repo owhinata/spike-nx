@@ -725,12 +725,44 @@ static int convert_sample(FAR const capture_schema_t *schema,
       struct capture_color_rgbi_run_record_s rec = {0};
       rec.ts_us = ts_us;
 
-      if (s->data_type == LUMP_DATA_INT8 && s->num_values >= 4)
+      /* MODE 5 of the LEGO 45605 publishes 4 INT16 values (R/G/B and
+       * the ambient-intensity channel) with a typical raw range of
+       * 0..1024.  An INT8 fallback covers the rare combiner that
+       * downscales to a byte channel.  Negative values get clamped
+       * to 0 because the schema field is uint16_t.
+       */
+
+      if (s->num_values >= 4)
         {
-          rec.red       = (uint8_t)(s->data.i8[0] < 0 ? 0 : s->data.i8[0]);
-          rec.green     = (uint8_t)(s->data.i8[1] < 0 ? 0 : s->data.i8[1]);
-          rec.blue      = (uint8_t)(s->data.i8[2] < 0 ? 0 : s->data.i8[2]);
-          rec.intensity = (uint8_t)(s->data.i8[3] < 0 ? 0 : s->data.i8[3]);
+          int r = 0, g = 0, b = 0, i = 0;
+          if (s->data_type == LUMP_DATA_INT16)
+            {
+              r = s->data.i16[0];
+              g = s->data.i16[1];
+              b = s->data.i16[2];
+              i = s->data.i16[3];
+            }
+          else if (s->data_type == LUMP_DATA_INT8)
+            {
+              r = s->data.i8[0];
+              g = s->data.i8[1];
+              b = s->data.i8[2];
+              i = s->data.i8[3];
+            }
+
+          if (r < 0)     r = 0;
+          if (r > 65535) r = 65535;
+          if (g < 0)     g = 0;
+          if (g > 65535) g = 65535;
+          if (b < 0)     b = 0;
+          if (b > 65535) b = 65535;
+          if (i < 0)     i = 0;
+          if (i > 65535) i = 65535;
+
+          rec.red       = (uint16_t)r;
+          rec.green     = (uint16_t)g;
+          rec.blue      = (uint16_t)b;
+          rec.intensity = (uint16_t)i;
         }
 
       memcpy(out_record, &rec, sizeof(rec));

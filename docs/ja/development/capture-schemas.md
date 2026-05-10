@@ -47,16 +47,16 @@
 
 ## `color_rgbi_run` (magic 0x0011)
 
-- record size: 8 bytes
+- record size: 12 bytes
 - rate hint: 100 Hz
 
 | offset | name | type | unit | scale 10^n |
 |-------:|------|------|------|-----------:|
 | 0 | `ts_us` | `u32` | `us` | 0 |
-| 4 | `red` | `u8` | `raw` | 0 |
-| 5 | `green` | `u8` | `raw` | 0 |
-| 6 | `blue` | `u8` | `raw` | 0 |
-| 7 | `intensity` | `u8` | `raw` | 0 |
+| 4 | `red` | `u16` | `raw` | 0 |
+| 6 | `green` | `u16` | `raw` | 0 |
+| 8 | `blue` | `u16` | `raw` | 0 |
+| 10 | `intensity` | `u16` | `raw` | 0 |
 
 ## 新規スキーマの追加手順
 
