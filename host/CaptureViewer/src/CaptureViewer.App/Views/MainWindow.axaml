@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:CaptureViewer.App.ViewModels"
+        xmlns:vmconv="using:CaptureViewer.App.ViewModels.Converters"
         xmlns:scp="using:ScottPlot.Avalonia"
         x:Class="CaptureViewer.App.Views.MainWindow"
         x:DataType="vm:MainViewModel"
@@ -38,7 +39,12 @@
     </Style>
   </Window.Styles>
 
-  <Grid ColumnDefinitions="320,*" RowDefinitions="*,Auto">
+  <Grid RowDefinitions="*,Auto">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="320" MinWidth="200" />
+      <ColumnDefinition Width="Auto" />
+      <ColumnDefinition Width="*" MinWidth="300" />
+    </Grid.ColumnDefinitions>
 
     <!-- Left sidebar — outer Grid keeps the log pinned to a fixed
          height at the bottom while the rest scrolls.  This stops the
@@ -118,32 +124,44 @@
                         Margin="0,0,0,4"
                         CornerRadius="3">
                   <StackPanel Spacing="2">
-                    <Grid ColumnDefinitions="Auto,Auto,*,Auto">
-                      <Border Grid.Column="0" Classes="swatch"
+                    <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto">
+                      <Button Grid.Column="0"
+                              Padding="2,0"
+                              FontSize="9"
+                              MinWidth="16"
+                              Background="Transparent"
+                              BorderThickness="0"
+                              Command="{Binding ToggleExpandedCommand}"
+                              Content="{Binding IsExpanded, Converter={x:Static vmconv:BoolToTriangle.Instance}}"
+                              ToolTip.Tip="Expand / collapse this row" />
+                      <Border Grid.Column="1" Classes="swatch"
                               Background="{Binding ColorBrush}" />
-                      <CheckBox Grid.Column="1"
+                      <CheckBox Grid.Column="2"
                                 IsChecked="{Binding IsVisible, Mode=TwoWay}"
                                 VerticalAlignment="Center" />
-                      <TextBlock Grid.Column="2"
+                      <TextBlock Grid.Column="3"
                                  Classes="value"
                                  Text="{Binding Label}"
                                  Margin="6,0,0,0"
                                  VerticalAlignment="Center"
                                  TextTrimming="CharacterEllipsis" />
-                      <Button Grid.Column="3" Content="X"
+                      <Button Grid.Column="4" Content="X"
                               Padding="6,1"
                               FontSize="10"
                               ToolTip.Tip="Remove this capture from the list"
                               Command="{Binding RemoveCommand}" />
                     </Grid>
-                    <TextBlock Classes="label"
-                               Text="{Binding SchemaName, StringFormat='schema: {0}'}" />
-                    <TextBlock Classes="label"
-                               Text="{Binding RecordCount, StringFormat='records: {0}'}" />
-                    <Button Content="CSV..."
-                            Padding="4,1"
-                            HorizontalAlignment="Left"
-                            Command="{Binding ExportCsvCommand}" />
+                    <StackPanel Spacing="2"
+                                IsVisible="{Binding IsExpanded}">
+                      <TextBlock Classes="label"
+                                 Text="{Binding SchemaName, StringFormat='schema: {0}'}" />
+                      <TextBlock Classes="label"
+                                 Text="{Binding RecordCount, StringFormat='records: {0}'}" />
+                      <Button Content="CSV..."
+                              Padding="4,1"
+                              HorizontalAlignment="Left"
+                              Command="{Binding ExportCsvCommand}" />
+                    </StackPanel>
                   </StackPanel>
                 </Border>
               </DataTemplate>
@@ -180,8 +198,16 @@
       </Border>
     </Grid>
 
+    <!-- Drag handle between sidebar and plot. -->
+    <GridSplitter Grid.Column="1" Grid.Row="0"
+                  Width="4"
+                  Background="#303030"
+                  ResizeDirection="Columns"
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Stretch" />
+
     <!-- Plot area (also accepts .cap drag-and-drop). -->
-    <Grid Grid.Column="1" Grid.Row="0"
+    <Grid Grid.Column="2" Grid.Row="0"
           x:Name="PlotHost"
           Background="#1A1A1A" Margin="6"
           RowDefinitions="Auto,*"
@@ -212,7 +238,7 @@
     </Grid>
 
     <!-- Status bar -->
-    <Border Grid.Column="0" Grid.ColumnSpan="2" Grid.Row="1"
+    <Border Grid.Column="0" Grid.ColumnSpan="3" Grid.Row="1"
             Background="#101010" Padding="8,4">
       <TextBlock Classes="value"
                  Text="{Binding StatusText}" />

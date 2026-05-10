@@ -46,6 +46,16 @@ public sealed partial class LoadedCaptureViewModel : ObservableObject
     [ObservableProperty]
     private bool _isVisible = true;
 
+    /// <summary>
+    /// Sidebar row collapse state.  When false, only the header
+    /// (color swatch + visibility checkbox + label + remove button)
+    /// is shown so the loaded-captures list stays compact even with
+    /// 10+ captures loaded.  Defaults to expanded so the schema /
+    /// record-count hints are visible the first time a capture lands.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isExpanded = true;
+
     public LoadedCaptureViewModel(
         CaptureFile capture,
         string label,
@@ -71,4 +81,7 @@ public sealed partial class LoadedCaptureViewModel : ObservableObject
 
     [RelayCommand]
     private void Remove() => _remove?.Invoke(this);
+
+    [RelayCommand]
+    private void ToggleExpanded() => IsExpanded = !IsExpanded;
 }
