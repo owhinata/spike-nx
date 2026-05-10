@@ -61,7 +61,6 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     public ObservableCollection<LoadedCaptureViewModel> Loaded { get; } = new();
     public ObservableCollection<string> LogLines { get; } = new();
-    public ObservableCollection<string> AvailableFields { get; } = new();
     public ObservableCollection<BluetoothPort> Ports { get; } = new();
 
     public IReadOnlyList<TimeAxisMode> TimeAxisModes { get; } =
@@ -79,10 +78,28 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         "captures");
 
     [ObservableProperty]
-    private string? _selectedFieldName;
-
-    [ObservableProperty]
     private TimeAxisMode _timeAxis = TimeAxisMode.Relative;
+
+    /// <summary>
+    /// Per-axis Y-range bindings (4 axes total, all rendered on the
+    /// left side of the plot).  Empty string == "auto-scale".
+    /// Strings (not nullable doubles) so the user can type freely;
+    /// the plot code-behind parses with <c>double.TryParse</c>.
+    ///
+    /// Defaults match the LEGO Color sensor's natural split:
+    ///   axis 1: 0..100   (Reflection / R / G / B)
+    ///   axis 2: 0..1024  (Intensity)
+    ///   axis 3: empty    (autoscale — reserved for future schemas)
+    ///   axis 4: empty    (autoscale — reserved for future schemas)
+    /// </summary>
+    [ObservableProperty] private string _axis1Min = "0";
+    [ObservableProperty] private string _axis1Max = "100";
+    [ObservableProperty] private string _axis2Min = "0";
+    [ObservableProperty] private string _axis2Max = "1024";
+    [ObservableProperty] private string _axis3Min = string.Empty;
+    [ObservableProperty] private string _axis3Max = string.Empty;
+    [ObservableProperty] private string _axis4Min = string.Empty;
+    [ObservableProperty] private string _axis4Max = string.Empty;
 
     [ObservableProperty]
     private bool _isConnected;
@@ -267,21 +284,22 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private void ClearAll()
     {
         Loaded.Clear();
-        AvailableFields.Clear();
-        SelectedFieldName = null;
         StatusText = "Cleared";
         PlotInvalidated?.Invoke();
     }
 
     /// <summary>
-    /// Fit-to-data shortcut.  Equivalent to right-clicking the plot
-    /// → "Auto Scale" but discoverable from the toolbar.  The redraw
-    /// already calls <c>plot.Axes.AutoScale()</c>, so simply
-    /// re-firing <see cref="PlotInvalidated"/> resets pan/zoom state.
+    /// Fit-to-data shortcut.  Clears the Y-range overrides so both
+    /// axes auto-scale, then re-fires <see cref="PlotInvalidated"/>
+    /// so the redraw rescans the visible captures' value ranges.
     /// </summary>
     [RelayCommand]
     private void AutoFit()
     {
+        Axis1Min = string.Empty; Axis1Max = string.Empty;
+        Axis2Min = string.Empty; Axis2Max = string.Empty;
+        Axis3Min = string.Empty; Axis3Max = string.Empty;
+        Axis4Min = string.Empty; Axis4Max = string.Empty;
         PlotInvalidated?.Invoke();
         StatusText = "Auto-fit";
     }
@@ -401,7 +419,6 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private void RemoveRow(LoadedCaptureViewModel row)
     {
         if (!Loaded.Remove(row)) return;
-        RefreshAvailableFields();
         StatusText = $"Removed {row.Label}";
         PlotInvalidated?.Invoke();
     }
@@ -439,40 +456,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         var color = Palette[Loaded.Count % Palette.Length];
         Loaded.Add(new LoadedCaptureViewModel(
-            capture, label, color, ExportRowCsvAsync, RemoveRow));
-        RefreshAvailableFields();
+            capture, label, color,
+            ExportRowCsvAsync,
+            RemoveRow,
+            onFieldVisibilityChanged: () => PlotInvalidated?.Invoke()));
         StatusText = $"Loaded {label} ({capture.SchemaName}, {capture.RecordCount} records)";
         PlotInvalidated?.Invoke();
-    }
-
-    private void RefreshAvailableFields()
-    {
-        // Re-derive the field selector from the union of every still-
-        // loaded capture's fields.  Drops `ts_us` since that is always
-        // the x-axis.
-        var union = new SortedSet<string>(StringComparer.Ordinal);
-        foreach (var lc in Loaded)
-        {
-            foreach (var f in lc.Capture.Fields)
-            {
-                if (f.Name != "ts_us") union.Add(f.Name);
-            }
-        }
-
-        var oldSelected = SelectedFieldName;
-        AvailableFields.Clear();
-        foreach (var name in union) AvailableFields.Add(name);
-
-        if (oldSelected is not null && AvailableFields.Contains(oldSelected))
-        {
-            SelectedFieldName = oldSelected;
-        }
-        else
-        {
-            SelectedFieldName = AvailableFields.Count > 0
-                ? AvailableFields[0]
-                : null;
-        }
     }
 
     private void AppendLog(string line)
@@ -524,15 +513,15 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    partial void OnSelectedFieldNameChanged(string? value)
-    {
-        PlotInvalidated?.Invoke();
-    }
-
-    partial void OnTimeAxisChanged(TimeAxisMode value)
-    {
-        PlotInvalidated?.Invoke();
-    }
+    partial void OnTimeAxisChanged(TimeAxisMode value) => PlotInvalidated?.Invoke();
+    partial void OnAxis1MinChanged(string value)        => PlotInvalidated?.Invoke();
+    partial void OnAxis1MaxChanged(string value)        => PlotInvalidated?.Invoke();
+    partial void OnAxis2MinChanged(string value)        => PlotInvalidated?.Invoke();
+    partial void OnAxis2MaxChanged(string value)        => PlotInvalidated?.Invoke();
+    partial void OnAxis3MinChanged(string value)        => PlotInvalidated?.Invoke();
+    partial void OnAxis3MaxChanged(string value)        => PlotInvalidated?.Invoke();
+    partial void OnAxis4MinChanged(string value)        => PlotInvalidated?.Invoke();
+    partial void OnAxis4MaxChanged(string value)        => PlotInvalidated?.Invoke();
 
     partial void OnIsConnectedChanged(bool value)
     {

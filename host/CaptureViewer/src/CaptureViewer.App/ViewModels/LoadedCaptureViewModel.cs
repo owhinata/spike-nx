@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+
 using Avalonia.Media;
 
 using CaptureViewer.Core.Capture;
@@ -57,12 +59,15 @@ public sealed partial class LoadedCaptureViewModel : ObservableObject
     [ObservableProperty]
     private bool _isExpanded;
 
+    public ObservableCollection<FieldVisibilityViewModel> Fields { get; } = new();
+
     public LoadedCaptureViewModel(
         CaptureFile capture,
         string label,
         uint colorArgb,
         Func<LoadedCaptureViewModel, Task>? exportCsv = null,
-        Action<LoadedCaptureViewModel>? remove = null)
+        Action<LoadedCaptureViewModel>? remove = null,
+        Action? onFieldVisibilityChanged = null)
     {
         Capture = capture;
         Label = label;
@@ -70,6 +75,14 @@ public sealed partial class LoadedCaptureViewModel : ObservableObject
         ColorBrush = new SolidColorBrush(Color.FromUInt32(colorArgb));
         _exportCsv = exportCsv;
         _remove = remove;
+
+        // Build per-field visibility toggles for everything except
+        // ts_us (which is the X axis and never plotted as a series).
+        foreach (var f in capture.Fields)
+        {
+            if (f.Name == "ts_us") continue;
+            Fields.Add(new FieldVisibilityViewModel(f.Name, onFieldVisibilityChanged));
+        }
     }
 
     public string SchemaName => Capture.SchemaName;

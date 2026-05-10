@@ -34,12 +34,28 @@ public partial class MainWindow : Window
 
     private AvaPlot? _avaPlot;
     private ScrollViewer? _logScroller;
+    private IYAxis[] _yAxes = Array.Empty<IYAxis>();
 
     public MainWindow()
     {
         InitializeComponent();
         _avaPlot = this.FindControl<AvaPlot>("AvaPlot1");
         _logScroller = this.FindControl<ScrollViewer>("LogScroller");
+
+        if (_avaPlot is not null)
+        {
+            // Stand up four left-stacked Y axes once.  Plot.Clear()
+            // only drops plottables, so these references stay valid
+            // across redraws.
+            var p = _avaPlot.Plot;
+            _yAxes = new IYAxis[]
+            {
+                p.Axes.Left,
+                p.Axes.AddLeftAxis(),
+                p.Axes.AddLeftAxis(),
+                p.Axes.AddLeftAxis(),
+            };
+        }
 
         DataContextChanged += OnDataContextChanged;
         ConfigurePlotChrome();
@@ -112,34 +128,46 @@ public partial class MainWindow : Window
         if (_avaPlot is null) return;
         var p = _avaPlot.Plot;
 
-        // Pin the font to DejaVu Sans.  ScottPlot's auto-font-detect
-        // (https://scottplot.net/faq/dependencies/) silently fails
-        // inside an Avalonia process — Avalonia configures SkiaSharp
-        // with a font resolver that doesn't expose the system fonts
-        // ScottPlot expects, so tick labels / axis labels render as
-        // zero-glyph blanks even though the line + grid still draw.
-        // DejaVu Sans is shipped with virtually every desktop Linux.
+        // Pin the font to DejaVu Sans (see Issue #122 commit log —
+        // ScottPlot's auto-font-detect fails inside an Avalonia
+        // process and silently renders text with zero glyphs).
         p.Font.Set("DejaVu Sans");
 
-        // Dark theme — recipe per https://scottplot.net/cookbook/5/Styling/
+        var fg = Color.FromHex("#d7d7d7");
+
         p.Add.Palette = new ScottPlot.Palettes.Penumbra();
         p.FigureBackground.Color = Color.FromHex("#181818");
         p.DataBackground.Color = Color.FromHex("#1f1f1f");
-        p.Axes.Color(Color.FromHex("#d7d7d7"));
+        p.Axes.Color(fg);
         p.Grid.MajorLineColor = Color.FromHex("#404040");
         p.Legend.BackgroundColor = Color.FromHex("#404040");
-        p.Legend.FontColor = Color.FromHex("#d7d7d7");
-        p.Legend.OutlineColor = Color.FromHex("#d7d7d7");
+        p.Legend.FontColor = fg;
+        p.Legend.OutlineColor = fg;
 
         // Larger fonts for hi-DPI laptop displays.
         p.Axes.Bottom.TickLabelStyle.FontSize = 13;
-        p.Axes.Left.TickLabelStyle.FontSize = 13;
         p.Axes.Bottom.Label.FontSize = 14;
-        p.Axes.Left.Label.FontSize = 14;
+        p.Axes.Bottom.Label.Text = "time (s)";
         p.Legend.FontSize = 12;
 
-        p.Axes.Bottom.Label.Text = "time (s)";
-        p.Axes.Left.Label.Text = "value";
+        // Apply font + colour to every left-stacked Y axis we
+        // created.  Axes.Color() above only repaints the standard
+        // ones; the additional AddLeftAxis() instances need direct
+        // assignment so their tick labels stay visible too.
+        // Per-axis textual labels are intentionally left empty —
+        // four "Y1..Y4" labels next to the tick numbers wasted
+        // horizontal space without adding information.
+        foreach (var ax in _yAxes)
+        {
+            ax.FrameLineStyle.Color = fg;
+            ax.MajorTickStyle.Color = fg;
+            ax.MinorTickStyle.Color = fg;
+            ax.TickLabelStyle.ForeColor = fg;
+            ax.Label.ForeColor = fg;
+            ax.TickLabelStyle.FontSize = 13;
+            ax.Label.FontSize = 14;
+            ax.Label.Text = string.Empty;
+        }
     }
 
     private void RedrawPlot()
@@ -150,15 +178,6 @@ public partial class MainWindow : Window
         var plot = _avaPlot.Plot;
         plot.Clear();
         ConfigurePlotChrome();
-
-        var field = vm.SelectedFieldName;
-        if (string.IsNullOrEmpty(field))
-        {
-            plot.Axes.Title.Label.Text = "(select a field)";
-            plot.Axes.Left.Label.Text = "value";
-            _avaPlot.Refresh();
-            return;
-        }
 
         ulong earliestStartTsUs = ulong.MaxValue;
         if (vm.TimeAxis == TimeAxisMode.Sequence)
@@ -175,66 +194,107 @@ public partial class MainWindow : Window
         }
 
         var anyPlotted = false;
-        string? sampleUnit = null;
+        var axisUsed = new bool[_yAxes.Length];
         var visibleIndex = 0;
         foreach (var row in vm.Loaded)
         {
             if (!row.IsVisible) continue;
 
             FieldDescriptor? tsField = null;
-            FieldDescriptor? targetField = null;
             foreach (var f in row.Capture.Fields)
             {
-                if (f.Name == "ts_us") tsField = f;
-                if (f.Name == field) targetField = f;
+                if (f.Name == "ts_us") { tsField = f; break; }
             }
-            if (tsField is null || targetField is null) continue;
-            sampleUnit ??= targetField.Unit;
+            if (tsField is null) continue;
 
-            var n = row.Capture.RecordCount;
-            var xs = new double[n];
-            var ys = new double[n];
             var offsetUs = vm.TimeAxis == TimeAxisMode.Sequence
                 ? (double)(row.Capture.StartTimestampUs - earliestStartTsUs)
                 : 0.0;
-            for (var i = 0; i < n; i++)
+
+            var fieldIndex = 0;
+            foreach (var fv in row.Fields)
             {
-                var rec = row.Capture.Records(i).Span;
-                xs[i] = (offsetUs + FieldReader.ReadRawDouble(rec, tsField!)) / 1_000_000.0;
-                ys[i] = FieldReader.ReadScaledDouble(rec, targetField!);
+                fieldIndex++;
+                if (!fv.IsChecked) continue;
+
+                FieldDescriptor? targetField = null;
+                foreach (var f in row.Capture.Fields)
+                {
+                    if (f.Name == fv.Name) { targetField = f; break; }
+                }
+                if (targetField is null) continue;
+
+                var n = row.Capture.RecordCount;
+                var xs = new double[n];
+                var ys = new double[n];
+                for (var i = 0; i < n; i++)
+                {
+                    var rec = row.Capture.Records(i).Span;
+                    xs[i] = (offsetUs + FieldReader.ReadRawDouble(rec, tsField!)) / 1_000_000.0;
+                    ys[i] = FieldReader.ReadScaledDouble(rec, targetField!);
+                }
+
+                var markerShape = MarkerPalette[(visibleIndex + fieldIndex) % MarkerPalette.Length];
+                var markerSize = n switch
+                {
+                    <= 50 => 6f,
+                    <= 200 => 4f,
+                    _ => 3f,
+                };
+
+                var scatter = plot.Add.Scatter(xs, ys);
+                scatter.LegendText = $"{row.Label} · {fv.Name}";
+                scatter.LineColor = ArgbToScottColor(row.ColorArgb);
+                scatter.LineWidth = 1.5f;
+                scatter.MarkerShape = markerShape;
+                scatter.MarkerColor = scatter.LineColor;
+                scatter.MarkerSize = markerSize;
+
+                // Bind to one of the four left-stacked Y axes per
+                // the user's per-field selector (Axis is 1-based in
+                // the UI, 0-based in our array).
+                var ai = Math.Clamp(fv.Axis - 1, 0, _yAxes.Length - 1);
+                scatter.Axes.YAxis = _yAxes[ai];
+                axisUsed[ai] = true;
+                anyPlotted = true;
             }
-
-            // Pick a marker shape that rotates per-capture in addition
-            // to the color palette so two captures with similar
-            // colours (or printed monochrome) stay distinguishable.
-            // Marker size scales down with record count: dense traces
-            // get small dots so the line shape stays visible, sparse
-            // traces get bigger markers so individual samples land.
-            var markerShape = MarkerPalette[visibleIndex % MarkerPalette.Length];
-            var markerSize = n switch
-            {
-                <= 50 => 6f,
-                <= 200 => 4f,
-                _ => 3f,
-            };
-
-            var scatter = plot.Add.Scatter(xs, ys);
-            scatter.LegendText = row.Label;
-            scatter.LineColor = ArgbToScottColor(row.ColorArgb);
-            scatter.LineWidth = 1.5f;
-            scatter.MarkerShape = markerShape;
-            scatter.MarkerColor = scatter.LineColor;
-            scatter.MarkerSize = markerSize;
-            anyPlotted = true;
             visibleIndex++;
         }
 
-        plot.Axes.Title.Label.Text = anyPlotted ? field : $"(no visible capture has `{field}`)";
-        plot.Axes.Left.Label.Text = string.IsNullOrEmpty(sampleUnit) ? "value" : sampleUnit;
-        plot.Axes.AutoScale();
-        if (anyPlotted) plot.ShowLegend();
+        // Hide Y axes nobody is plotting onto, so the empty Y3 / Y4
+        // ticks don't crowd the left margin.  Axis 1 stays visible
+        // even when unused so the plot still shows a left frame.
+        for (var i = 0; i < _yAxes.Length; i++)
+        {
+            _yAxes[i].IsVisible = (i == 0) || axisUsed[i];
+        }
 
+        plot.Axes.Title.Label.Text =
+            anyPlotted ? "Capture overlay" : "(no visible field)";
+        plot.Axes.Bottom.Label.Text = "time (s)";
+
+        plot.Axes.AutoScale();
+
+        // Apply user-supplied per-axis Y range overrides on top of
+        // AutoScale — empty / unparseable boxes leave that axis at
+        // autoscale.
+        ApplyYRangeOverride(_yAxes[0], vm.Axis1Min, vm.Axis1Max);
+        ApplyYRangeOverride(_yAxes[1], vm.Axis2Min, vm.Axis2Max);
+        ApplyYRangeOverride(_yAxes[2], vm.Axis3Min, vm.Axis3Max);
+        ApplyYRangeOverride(_yAxes[3], vm.Axis4Min, vm.Axis4Max);
+
+        if (anyPlotted) plot.ShowLegend();
         _avaPlot.Refresh();
+    }
+
+    private static void ApplyYRangeOverride(IYAxis axis, string min, string max)
+    {
+        var hasMin = double.TryParse(min, System.Globalization.CultureInfo.InvariantCulture, out var dmin);
+        var hasMax = double.TryParse(max, System.Globalization.CultureInfo.InvariantCulture, out var dmax);
+        if (hasMin && hasMax && dmax > dmin)
+        {
+            axis.Range.Set(dmin, dmax);
+        }
     }
 
     private static Color ArgbToScottColor(uint argb) =>
