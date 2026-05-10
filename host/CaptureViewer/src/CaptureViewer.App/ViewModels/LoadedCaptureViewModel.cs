@@ -50,11 +50,12 @@ public sealed partial class LoadedCaptureViewModel : ObservableObject
     /// Sidebar row collapse state.  When false, only the header
     /// (color swatch + visibility checkbox + label + remove button)
     /// is shown so the loaded-captures list stays compact even with
-    /// 10+ captures loaded.  Defaults to expanded so the schema /
-    /// record-count hints are visible the first time a capture lands.
+    /// 10+ captures loaded.  Defaults to collapsed — the label alone
+    /// is enough at a glance, and the user expands a row only when
+    /// they want the schema / record-count details or the CSV button.
     /// </summary>
     [ObservableProperty]
-    private bool _isExpanded = true;
+    private bool _isExpanded;
 
     public LoadedCaptureViewModel(
         CaptureFile capture,

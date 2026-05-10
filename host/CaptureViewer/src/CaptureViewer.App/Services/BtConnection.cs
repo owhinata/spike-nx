@@ -56,11 +56,6 @@ public sealed class BtConnection : IAsyncDisposable
         _receiver.CaptureReceived += OnCaptureReceived;
         _receiver.StreamClosed += () => Log("RFCOMM stream closed by peer");
         _receiver.ReceiveError += ex => Log($"Receiver error: {ex.Message}");
-        // Log every chunk so the operator can see traffic even when
-        // the SessionScanner has not yet found a complete BTCS+...+BTCE
-        // run (e.g. ASCII OK\n / ERR replies that precede a payload).
-        _receiver.BytesReceived += n =>
-            Log($"<- {n} bytes (total {_receiver?.BytesRead})");
         _receiver.Start();
     }
 
