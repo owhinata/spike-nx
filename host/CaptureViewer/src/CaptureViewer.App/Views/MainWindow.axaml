@@ -68,6 +68,26 @@
                        Text="Bluetooth (Linux only)" />
           </Grid>
           <StackPanel Spacing="4">
+            <Grid ColumnDefinitions="*,Auto">
+              <ComboBox Grid.Column="0"
+                        ItemsSource="{Binding Ports}"
+                        SelectedItem="{Binding SelectedPort, Mode=TwoWay}"
+                        PlaceholderText="(no paired device)"
+                        HorizontalAlignment="Stretch">
+                <ComboBox.ItemTemplate>
+                  <DataTemplate>
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                      <TextBlock Classes="value" Text="{Binding Name}" />
+                      <TextBlock Classes="label" Text="{Binding BdAddr}" />
+                    </StackPanel>
+                  </DataTemplate>
+                </ComboBox.ItemTemplate>
+              </ComboBox>
+              <Button Grid.Column="1" Content="↻"
+                      Margin="4,0,0,0"
+                      ToolTip.Tip="Re-scan paired BT devices via bluetoothctl"
+                      Command="{Binding RefreshPortsCommand}" />
+            </Grid>
             <TextBox Watermark="BD addr (XX:XX:XX:XX:XX:XX)"
                      Text="{Binding BdAddr, Mode=TwoWay}" />
             <StackPanel Orientation="Horizontal" Spacing="6">

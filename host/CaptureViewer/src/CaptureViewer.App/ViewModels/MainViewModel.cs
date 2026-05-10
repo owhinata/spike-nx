@@ -10,6 +10,9 @@ using CaptureViewer.Core.Live;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
+using ImuViewer.Core.Transport;
+using ImuViewer.Core.Transport.Linux;
+
 namespace CaptureViewer.App.ViewModels;
 
 /// <summary>How the time axis is laid out across multiple captures.</summary>
@@ -52,17 +55,23 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private BtConnection _btConnection;
     private CaptureFileWriter _captureWriter;
+    private readonly IBluetoothPortEnumerator _portEnumerator;
     private int _liveCounter;
+    private bool _bdAddrUpdating;  // re-entrancy guard for SelectedPort/BdAddr sync
 
     public ObservableCollection<LoadedCaptureViewModel> Loaded { get; } = new();
     public ObservableCollection<string> LogLines { get; } = new();
     public ObservableCollection<string> AvailableFields { get; } = new();
+    public ObservableCollection<BluetoothPort> Ports { get; } = new();
 
     public IReadOnlyList<TimeAxisMode> TimeAxisModes { get; } =
         new[] { TimeAxisMode.Relative, TimeAxisMode.Sequence };
 
     [ObservableProperty]
     private string _bdAddr = string.Empty;
+
+    [ObservableProperty]
+    private BluetoothPort? _selectedPort;
 
     [ObservableProperty]
     private string _outputDirectory = Path.Combine(
@@ -104,6 +113,46 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         _captureWriter = new CaptureFileWriter(_outputDirectory);
         _btConnection = new BtConnection(OnLiveSession, AppendLog);
+        _portEnumerator = RuntimeInformation.IsOSPlatform(OSPlatform.Linux)
+            ? new LinuxPortEnumerator()
+            : new EmptyPortEnumerator();
+
+        // Best-effort: kick off a port refresh on launch so the
+        // ComboBox is pre-populated.  Errors are swallowed (logged) —
+        // bluetoothctl missing on the path is not fatal.
+        _ = LoadPortsAsync();
+    }
+
+    [RelayCommand]
+    private Task RefreshPortsAsync() => LoadPortsAsync();
+
+    private async Task LoadPortsAsync()
+    {
+        try
+        {
+            var ports = await _portEnumerator.GetPairedPortsAsync(default);
+            Ports.Clear();
+            foreach (var port in ports) Ports.Add(port);
+            if (ports.Count > 0)
+            {
+                AppendLog($"Found {ports.Count} paired BT device(s)");
+            }
+            else
+            {
+                AppendLog("No paired BT devices (run `bluetoothctl pair ...` first)");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Port refresh failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>Fallback enumerator for non-Linux hosts.</summary>
+    private sealed class EmptyPortEnumerator : IBluetoothPortEnumerator
+    {
+        public Task<IReadOnlyList<BluetoothPort>> GetPairedPortsAsync(CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<BluetoothPort>>(Array.Empty<BluetoothPort>());
     }
 
     [RelayCommand]
@@ -112,11 +161,23 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         var top = GetMainWindow();
         if (top is null) return;
 
+        // Default to the configured Save dir so the picker opens where
+        // live captures land.  Falls back to the platform default if
+        // the directory does not exist (yet).
+        Avalonia.Platform.Storage.IStorageFolder? startFolder = null;
+        if (Directory.Exists(OutputDirectory))
+        {
+            startFolder = await top.StorageProvider
+                .TryGetFolderFromPathAsync(PathToUri(OutputDirectory))
+                .ConfigureAwait(true);
+        }
+
         var files = await top.StorageProvider.OpenFilePickerAsync(
             new Avalonia.Platform.Storage.FilePickerOpenOptions
             {
                 Title = "Open .cap files",
                 AllowMultiple = true,
+                SuggestedStartLocation = startFolder,
                 FileTypeFilter =
                 [
                     new Avalonia.Platform.Storage.FilePickerFileType("Capture files")
@@ -160,10 +221,19 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         var top = GetMainWindow();
         if (top is null) return;
 
+        Avalonia.Platform.Storage.IStorageFolder? startFolder = null;
+        if (Directory.Exists(OutputDirectory))
+        {
+            startFolder = await top.StorageProvider
+                .TryGetFolderFromPathAsync(PathToUri(OutputDirectory))
+                .ConfigureAwait(true);
+        }
+
         var folders = await top.StorageProvider.OpenFolderPickerAsync(
             new Avalonia.Platform.Storage.FolderPickerOpenOptions
             {
                 Title = "Choose a folder for live BT captures",
+                SuggestedStartLocation = startFolder,
                 AllowMultiple = false,
             });
 
@@ -177,6 +247,21 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
             ? desktop.MainWindow
             : null;
+
+    /// <summary>
+    /// Convert a local filesystem path to the file:// URI form
+    /// Avalonia.StorageProvider expects.  Handles both Linux
+    /// ("/home/ouwa/captures") and Windows ("C:\Users\...") paths.
+    /// </summary>
+    private static Uri PathToUri(string absolutePath)
+    {
+        var full = Path.GetFullPath(absolutePath);
+        // UriBuilder ensures we end up with a properly-encoded
+        // file://<host>/<path> form regardless of the OS.
+        return new Uri(full).IsFile
+            ? new Uri(full)
+            : new UriBuilder("file", "", -1, full).Uri;
+    }
 
     [RelayCommand]
     private void ClearAll()
@@ -266,12 +351,21 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         var top = GetMainWindow();
         if (top is null) return;
 
+        Avalonia.Platform.Storage.IStorageFolder? startFolder = null;
+        if (Directory.Exists(OutputDirectory))
+        {
+            startFolder = await top.StorageProvider
+                .TryGetFolderFromPathAsync(PathToUri(OutputDirectory))
+                .ConfigureAwait(true);
+        }
+
         var file = await top.StorageProvider.SaveFilePickerAsync(
             new Avalonia.Platform.Storage.FilePickerSaveOptions
             {
                 Title = "Save CSV",
                 SuggestedFileName =
                     $"{row.Capture.SchemaName}_{row.Capture.StartTimestampUs}.csv",
+                SuggestedStartLocation = startFolder,
                 DefaultExtension = "csv",
             });
         if (file is null) return;
@@ -375,6 +469,46 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             LogLines.Add($"{DateTime.Now:HH:mm:ss}  {line}");
             while (LogLines.Count > 200) LogLines.RemoveAt(0);
         });
+    }
+
+    partial void OnSelectedPortChanged(BluetoothPort? value)
+    {
+        if (_bdAddrUpdating || value is null) return;
+        _bdAddrUpdating = true;
+        try
+        {
+            BdAddr = value.BdAddr;
+        }
+        finally
+        {
+            _bdAddrUpdating = false;
+        }
+    }
+
+    partial void OnBdAddrChanged(string value)
+    {
+        if (_bdAddrUpdating) return;
+        // If the user types an address that matches a known port,
+        // reflect it in the ComboBox; otherwise leave SelectedPort
+        // null so the ComboBox doesn't show a stale label.
+        _bdAddrUpdating = true;
+        try
+        {
+            BluetoothPort? match = null;
+            foreach (var p in Ports)
+            {
+                if (string.Equals(p.BdAddr, value, StringComparison.OrdinalIgnoreCase))
+                {
+                    match = p;
+                    break;
+                }
+            }
+            SelectedPort = match;
+        }
+        finally
+        {
+            _bdAddrUpdating = false;
+        }
     }
 
     partial void OnSelectedFieldNameChanged(string? value)
