@@ -26,21 +26,21 @@ public class CaptureFileTests
         cap.Version.Should().Be(CaptureProtocol.FileVersion);
         cap.SchemaMagic.Should().Be((ushort)0x0010);
         cap.SchemaName.Should().Be("color_reflection_run");
-        cap.RecordSize.Should().Be(9);
+        cap.RecordSize.Should().Be(5);
         cap.RecordCount.Should().Be(4);
         cap.StartTimestampUs.Should().Be(12_345_678ul);
         cap.Termination.Should().Be(CaptureTermination.Unknown);
 
-        cap.Fields.Should().HaveCount(3);
+        cap.Fields.Should().HaveCount(2);
         cap.Fields[0].Name.Should().Be("ts_us");
         cap.Fields[0].Type.Should().Be(FieldType.U32);
         cap.Fields[0].Offset.Should().Be(0);
         cap.Fields[0].Size.Should().Be(4);
         cap.Fields[0].Unit.Should().Be("us");
-        cap.Fields[2].Name.Should().Be("reflection_pct");
-        cap.Fields[2].Type.Should().Be(FieldType.U8);
-        cap.Fields[2].Offset.Should().Be(8);
-        cap.Fields[2].Size.Should().Be(1);
+        cap.Fields[1].Name.Should().Be("reflection_pct");
+        cap.Fields[1].Type.Should().Be(FieldType.U8);
+        cap.Fields[1].Offset.Should().Be(4);
+        cap.Fields[1].Size.Should().Be(1);
     }
 
     [Fact]
@@ -54,10 +54,9 @@ public class CaptureFileTests
         for (var i = 0; i < pcts.Length; i++)
         {
             var rec = cap.Records(i).Span;
-            rec.Length.Should().Be(9);
+            rec.Length.Should().Be(5);
             BinaryPrimitives.ReadUInt32LittleEndian(rec[..4]).Should().Be((uint)(i * 5_000));
-            BinaryPrimitives.ReadInt32LittleEndian(rec.Slice(4, 4)).Should().Be(0);
-            rec[8].Should().Be(pcts[i]);
+            rec[4].Should().Be(pcts[i]);
         }
     }
 
@@ -115,7 +114,6 @@ public class CaptureFileTests
 
         var rec = SchemaColorReflectionRun.Parse(cap.Records(1).Span);
         rec.ts_us.Should().Be(100_000u);
-        rec.distance_mm.Should().Be(0);
         rec.reflection_pct.Should().Be(73);
     }
 

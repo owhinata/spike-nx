@@ -43,31 +43,26 @@ low 32 bits, microseconds since the start of the capture).
 
 ## `color_reflection_run` (magic 0x0010)
 
-- record size: 9 bytes
+- record size: 5 bytes
 - rate hint: 100 Hz
 
 | offset | name | type | unit | scale 10^n |
 |-------:|------|------|------|-----------:|
 | 0 | `ts_us` | `u32` | `us` | 0 |
-| 4 | `distance_mm` | `i32` | `mm` | 0 |
-| 8 | `reflection_pct` | `u8` | `%` | 0 |
+| 4 | `reflection_pct` | `u8` | `%` | 0 |
 
 ## `color_rgbi_run` (magic 0x0011)
 
-- record size: 12 bytes
+- record size: 8 bytes
 - rate hint: 100 Hz
 
 | offset | name | type | unit | scale 10^n |
 |-------:|------|------|------|-----------:|
 | 0 | `ts_us` | `u32` | `us` | 0 |
-| 4 | `distance_mm` | `i32` | `mm` | 0 |
-| 8 | `red` | `u8` | `raw` | 0 |
-| 9 | `green` | `u8` | `raw` | 0 |
-| 10 | `blue` | `u8` | `raw` | 0 |
-| 11 | `intensity` | `u8` | `raw` | 0 |
-
-`distance_mm` is reserved (always 0 in v1 — slated for cross-correlation
-with drivebase encoder state in a future revision).
+| 4 | `red` | `u8` | `raw` | 0 |
+| 5 | `green` | `u8` | `raw` | 0 |
+| 6 | `blue` | `u8` | `raw` | 0 |
+| 7 | `intensity` | `u8` | `raw` | 0 |
 
 ## Adding a new schema
 

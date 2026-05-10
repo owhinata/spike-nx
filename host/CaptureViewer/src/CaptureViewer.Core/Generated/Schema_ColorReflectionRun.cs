@@ -15,15 +15,14 @@ public static class SchemaColorReflectionRun
 {
     public const ushort Magic        = 0x0010;
     public const string Name         = "color_reflection_run";
-    public const int    RecordSize   = 9;
-    public const int    FieldCount   = 3;
+    public const int    RecordSize   = 5;
+    public const int    FieldCount   = 2;
     public const int    RateHzHint   = 100;
 
     public static readonly IReadOnlyList<FieldDescriptor> Fields = new[]
     {
         new FieldDescriptor("ts_us", FieldType.U32, 0, 4, 0, "us"),
-        new FieldDescriptor("distance_mm", FieldType.I32, 4, 4, 0, "mm"),
-        new FieldDescriptor("reflection_pct", FieldType.U8, 8, 1, 0, "%"),
+        new FieldDescriptor("reflection_pct", FieldType.U8, 4, 1, 0, "%"),
     };
 
     public static Record Parse(ReadOnlySpan<byte> data)
@@ -35,15 +34,13 @@ public static class SchemaColorReflectionRun
 
         var r = new Record();
         { var slice = data.Slice(0, 4); r.ts_us = BinaryPrimitives.ReadUInt32LittleEndian(slice); }
-        { var slice = data.Slice(4, 4); r.distance_mm = BinaryPrimitives.ReadInt32LittleEndian(slice); }
-        { var slice = data.Slice(8, 1); r.reflection_pct = slice[0]; }
+        { var slice = data.Slice(4, 1); r.reflection_pct = slice[0]; }
         return r;
     }
 
     public struct Record
     {
         public uint ts_us;
-        public int distance_mm;
         public byte reflection_pct;
     }
 }

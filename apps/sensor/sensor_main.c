@@ -706,8 +706,7 @@ static int convert_sample(FAR const capture_schema_t *schema,
   if (schema->magic == 0x0010)         /* color_reflection_run */
     {
       struct capture_color_reflection_run_record_s rec = {0};
-      rec.ts_us          = ts_us;
-      rec.distance_mm    = 0;          /* reserved (future: drivebase) */
+      rec.ts_us = ts_us;
 
       if (s->data_type == LUMP_DATA_INT8 && s->num_values >= 1)
         {
@@ -724,8 +723,7 @@ static int convert_sample(FAR const capture_schema_t *schema,
   if (schema->magic == 0x0011)         /* color_rgbi_run */
     {
       struct capture_color_rgbi_run_record_s rec = {0};
-      rec.ts_us       = ts_us;
-      rec.distance_mm = 0;
+      rec.ts_us = ts_us;
 
       if (s->data_type == LUMP_DATA_INT8 && s->num_values >= 4)
         {

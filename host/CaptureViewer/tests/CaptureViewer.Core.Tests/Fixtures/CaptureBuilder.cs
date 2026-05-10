@@ -28,10 +28,9 @@ internal static class CaptureBuilder
         var fields = new (string Name, FieldType Type, byte Offset, byte Size, sbyte Scale, string Unit)[]
         {
             ("ts_us", FieldType.U32, 0, 4, 0, "us"),
-            ("distance_mm", FieldType.I32, 4, 4, 0, "mm"),
-            ("reflection_pct", FieldType.U8, 8, 1, 0, "%"),
+            ("reflection_pct", FieldType.U8, 4, 1, 0, "%"),
         };
-        const int recordSize = 9;
+        const int recordSize = 5;
         const string schemaName = "color_reflection_run";
         const ushort schemaMagic = 0x0010;
 
@@ -73,8 +72,7 @@ internal static class CaptureBuilder
             var off = headerLen + fdLen + i * recordSize;
             BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(off, 4),
                                                     (uint)(i * tsStrideUs));
-            // distance_mm = 0 (already zero-init)
-            buf[off + 8] = reflectionPercents[i];
+            buf[off + 4] = reflectionPercents[i];
         }
 
         return buf;
