@@ -48,8 +48,18 @@
 #define COLOR_MODE_RGBI     5
 
 #define DEFAULT_TARGET      512
-#define DEFAULT_MAX_TURN    180
 #define DEFAULT_HZ          100
+
+/* Dynamic speed normalization scales (Issue #126).  Hardcoded based on
+ * Issue #121 v=300/200Hz observations: peak |err| ~36 (line edge),
+ * peak per-tick |derr| ~16 (kd=0.1, d_max~320 / kd_x100 / 10 * dt_ms).
+ * ERR_FLOOR=100 represents a "large miss"; DERR_FLOOR=30 is roughly 2x
+ * the observed peak so the term does not saturate on noise.  DERR_FLOOR
+ * is calibrated for v/hz ~1.5 mm/tick (the recommended profile from
+ * Issue #121); if hz is changed dramatically, retune via --v-beta.
+ */
+#define ERR_FLOOR           100
+#define DERR_FLOOR          30
 
 #define CAL_DURATION_MS     3000
 #define CAL_TIMEOUT_MS      5000
@@ -66,13 +76,15 @@
 
 static struct
 {
-  int speed_mmps;
+  int speed_mmps;     /* upper bound when dynamic speed is engaged */
   int kp_x100;
   int ki_x100;
   int kd_x100;
   int target;
-  int max_turn;
   int hz;
+  int v_min_mmps;     /* dynamic speed floor; == speed_mmps disables scaling */
+  int v_alpha_x100;   /* coefficient on |err|;  0 disables err contribution  */
+  int v_beta_x100;    /* coefficient on |derr|; 0 disables derr contribution */
 } g_params;
 
 /* PID observability state (Issue #118).
@@ -110,6 +122,9 @@ static struct
   int64_t  interval_d_abs_sum;
   int32_t  interval_turn_abs_max;
   int32_t  interval_turn_abs_sum;
+  int      interval_v_min;
+  int      interval_v_max;
+  int64_t  interval_v_sum;
   uint32_t interval_tick_count;
 } g_stats;
 
@@ -499,59 +514,131 @@ static int linetrace_daemon(int argc, char *argv[])
           g_pid_reset_request = false;
         }
 
-      int v = color_read_latest(color_fd);
-      if (v >= 0)
+      int s_in = color_read_latest(color_fd);
+      if (s_in >= 0)
         {
-          last_intensity = v;
+          last_intensity = s_in;
         }
 
       int err    = (last_intensity >= 0) ? (g_params.target - last_intensity) : 0;
       int dt_ms  = 1000 / g_params.hz;       /* hz validated 10..200    */
       int p_term = (g_params.kp_x100 * err) / 100;
 
-      /* I-term: accumulate err·ms.  Anti-windup clamps |i_acc| so
-       * |i_term| <= max_turn even at full ki — see the plan/Issue
-       * for the trade-off vs drivebase_control.c's gated approach.
-       * ki_x100 is validated to ±10000 in do_run, so the divide is
-       * always in safe range and the abs() cannot hit INT_MIN.
+      /* derr exposed at top scope so dynamic-speed and d_term share the
+       * same per-tick differential.  has_prev is the legacy first-sample
+       * suppressor — when false, derr_v stays 0 and feeds both d_term
+       * and dynamic-speed neutrally.
+       */
+
+      int  derr_v           = 0;
+      bool has_prev_for_derr = g_pid_has_prev;
+      if (has_prev_for_derr)
+        {
+          derr_v = err - g_pid_prev_err;
+        }
+
+      /* I-term initial integration + conservative clamp using
+       * speed_mmps as upper bound for the dynamic-max_turn anti-windup.
+       * Step 7 below re-clamps with the (tighter) max_turn_apply once
+       * dynamic speed is known.  The two-stage clamp keeps i_acc within
+       * int32 even when ki_x100 is large and err spikes, without
+       * having to reorder the integrator past dynamic speed compute.
+       * ki_x100 is validated to ±10000 in do_run; ki=0 short-circuits
+       * to i_acc=0 to avoid /0 in i_limit.
        */
 
       g_pid_i_acc += err * dt_ms;
+      int i_term = 0;
       if (g_params.ki_x100 != 0)
         {
           int ki_abs  = (g_params.ki_x100 < 0) ?
                         -g_params.ki_x100 : g_params.ki_x100;
-          int i_limit = (g_params.max_turn * 100 * 1000) / ki_abs;
+          int i_limit = (g_params.speed_mmps * 100 * 1000) / ki_abs;
           g_pid_i_acc = clamp_int(g_pid_i_acc, -i_limit, i_limit);
+          i_term      = (int)(((int64_t)g_params.ki_x100 * g_pid_i_acc) /
+                              (100 * 1000));
         }
       else
         {
           g_pid_i_acc = 0;
         }
-      int i_term = (int)(((int64_t)g_params.ki_x100 * g_pid_i_acc) /
-                         (100 * 1000));
 
-      /* D-term: kd × derr / dt_sec.  Suppress on first sample after
-       * a reset so the initial step from 0 prev_err does not produce
-       * a spurious derivative kick.
+      /* D-term reuses derr_v.  has_prev=false leaves derr_v=0 so the
+       * first-sample suppressor still works.
        */
 
       int d_term = 0;
-      if (g_pid_has_prev && dt_ms > 0)
+      if (has_prev_for_derr && dt_ms > 0)
         {
-          int derr = err - g_pid_prev_err;
-          d_term   = (int)(((int64_t)g_params.kd_x100 * derr * 10) /
-                           dt_ms);
+          d_term = (int)(((int64_t)g_params.kd_x100 * derr_v * 10) /
+                         dt_ms);
         }
       g_pid_prev_err = err;
       g_pid_has_prev = true;
 
+      /* Dynamic speed (Issue #126): scale base speed down by |err| +
+       * |derr| controller demand.  Gated on (speed>0) and at least one
+       * non-zero gain and v_min<speed; otherwise speed_apply == base
+       * (legacy fixed-speed behavior).  Formula:
+       *
+       *   denom_x1000 = 1000 + α·|err|·10/ERR_FLOOR + β·|derr|·10/DERR_FLOOR
+       *   v = (base · 1000) / denom_x1000, clamped to [v_min, base]
+       *
+       * α and β are x100 fixed-point in [0, 10000], validated by do_run.
+       */
+
+      int speed_apply = g_params.speed_mmps;
+      if (speed_apply > 0 &&
+          (g_params.v_alpha_x100 != 0 || g_params.v_beta_x100 != 0) &&
+          g_params.v_min_mmps < g_params.speed_mmps)
+        {
+          int abs_err  = (err    >= 0) ? err    : -err;
+          int abs_derr = (derr_v >= 0) ? derr_v : -derr_v;
+          int64_t denom_x1000 = 1000
+            + ((int64_t)g_params.v_alpha_x100 * abs_err  * 10) / ERR_FLOOR
+            + ((int64_t)g_params.v_beta_x100  * abs_derr * 10) / DERR_FLOOR;
+          int v_dyn = (int)(((int64_t)g_params.speed_mmps * 1000) /
+                            denom_x1000);
+          if (v_dyn < g_params.v_min_mmps) v_dyn = g_params.v_min_mmps;
+          if (v_dyn > g_params.speed_mmps) v_dyn = g_params.speed_mmps;
+          speed_apply = v_dyn;
+        }
+
+      /* Dynamic max_turn: tracks speed_apply 1:1 (Issue #121 empirical
+       * scaling law max_turn ≈ v).  speed_apply==0 ⇒ max_turn_apply==0
+       * ⇒ turn_dps clamps to 0 ⇒ FOREVER(0,0) (legacy `run 0 0` stop
+       * semantics).  ki/i_limit guard below also skips when
+       * max_turn_apply==0 to avoid /0.
+       */
+
+      int max_turn_apply = (speed_apply > 0) ? speed_apply : 0;
+
+      /* Re-clamp i_acc with the tighter dynamic limit + recompute i_term
+       * so this tick's authority matches the (possibly reduced) cap.
+       * derivative_kick is not introduced — i_term is continuous in
+       * i_acc, so a snap of i_acc just shifts i_term by the same factor.
+       */
+
+      if (g_params.ki_x100 != 0 && max_turn_apply > 0)
+        {
+          int ki_abs  = (g_params.ki_x100 < 0) ?
+                        -g_params.ki_x100 : g_params.ki_x100;
+          int i_limit = (max_turn_apply * 100 * 1000) / ki_abs;
+          g_pid_i_acc = clamp_int(g_pid_i_acc, -i_limit, i_limit);
+          i_term      = (int)(((int64_t)g_params.ki_x100 * g_pid_i_acc) /
+                              (100 * 1000));
+        }
+      else if (g_params.ki_x100 == 0)
+        {
+          g_pid_i_acc = 0;
+          i_term      = 0;
+        }
+
       int sum_dps  = (int)((int64_t)p_term + i_term + d_term);
-      int turn_dps = clamp_int(sum_dps, -g_params.max_turn,
-                                         g_params.max_turn);
+      int turn_dps = clamp_int(sum_dps, -max_turn_apply, max_turn_apply);
       int saturated = (sum_dps != turn_dps) ? 1 : 0;
 
-      int rc = drivebase_send_forever(db_fd, g_params.speed_mmps, turn_dps);
+      int rc = drivebase_send_forever(db_fd, speed_apply, turn_dps);
 
       pthread_mutex_lock(&g_stats_lock);
       g_stats.iter++;
@@ -603,6 +690,12 @@ static int linetrace_daemon(int argc, char *argv[])
           if ((int32_t)turn_abs > g_stats.interval_turn_abs_max)
               g_stats.interval_turn_abs_max = (int32_t)turn_abs;
           g_stats.interval_turn_abs_sum += (int32_t)turn_abs;
+
+          if (speed_apply < g_stats.interval_v_min)
+              g_stats.interval_v_min = speed_apply;
+          if (speed_apply > g_stats.interval_v_max)
+              g_stats.interval_v_max = speed_apply;
+          g_stats.interval_v_sum += speed_apply;
 
           g_stats.interval_tick_count++;
         }
@@ -660,13 +753,15 @@ static int do_start(void)
       return 1;
     }
 
-  g_params.speed_mmps = 0;
-  g_params.kp_x100    = 0;
-  g_params.ki_x100    = 0;
-  g_params.kd_x100    = 0;
-  g_params.target     = DEFAULT_TARGET;
-  g_params.max_turn   = DEFAULT_MAX_TURN;
-  g_params.hz         = DEFAULT_HZ;
+  g_params.speed_mmps   = 0;
+  g_params.kp_x100      = 0;
+  g_params.ki_x100      = 0;
+  g_params.kd_x100      = 0;
+  g_params.target       = DEFAULT_TARGET;
+  g_params.hz           = DEFAULT_HZ;
+  g_params.v_min_mmps   = 0;
+  g_params.v_alpha_x100 = 0;
+  g_params.v_beta_x100  = 0;
 
   memset(&g_stats, 0, sizeof(g_stats));
   g_stats.last_intensity = -1;
@@ -826,7 +921,8 @@ static int do_run(int argc, char **argv)
     {
       fprintf(stderr,
               "usage: linetrace run <speed_mmps> <kp> [target] "
-              "[--ki K] [--kd K] [--max-turn dps] [--hz N]\n");
+              "[--ki K] [--kd K] [--hz N] "
+              "[--v-min mm/s] [--v-alpha A] [--v-beta B]\n");
       return 1;
     }
 
@@ -841,9 +937,19 @@ static int do_run(int argc, char **argv)
   int  ki_x100    = g_params.ki_x100;
   int  kd_x100    = g_params.kd_x100;
   int  target     = g_params.target;
-  int  max_turn   = g_params.max_turn;
   int  hz         = g_params.hz;
-  int  i          = 2;
+
+  /* Dynamic-speed flags reset to no-op every run.  Unlike --ki/--kd/
+   * --hz which inherit prior values, --v-* are an opt-in safety switch
+   * — silently carrying over a dynamic profile from a previous run is a
+   * footgun (e.g. user types `run 200 3.6` expecting fixed speed and
+   * the daemon keeps a stale --v-min from yesterday's tuning session).
+   */
+
+  int  v_min_mmps   = speed_mmps;   /* default: dynamic OFF */
+  int  v_alpha_x100 = 0;
+  int  v_beta_x100  = 0;
+  int  i            = 2;
 
   if (i < argc && argv[i][0] != '-')
     {
@@ -853,12 +959,7 @@ static int do_run(int argc, char **argv)
 
   while (i < argc)
     {
-      if (strcmp(argv[i], "--max-turn") == 0 && i + 1 < argc)
-        {
-          max_turn = atoi(argv[i + 1]);
-          i += 2;
-        }
-      else if (strcmp(argv[i], "--hz") == 0 && i + 1 < argc)
+      if (strcmp(argv[i], "--hz") == 0 && i + 1 < argc)
         {
           hz = atoi(argv[i + 1]);
           i += 2;
@@ -883,6 +984,33 @@ static int do_run(int argc, char **argv)
             }
           i += 2;
         }
+      else if (strcmp(argv[i], "--v-min") == 0 && i + 1 < argc)
+        {
+          v_min_mmps = atoi(argv[i + 1]);
+          i += 2;
+        }
+      else if (strcmp(argv[i], "--v-alpha") == 0 && i + 1 < argc)
+        {
+          if (parse_gain(argv[i + 1], &v_alpha_x100) < 0 ||
+              v_alpha_x100 < 0)
+            {
+              fprintf(stderr,
+                      "linetrace: --v-alpha must be in [0.00, 100.00]\n");
+              return 1;
+            }
+          i += 2;
+        }
+      else if (strcmp(argv[i], "--v-beta") == 0 && i + 1 < argc)
+        {
+          if (parse_gain(argv[i + 1], &v_beta_x100) < 0 ||
+              v_beta_x100 < 0)
+            {
+              fprintf(stderr,
+                      "linetrace: --v-beta must be in [0.00, 100.00]\n");
+              return 1;
+            }
+          i += 2;
+        }
       else
         {
           fprintf(stderr, "linetrace: unknown option '%s'\n", argv[i]);
@@ -902,37 +1030,59 @@ static int do_run(int argc, char **argv)
       return 1;
     }
 
-  if (max_turn < 1 || max_turn > 1000)
+  /* v_min validation: only meaningful when speed>0.  speed==0 means
+   * "stop motion" and dynamic-speed flags are silently ignored to keep
+   * `linetrace run 0 0` semantics intact.  v_min=0 is rejected because
+   * it would let the controller stop the robot in tight curves —
+   * separate semantics that deserve their own flag if ever needed.
+   */
+
+  if (speed_mmps > 0)
     {
-      fprintf(stderr, "linetrace: --max-turn must be in [1, 1000]\n");
-      return 1;
+      if (v_min_mmps < 1 || v_min_mmps > speed_mmps)
+        {
+          fprintf(stderr,
+                  "linetrace: --v-min must be in [1, %d]\n",
+                  speed_mmps);
+          return 1;
+        }
+    }
+  else
+    {
+      v_min_mmps   = 0;
+      v_alpha_x100 = 0;
+      v_beta_x100  = 0;
     }
 
-  g_params.speed_mmps = speed_mmps;
-  g_params.kp_x100    = kp_x100;
-  g_params.ki_x100    = ki_x100;
-  g_params.kd_x100    = kd_x100;
-  g_params.target     = target;
-  g_params.max_turn   = max_turn;
-  g_params.hz         = hz;
-  g_pid_reset_request = true;
-  g_engaged           = true;
+  g_params.speed_mmps   = speed_mmps;
+  g_params.kp_x100      = kp_x100;
+  g_params.ki_x100      = ki_x100;
+  g_params.kd_x100      = kd_x100;
+  g_params.target       = target;
+  g_params.hz           = hz;
+  g_params.v_min_mmps   = v_min_mmps;
+  g_params.v_alpha_x100 = v_alpha_x100;
+  g_params.v_beta_x100  = v_beta_x100;
+  g_pid_reset_request   = true;
+  g_engaged             = true;
 
   printf("linetrace: speed=%d mm/s kp=%.2f ki=%.2f kd=%.2f "
-         "target=%d max_turn=%d hz=%d\n",
+         "target=%d hz=%d v_min=%d v_alpha=%.2f v_beta=%.2f\n",
          speed_mmps, kp_x100 / 100.0, ki_x100 / 100.0, kd_x100 / 100.0,
-         target, max_turn, hz);
+         target, hz, v_min_mmps,
+         v_alpha_x100 / 100.0, v_beta_x100 / 100.0);
   return 0;
 }
 
 /****************************************************************************
- * Subcommand: target / max_turn (Issue #119)
+ * Subcommand: target (Issue #119)
  *
- * Mutate a single PID parameter without engaging the drivebase.  Lets
- * the user set the operational intensity threshold before `run`, so
+ * Mutate the intensity setpoint without engaging the drivebase.  Lets
+ * the user set the operational threshold before `run`, so
  * `linetrace status` shows last_err against the real target while
- * positioning the robot.  `max_turn` accepts live tuning during a run
- * (the anti-windup clamp re-derives from the new value next tick).
+ * positioning the robot.  The `max_turn` mutator that originally
+ * shipped with #119 was retired in #126: max_turn is now derived per
+ * tick from `speed_apply` (Issue #121's max_turn ≈ v scaling rule).
  ****************************************************************************/
 
 static int parse_int_arg(const char *tag, char **argv, int argc,
@@ -979,32 +1129,6 @@ static int do_set_target(int argc, char **argv)
 
   g_params.target = target_new;
   printf("linetrace: target=%d\n", g_params.target);
-  return 0;
-}
-
-static int do_set_max_turn(int argc, char **argv)
-{
-  if (!g_daemon_running)
-    {
-      fprintf(stderr,
-              "linetrace: not running — 'linetrace start' first\n");
-      return 1;
-    }
-
-  int max_turn_new;
-  if (parse_int_arg("max_turn", argv, argc, &max_turn_new) < 0)
-    {
-      return 1;
-    }
-
-  if (max_turn_new < 1 || max_turn_new > 1000)
-    {
-      fprintf(stderr, "linetrace: max_turn must be in [1, 1000]\n");
-      return 1;
-    }
-
-  g_params.max_turn = max_turn_new;
-  printf("linetrace: max_turn=%d\n", g_params.max_turn);
   return 0;
 }
 
@@ -1117,17 +1241,23 @@ static int do_pidstat(int argc, char **argv)
   g_stats.interval_d_abs_sum    = 0;
   g_stats.interval_turn_abs_max = 0;
   g_stats.interval_turn_abs_sum = 0;
+  g_stats.interval_v_min        = INT_MAX;
+  g_stats.interval_v_max        = INT_MIN;
+  g_stats.interval_v_sum        = 0;
   g_stats.interval_tick_count   = 0;
   uint32_t begin_sat    = g_stats.sat_count;
   uint32_t begin_iter32 = (uint32_t)(g_stats.iter & 0xFFFFFFFFu);
   g_pidstat_active      = true;
   pthread_mutex_unlock(&g_stats_lock);
 
-  printf("%8s %9s %6s %7s %8s %8s %8s %5s %8s %8s %10s %9s %9s %6s\n",
+  printf("%8s %9s %6s %7s %8s %8s %8s %5s %8s %8s %10s %9s %9s "
+         "%7s %7s %7s %6s\n",
          "time_ms", "iter", "intens", "err",
          "err_min", "err_max", "err_avg", "zc",
          "d_max", "d_avg", "i_acc",
-         "turn_max", "turn_avg", "sat");
+         "turn_max", "turn_avg",
+         "v_max", "v_avg", "v_min",
+         "sat");
 
   struct timespec t0;
   struct timespec next;
@@ -1157,6 +1287,9 @@ static int do_pidstat(int argc, char **argv)
       int64_t  d_abs_sum    = g_stats.interval_d_abs_sum;
       int32_t  turn_abs_max = g_stats.interval_turn_abs_max;
       int32_t  turn_abs_sum = g_stats.interval_turn_abs_sum;
+      int      v_min_iv     = g_stats.interval_v_min;
+      int      v_max_iv     = g_stats.interval_v_max;
+      int64_t  v_sum_iv     = g_stats.interval_v_sum;
       g_stats.interval_err_min      = INT_MAX;
       g_stats.interval_err_max      = INT_MIN;
       g_stats.interval_err_abs_sum  = 0;
@@ -1165,6 +1298,9 @@ static int do_pidstat(int argc, char **argv)
       g_stats.interval_d_abs_sum    = 0;
       g_stats.interval_turn_abs_max = 0;
       g_stats.interval_turn_abs_sum = 0;
+      g_stats.interval_v_min        = INT_MAX;
+      g_stats.interval_v_max        = INT_MIN;
+      g_stats.interval_v_sum        = 0;
       g_stats.interval_tick_count   = 0;
       pthread_mutex_unlock(&g_stats_lock);
 
@@ -1180,6 +1316,7 @@ static int do_pidstat(int argc, char **argv)
       char b_emin[16], b_emax[16], b_eavg[16];
       char b_dmax[16], b_davg[16];
       char b_tmax[16], b_tavg[16];
+      char b_vmax[16], b_vavg[16], b_vmin[16];
 
       if (n == 0)
         {
@@ -1190,6 +1327,9 @@ static int do_pidstat(int argc, char **argv)
           snprintf(b_davg, sizeof(b_davg), "%8s", "-");
           snprintf(b_tmax, sizeof(b_tmax), "%9s", "-");
           snprintf(b_tavg, sizeof(b_tavg), "%9s", "-");
+          snprintf(b_vmax, sizeof(b_vmax), "%7s", "-");
+          snprintf(b_vavg, sizeof(b_vavg), "%7s", "-");
+          snprintf(b_vmin, sizeof(b_vmin), "%7s", "-");
         }
       else
         {
@@ -1197,6 +1337,7 @@ static int do_pidstat(int argc, char **argv)
                                    (int64_t)n / 2) / (int64_t)n);
           int d_avg       = (int)(d_abs_sum / (int64_t)n);
           int turn_avg    = (int)(turn_abs_sum / (int32_t)n);
+          int v_avg       = (int)(v_sum_iv / (int64_t)n);
           snprintf(b_emin, sizeof(b_emin), "%8d", err_min);
           snprintf(b_emax, sizeof(b_emax), "%8d", err_max);
           snprintf(b_eavg, sizeof(b_eavg), "%8d", err_avg_x10);
@@ -1204,9 +1345,13 @@ static int do_pidstat(int argc, char **argv)
           snprintf(b_davg, sizeof(b_davg), "%8d", d_avg);
           snprintf(b_tmax, sizeof(b_tmax), "%9ld", (long)turn_abs_max);
           snprintf(b_tavg, sizeof(b_tavg), "%9d", turn_avg);
+          snprintf(b_vmax, sizeof(b_vmax), "%7d", v_max_iv);
+          snprintf(b_vavg, sizeof(b_vavg), "%7d", v_avg);
+          snprintf(b_vmin, sizeof(b_vmin), "%7d", v_min_iv);
         }
 
-      printf("%8ld %9lu %6d %7d %s %s %s %5u %s %s %10d %s %s %6lu\n",
+      printf("%8ld %9lu %6d %7d %s %s %s %5u %s %s %10d %s %s %s %s %s "
+             "%6lu\n",
              elapsed_ms,
              (unsigned long)(iter64 & 0xFFFFFFFFu),
              last_intensity, last_err,
@@ -1214,6 +1359,7 @@ static int do_pidstat(int argc, char **argv)
              b_dmax, b_davg,
              last_i_acc,
              b_tmax, b_tavg,
+             b_vmax, b_vavg, b_vmin,
              (unsigned long)(cur_sat - begin_sat));
 
       reported_ticks += n;
@@ -1289,8 +1435,10 @@ static int do_status(void)
   printf("ki:            %.2f\n", g_params.ki_x100 / 100.0);
   printf("kd:            %.2f\n", g_params.kd_x100 / 100.0);
   printf("target:        %d\n", g_params.target);
-  printf("max_turn:      %d dps\n", g_params.max_turn);
   printf("hz:            %d\n", g_params.hz);
+  printf("v_min:         %d mm/s\n", g_params.v_min_mmps);
+  printf("v_alpha:       %.2f\n", g_params.v_alpha_x100 / 100.0);
+  printf("v_beta:        %.2f\n", g_params.v_beta_x100 / 100.0);
   printf("iter:          %llu\n", (unsigned long long)iter);
   printf("last_intensity: %d\n", last_intensity);
   printf("last_err:      %d\n", last_err);
@@ -1310,9 +1458,9 @@ static void usage(void)
     "usage: linetrace start\n"
     "       linetrace cal\n"
     "       linetrace run <speed_mmps> <kp> [target] "
-    "[--ki K] [--kd K] [--max-turn dps] [--hz N]\n"
+    "[--ki K] [--kd K] [--hz N]\n"
+    "                     [--v-min mm/s] [--v-alpha A] [--v-beta B]\n"
     "       linetrace target <N>\n"
-    "       linetrace max_turn <DPS>\n"
     "       linetrace brake\n"
     "       linetrace stop\n"
     "       linetrace pidstat [duration_ms [interval_ms]]\n"
@@ -1326,22 +1474,25 @@ static void usage(void)
     "           run 100 0.3 512       P-control follow with kp=0.3\n"
     "           run 100 0.3 512 --ki 0.05 --kd 0.01\n"
     "                                 PID follow (kp=0.3 ki=0.05 kd=0.01)\n"
+    "           run 300 3.6 512 --v-min 150 --v-alpha 1.0 --v-beta 0.5\n"
+    "                                 dynamic speed: 150-300 mm/s,\n"
+    "                                 max_turn auto-tracks speed\n"
     "           run 0 0               command stop (daemon stays alive)\n"
     "           gain ranges: kp/ki/kd in [-100.00, 100.00] (0.01 step)\n"
-    "           defaults inherit from previous values; first run after\n"
-    "           start uses target=%d, --max-turn=%d, --hz=%d\n"
-    "  target:   set target intensity without engaging the drivebase\n"
-    "            (e.g. 'target 400' so 'status' shows last_err against\n"
-    "            the operational target while positioning).  [0, 1024]\n"
-    "  max_turn: set turn-rate clamp [1, 1000] dps; usable live to\n"
-    "            re-derive the anti-windup limit on the next tick\n"
+    "           v-alpha/v-beta in [0.00, 100.00]; v-min in [1, speed]\n"
+    "           kp/ki/kd/target/hz inherit from previous run;\n"
+    "           v-min/v-alpha/v-beta reset to 'dynamic OFF' every run\n"
+    "           defaults: target=%d hz=%d (first run after start)\n"
+    "  target:  set target intensity without engaging the drivebase\n"
+    "           (e.g. 'target 400' so 'status' shows last_err against\n"
+    "           the operational target while positioning).  [0, 1024]\n"
     "  brake:   FOREVER(0,0) + STOP{BRAKE}; reset speed=0 kp=0\n"
     "           daemon stays alive — 'linetrace run ...' to re-engage\n"
     "  stop:    coast wheels, daemon exits\n"
     "  pidstat: stream PID internals for gain tuning (default 1000ms)\n"
     "           intensity/err/i_acc are snapshots; err_min/max/avg, zc,\n"
-    "           d_max/avg, turn_max/avg are aggregates over the\n"
-    "           preceding interval.  err_avg is x10 fixed-point.\n"
+    "           d_max/avg, turn_max/avg, v_max/avg/v_min are aggregates\n"
+    "           over the preceding interval.  err_avg is x10 fixed-point.\n"
     "           sat is cumulative delta from pidstat start.  '-'\n"
     "           appears when no ticks landed in the interval.\n"
     "           NOTE: do not issue run/brake while pidstat runs;\n"
@@ -1349,7 +1500,7 @@ static void usage(void)
     "           summary's reported_ticks counts only printed intervals\n"
     "           (a partial interval at end-of-stream is dropped).\n"
     "  status:  print daemon state and last err/intensity/i_acc snapshot\n",
-    DEFAULT_TARGET, DEFAULT_TARGET, DEFAULT_MAX_TURN, DEFAULT_HZ);
+    DEFAULT_TARGET, DEFAULT_TARGET, DEFAULT_HZ);
 }
 
 /****************************************************************************
@@ -1392,11 +1543,6 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "target") == 0)
     {
       return do_set_target(argc - 2, argv + 2);
-    }
-
-  if (strcmp(argv[1], "max_turn") == 0)
-    {
-      return do_set_max_turn(argc - 2, argv + 2);
     }
 
   if (strcmp(argv[1], "brake") == 0)

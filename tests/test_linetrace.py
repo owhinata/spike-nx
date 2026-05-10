@@ -27,7 +27,9 @@ _PIDSTAT_HEADER = (
     "time_ms", "iter", "intens", "err",
     "err_min", "err_max", "err_avg", "zc",
     "d_max", "d_avg", "i_acc",
-    "turn_max", "turn_avg", "sat",
+    "turn_max", "turn_avg",
+    "v_max", "v_avg", "v_min",
+    "sat",
 )
 
 _SUMMARY_RE = re.compile(
@@ -225,23 +227,26 @@ def test_linetrace_status_drops_pid_term_fields(p):
         assert "last_err" in st
         assert "last_intensity" in st
         assert "target" in st
-        assert "max_turn" in st
+        # Issue #126: max_turn is derived per tick, no longer in status.
+        # v_min/v_alpha/v_beta surface the dynamic-speed config instead.
+        assert "max_turn" not in st
+        assert "v_min" in st
+        assert "v_alpha" in st
+        assert "v_beta" in st
     finally:
         _ensure_stopped(p)
 
 
 # ---------------------------------------------------------------------------
-# Issue #119: linetrace target / max_turn
+# Issue #119: linetrace target  (#126 retired the max_turn mutator)
 # ---------------------------------------------------------------------------
 
 
 def test_linetrace_set_without_daemon(p):
-    """L-6: target/max_turn refuse cleanly when no daemon is running."""
+    """L-6: target refuses cleanly when no daemon is running."""
 
     _ensure_stopped(p)
     out = p.sendCommand("linetrace target 30", timeout=5)
-    assert "not running" in out, f"unexpected: {out!r}"
-    out = p.sendCommand("linetrace max_turn 90", timeout=5)
     assert "not running" in out, f"unexpected: {out!r}"
 
 
@@ -254,9 +259,7 @@ def test_linetrace_set_missing_or_extra_args(p):
 
     try:
         for cmd in ("linetrace target",
-                    "linetrace max_turn",
-                    "linetrace target 30 40",
-                    "linetrace max_turn 90 120"):
+                    "linetrace target 30 40"):
             out = p.sendCommand(cmd, timeout=5)
             assert "usage" in out.lower(), (
                 f"expected usage hint for {cmd!r}: {out!r}"
@@ -266,7 +269,7 @@ def test_linetrace_set_missing_or_extra_args(p):
 
 
 def test_linetrace_set_rejects_out_of_range(p):
-    """L-8: target/max_turn outside the validated ranges are rejected."""
+    """L-8: target outside the validated range is rejected."""
 
     _ensure_stopped(p)
     p.sendCommand("linetrace start", timeout=8)
@@ -279,12 +282,6 @@ def test_linetrace_set_rejects_out_of_range(p):
         out = p.sendCommand("linetrace target -1", timeout=5)
         assert "target" in out, f"expected target rejection: {out!r}"
 
-        out = p.sendCommand("linetrace max_turn 0", timeout=5)
-        assert "max_turn" in out, f"expected max_turn rejection: {out!r}"
-
-        out = p.sendCommand("linetrace max_turn 5000", timeout=5)
-        assert "max_turn" in out, f"expected max_turn rejection: {out!r}"
-
         out = p.sendCommand("linetrace target abc", timeout=5)
         assert "integer" in out, f"expected non-integer rejection: {out!r}"
     finally:
@@ -292,8 +289,8 @@ def test_linetrace_set_rejects_out_of_range(p):
 
 
 @pytest.mark.interactive
-def test_linetrace_set_updates_target_and_max_turn(p):
-    """L-9: target/max_turn writes are observable via status.
+def test_linetrace_set_updates_target(p):
+    """L-9: target writes are observable via status.
 
     Issue #119 motivation: setting target before `run` makes the idle
     err computation match the operational threshold, so positioning
@@ -305,23 +302,134 @@ def test_linetrace_set_updates_target_and_max_turn(p):
     time.sleep(0.3)
 
     try:
-        # Defaults from do_start: target=512, max_turn=180
+        # Default from do_start: target=512
         out = p.sendCommand("linetrace status", timeout=5)
         st = _parse_status(out)
         assert st.get("target") == "512"
-        assert st.get("max_turn") == "180"
 
         out = p.sendCommand("linetrace target 400", timeout=5)
         assert "target=400" in out, f"unexpected target output: {out!r}"
 
-        out = p.sendCommand("linetrace max_turn 120", timeout=5)
-        assert "max_turn=120" in out, (
-            f"unexpected max_turn output: {out!r}"
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("target") == "400"
+    finally:
+        _ensure_stopped(p)
+
+
+# ---------------------------------------------------------------------------
+# Issue #126: dynamic-speed flags + max_turn deprecation
+# ---------------------------------------------------------------------------
+
+
+def test_linetrace_max_turn_subcommand_retired(p):
+    """L-10: `linetrace max_turn N` falls through to usage (#126)."""
+
+    _ensure_stopped(p)
+    p.sendCommand("linetrace start", timeout=8)
+    time.sleep(0.3)
+    try:
+        out = p.sendCommand("linetrace max_turn 200", timeout=5)
+        assert "usage" in out.lower(), (
+            f"max_turn subcommand should be retired: {out!r}"
         )
+    finally:
+        _ensure_stopped(p)
+
+
+def test_linetrace_run_max_turn_flag_retired(p):
+    """L-11: `linetrace run ... --max-turn N` is rejected (#126)."""
+
+    _ensure_stopped(p)
+    p.sendCommand("linetrace start", timeout=8)
+    time.sleep(0.3)
+    try:
+        out = p.sendCommand(
+            "linetrace run 100 0 --max-turn 200", timeout=5
+        )
+        assert "unknown option" in out.lower(), (
+            f"--max-turn flag should be retired: {out!r}"
+        )
+    finally:
+        _ensure_stopped(p)
+
+
+def test_linetrace_run_dynamic_flags_validate(p):
+    """L-12: dynamic-speed flag range validation (#126).
+
+    --v-min must be in [1, speed]; --v-alpha and --v-beta must be in
+    [0.00, 100.00].  Daemon must be running for do_run to evaluate the
+    arguments past the daemon-running gate.
+    """
+
+    _ensure_stopped(p)
+    p.sendCommand("linetrace start", timeout=8)
+    time.sleep(0.3)
+    try:
+        # v-min above speed should reject.
+        out = p.sendCommand(
+            "linetrace run 100 0 512 --v-min 200", timeout=5
+        )
+        assert "v-min" in out.lower(), f"expected v-min reject: {out!r}"
+
+        # v-min == 0 should reject.
+        out = p.sendCommand(
+            "linetrace run 100 0 512 --v-min 0", timeout=5
+        )
+        assert "v-min" in out.lower(), f"expected v-min=0 reject: {out!r}"
+
+        # Negative v-alpha rejected.
+        out = p.sendCommand(
+            "linetrace run 100 0 512 --v-alpha -0.5", timeout=5
+        )
+        assert "v-alpha" in out.lower(), (
+            f"expected negative v-alpha reject: {out!r}"
+        )
+
+        # Out-of-range v-beta rejected.
+        out = p.sendCommand(
+            "linetrace run 100 0 512 --v-beta 200", timeout=5
+        )
+        assert "v-beta" in out.lower(), (
+            f"expected v-beta reject: {out!r}"
+        )
+    finally:
+        # Always brake/disengage so cumulative drivebase commands clear.
+        p.sendCommand("linetrace brake", timeout=5)
+        _ensure_stopped(p)
+
+
+@pytest.mark.interactive
+def test_linetrace_run_dynamic_flags_status(p):
+    """L-13: dynamic-speed flags surface in status (#126).
+
+    `--v-min`/`--v-alpha`/`--v-beta` reset to no-op default every run,
+    so a follow-up `run` without the flags reverts to v_min=speed.
+    """
+
+    _ensure_stopped(p)
+    p.sendCommand("linetrace start", timeout=8)
+    time.sleep(0.3)
+    try:
+        out = p.sendCommand(
+            "linetrace run 200 0 --v-min 120 --v-alpha 1.0 --v-beta 0.5",
+            timeout=5,
+        )
+        assert "v_min=120" in out
+        assert "v_alpha=1.00" in out
+        assert "v_beta=0.50" in out
 
         out = p.sendCommand("linetrace status", timeout=5)
         st = _parse_status(out)
-        assert st.get("target") == "38"
-        assert st.get("max_turn") == "120"
+        assert st.get("v_min") == "120"
+        assert st.get("v_alpha") == "1.00"
+        assert st.get("v_beta") == "0.50"
+
+        # Re-run without --v-* flags; they reset to no-op default.
+        out = p.sendCommand("linetrace run 200 0", timeout=5)
+        assert "v_min=200" in out, f"expected reset to speed: {out!r}"
+        assert "v_alpha=0.00" in out
+        assert "v_beta=0.00" in out
     finally:
+        p.sendCommand("linetrace brake", timeout=5)
         _ensure_stopped(p)

@@ -19,11 +19,16 @@ The daemon's command ring (depth 8) absorbs the rapid re-issue: each new `DRIVE_
 ```
 linetrace cal                                   # 3 s sample sweep
 linetrace run <speed_mmps> <kp> [target] \      # main command
-              [--max-turn dps] [--hz N]
+              [--ki K] [--kd K] [--hz N] \
+              [--v-min mm/s] [--v-alpha A] [--v-beta B]
 linetrace                                       # usage
 ```
 
-Defaults: `target=512`, `--max-turn=180`, `--hz=100`.  `kp` is fractional (e.g. `linetrace run 100 0.3`).  Intensity-era kp values are roughly **1/10 of the reflection-era values** because err magnitudes are ~10× larger (range 0..1024 vs 0..100); start at ~0.15 instead of 1.5.
+Defaults: `target=512`, `--hz=100`.  `kp/ki/kd` are fractional (e.g. `linetrace run 100 0.3`).  Intensity-era kp values are roughly **1/10 of the reflection-era values** because err magnitudes are ~10× larger (range 0..1024 vs 0..100); start at ~0.15 instead of 1.5.
+
+The `--max-turn` flag and `linetrace max_turn N` subcommand were **retired in Issue #126**.  `max_turn` is now a per-tick derived value that tracks `speed_apply` (Issue #121's empirical `max_turn ≈ v` rule baked into the controller).
+
+`--v-min/--v-alpha/--v-beta` enable dynamic speed control (Issue #126).  These flags are an opt-in safety switch and reset to "dynamic OFF" (`v_min := speed`, `α := β := 0`) on every `run`.  See §2.5 for details.
 
 ### 2.1 `linetrace cal`
 
@@ -48,16 +53,17 @@ linetrace: cal 250 samples: dark=42 bright=982 midpoint=512
    - `ioctl(DRIVEBASE_DRIVE_FOREVER, {speed_mmps, turn_dps})`
 5. On SIGINT: `ioctl(DRIVEBASE_STOP, {COAST})`, close fds, exit.
 
-### 2.3 `linetrace target <N>` / `linetrace max_turn <DPS>` (Issue #119)
+### 2.3 `linetrace target <N>` (Issue #119)
 
-Single-purpose subcommands that mutate `target` / `max_turn` without engaging the drivebase.  Lets the user set the operational intensity threshold while still idle, so `linetrace status` shows last_err against the real target during robot positioning.  `max_turn` is also usable as live-tuning during a `run`: changing it makes the next tick re-derive the anti-windup clamp from the new value.
+Single-purpose subcommand that mutates `target` without engaging the drivebase.  Lets the user set the operational intensity threshold while still idle, so `linetrace status` shows last_err against the real target during robot positioning.
 
 ```
 linetrace target 512           # apply the cal midpoint
-linetrace max_turn 120         # tighter output cap for aggressive damping
 ```
 
-Ranges: `target ∈ [0, 1024]`, `max_turn ∈ [1, 1000]`.  Missing / extra / non-integer arguments are usage errors; query the current values with `linetrace status`.
+Range: `target ∈ [0, 1024]`.  Missing / extra / non-integer arguments are usage errors; query the current value with `linetrace status`.
+
+> The `linetrace max_turn N` mutator that originally shipped with #119 was retired in #126: `max_turn` is now derived per tick from `speed_apply` and no longer needs a CLI knob.
 
 ### 2.4 `linetrace pidstat` (Issue #118)
 
@@ -71,10 +77,10 @@ linetrace pidstat 5000 100              # 5 s @ 100 ms intervals (≈50 rows + s
 
 Default `interval_ms = 1000` (1 Hz).  Shorter intervals load printf/USB-CDC onto the 100 Hz daemon and inject control jitter — keep ≥1000 ms unless you have a specific reason.  `interval_ms < 1000/hz` (below the control period) is rejected.
 
-#### Columns (14)
+#### Columns (17, with v_max/v_avg/v_min added in Issue #126)
 
 ```
- time_ms      iter intens     err   err_min   err_max  err_avg    zc    d_max    d_avg      i_acc  turn_max  turn_avg    sat
+ time_ms      iter intens     err   err_min   err_max  err_avg    zc    d_max    d_avg      i_acc  turn_max  turn_avg   v_max   v_avg   v_min    sat
 ```
 
 | Column | Kind | Meaning |
@@ -90,9 +96,10 @@ Default `interval_ms = 1000` (1 Hz).  Shorter intervals load printf/USB-CDC onto
 | `d_avg` | interval agg | mean(\|d_term\|).  `d_max/d_avg` ratio reveals noise character |
 | `i_acc` | snapshot | Integrator accumulator (slow signal, snapshot suffices) |
 | `turn_max/avg` | interval agg | max/mean(\|turn_dps\|).  Output amplitude |
+| `v_max/avg/min` | interval agg | max/mean/min applied speed (mm/s) over the interval.  Surfaces dynamic-speed behavior (#126) |
 | `sat` | cumulative delta | Saturation hits (clamp actually acted) since pidstat start |
 
-The 7 aggregate columns (err_min/max/avg, d_max/avg, turn_max/avg) print `-` when `interval_tick_count == 0` (idle entry, no ticks yet).
+The 10 aggregate columns (err_min/max/avg, d_max/avg, turn_max/avg, v_max/avg/min) print `-` when `interval_tick_count == 0` (idle entry, no ticks yet).
 
 #### Summary line
 
@@ -116,7 +123,8 @@ PID gains are tuned by reading the `linetrace pidstat` columns in real time:
 | Oscillation (Kp too high) | `zc` rising + wide `err_min/err_max` | Lower Kp |
 | Integral wind-up (Ki too high) | `i_acc` pinned at the anti-windup clamp | Lower Ki |
 | Derivative noise (Kd too high) | `d_max / d_avg` ratio large (burst noise) | Lower Kd or add LPF |
-| Output saturation (max_turn too low) | `sat` rising + `turn_max == max_turn` | Increase `--max-turn` |
+| Output saturation (turn authority too low) | `sat` rising + `turn_max == v_max` | Raise `speed` (max_turn tracks speed since #126) |
+| Lost line in curves | `v_avg ≈ speed` even on tight curves | Engage dynamic speed via `--v-min` + `--v-alpha`/`--v-beta` (#126) |
 | Tracking-quality compare | `err_avg` (IAE-like) | Smaller is better between gain sets |
 
 Host-side log + plot example (skip the `#` summary line):
@@ -134,8 +142,54 @@ awk '!/^#/ && NR>1 {print $1, $4}' pidstat.log | gnuplot -p -e \
 
 - `target`: midpoint intensity between line (dark) and floor (bright).  Use `linetrace cal` first.
 - `kp`: start at 0.1 and double until the robot oscillates, then back off ~30 %.  Typical values 0.15–0.4.  These are ~1/10 of the reflection-era kp because the err absolute value is now ~10× larger (intensity range 0–1024 vs reflection 0–100).
-- `--max-turn`: caps the turn rate so a brief lost-line spike (high `err`) cannot fling the robot.  Default 180 dps is safe for a 56 mm-wheel chassis.
-- `--hz`: the LPF2 color sensor publishes at ≈100 Hz; loops faster than that just re-issue the same sample.  Slower (e.g. 50 Hz) reduces CPU but adds latency.
+- `--hz`: the LPF2 color sensor publishes at ≈100 Hz; loops faster than that just re-issue the same sample.  Slower (e.g. 50 Hz) reduces CPU but adds latency.  When using dynamic speed, keep `v/hz ≈ 1.5 mm/tick`; for `speed > 200 mm/s` raise `--hz` to 150+ to preserve spatial resolution.
+
+### 3.2 Dynamic speed (Issue #126)
+
+`--v-min/--v-alpha/--v-beta` make speed vary in `[v_min, speed]` based on controller demand.  The harder the curve (large `|err|` or `|derr|`), the more the robot slows down.
+
+| Flag | Meaning | Default | Range |
+|---|---|---|---|
+| `--v-min mm/s` | Floor speed during sharp curves | speed (= dynamic OFF) | `[1, speed]` |
+| `--v-alpha A` | `\|err\|` coefficient | 0 (= dynamic OFF) | `[0.00, 100.00]` |
+| `--v-beta B` | `\|derr\|` coefficient | 0 (= dynamic OFF) | `[0.00, 100.00]` |
+
+Formula:
+```
+denom = 1 + α·|err|/100 + β·|derr|/30
+v = clamp(speed / denom, v_min, speed)
+max_turn = v   (always tracks)
+```
+
+`ERR_FLOOR=100` and `DERR_FLOOR=30` are hardcoded in source.  At the intensity scale (Issue #125, target=512, err range 0..1024) `|err|=100` is "moderate curve" territory.  If observed peak `|err|/|derr|` deviate substantially, compensate via α/β.
+
+**Starting points** (Issue #126 hardware-validated, gains `kp=0.36 ki=0.15 kd=0.01`):
+
+| α | β | v at hypothetical peak (`|err|=100, |derr|=30`, base=300) | Use |
+|---|---|---|---|
+| **1.5** | **0.3** | =100 → **clamp** 150 | **Validated baseline** (v=550, sat 0.07 %) |
+| 1.0 | 0.5 | =150 (clamp) | Conservative starting point |
+| 0.5 | 0.5 | ≈200 (67 %) | Mild slowdown |
+
+Example (validated tuning):
+```
+linetrace run 300 0.36 512 --hz 200 --kd 0.01 --ki 0.15 \
+              --v-min 150 --v-alpha 1.5 --v-beta 0.3
+```
+
+Hardware sat-% comparison (Issue #126, v_min=250 fixed):
+
+| v | α=1.0 β=0.5 | α=1.5 β=0.3 |
+|---|---|---|
+| 350 | 0.30 % | **0.00 %** |
+| 450 | 0.36 % | **0.033 %** |
+| 550 | 0.36 % | **0.067 %** |
+
+Raising α from 1.0 to 1.5 makes the controller decelerate earlier on curve entry, dramatically reducing turn_dps cap hits.  Lowering β from 0.5 to 0.3 cuts d-term-driven jitter so v_avg is more stable.
+
+Verify with `pidstat`: `v_max≈300` on straights, `v_min` floor on curves indicates the loop is engaging.  The `turn_max ≤ v_max` invariant (max_turn tracking speed_apply) holds automatically.
+
+**Important**: `--v-*` flags reset to "dynamic OFF" (`v_min := speed`, `α := β := 0`) on every `run` (unlike kp/ki/kd/target/hz which inherit prior values).  This avoids accidentally carrying a stale dynamic profile from a previous tuning session.
 
 ## 4. Wiring
 
