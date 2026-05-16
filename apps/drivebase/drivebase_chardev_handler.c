@@ -233,22 +233,24 @@ int db_chardev_handler_tick(struct db_chardev_handler_s *h,
       (void)dispatch_envelope(h, &env, now_us);
     }
 
-  /* 2. Publish drivebase aggregate state. */
-
-  if (h->configured)
-    {
-      struct drivebase_state_s st;
-      db_drivebase_get_state(h->db, &st);
-      st.tick_seq = (uint32_t)(now_us & 0xffffffff);
-      int rc = ioctl(h->fd, DRIVEBASE_DAEMON_PUBLISH_STATE,
-                     (unsigned long)&st);
-      if (rc < 0)
-        {
-          return -errno;
-        }
-    }
+  /* State publish moved out of this function (Issue #135): the caller
+   * runs db_drivebase_update() after this returns, then publishes the
+   * post-update snapshot via db_chardev_handler_publish_state().  This
+   * gives a single publish per tick with the gyro-injected angle
+   * already folded in, and avoids the prior pattern that published a
+   * stale snapshot here and then re-published in the daemon.
+   */
 
   return 0;
+}
+
+int db_chardev_handler_publish_state(struct db_chardev_handler_s *h,
+                                     const struct drivebase_state_s *st)
+{
+  if (!h->attached) return -ENOTCONN;
+  int rc = ioctl(h->fd, DRIVEBASE_DAEMON_PUBLISH_STATE,
+                 (unsigned long)st);
+  return rc < 0 ? -errno : 0;
 }
 
 int db_chardev_handler_publish_status(struct db_chardev_handler_s *h)

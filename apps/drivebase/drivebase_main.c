@@ -375,14 +375,14 @@ static int daemon_tick_cb(uint64_t now_us, void *arg)
   if (ctx->handler.configured)
     {
       db_drivebase_update(&ctx->db, now_us);
-      /* re-publish state after the update so a client polling
-       * GET_STATE sees the latest distance/heading immediately.
+      /* publish post-update state so a client polling GET_STATE sees
+       * the latest distance/heading immediately (Issue #135: single
+       * canonical publish path).
        */
       struct drivebase_state_s st;
       db_drivebase_get_state(&ctx->db, &st);
       st.tick_seq = (uint32_t)(now_us & 0xffffffff);
-      ioctl(ctx->handler.fd, DRIVEBASE_DAEMON_PUBLISH_STATE,
-            (unsigned long)&st);
+      db_chardev_handler_publish_state(&ctx->handler, &st);
     }
   pthread_mutex_unlock(&ctx->lock);
   return 0;

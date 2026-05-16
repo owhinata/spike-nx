@@ -169,8 +169,7 @@ static int rt_tick_cb(uint64_t now_us_arg, void *arg)
           st.angle_mdeg = (int32_t)h;
         }
       st.tick_seq = d->rt.tick_count;
-      ioctl(d->handler.fd, DRIVEBASE_DAEMON_PUBLISH_STATE,
-            (unsigned long)&st);
+      db_chardev_handler_publish_state(&d->handler, &st);
     }
 
   /* Stall watchdog: emergency coast + initiate teardown after

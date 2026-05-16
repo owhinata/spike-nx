@@ -80,7 +80,10 @@ void db_chardev_handler_detach(struct db_chardev_handler_s *h);
  *   2. for each envelope, dispatch into db_drivebase_*; STOP envelopes
  *      with epoch <= output_epoch_seen are silently dropped (the
  *      kernel already coast/braked the motors in the ioctl context)
- *   3. publish drivebase state via DAEMON_PUBLISH_STATE
+ *
+ * State publish is NOT performed here (Issue #135).  The caller runs
+ * db_drivebase_update() after this returns and then publishes the
+ * post-update snapshot via db_chardev_handler_publish_state().
  *
  * Returns 0 or a negated errno.  Safe to call from the RT tick
  * thread; only does ioctls (no stdio, malloc, mutex contention).
@@ -88,6 +91,19 @@ void db_chardev_handler_detach(struct db_chardev_handler_s *h);
 
 int  db_chardev_handler_tick(struct db_chardev_handler_s *h,
                              uint64_t now_us);
+
+/* Publish a drivebase state snapshot through the kernel chardev's
+ * cache so user-space `drivebase get-state` / btsensor sees fresh
+ * distance / heading.  Caller fills the struct (typically via
+ * db_drivebase_get_state() + optional gyro injection); this is just
+ * a thin ioctl wrapper.  Single canonical publish path — replaces the
+ * previous arrangement where db_chardev_handler_tick published a
+ * pre-update snapshot and the daemon then re-published after the
+ * drivebase update.
+ */
+
+int  db_chardev_handler_publish_state(struct db_chardev_handler_s *h,
+                                      const struct drivebase_state_s *st);
 
 /* Periodic — call once per ~50 ms (10 ticks) to refresh status
  * counters that don't change every tick (motor_bound flags, gyro
