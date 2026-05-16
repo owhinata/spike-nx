@@ -400,7 +400,7 @@ sensor <class> send <mode> <hex>...    open -> CLAIM -> SEND -> close
 sensor <class> pwm <ch0> [ch1 ch2 ch3] open -> CLAIM -> SET_PWM -> close
 ```
 
-`<class>` is `color | ultrasonic | force | motor_m | motor_r | motor_l`.
+`<class>` is `motor_r | motor_l | motor_m | force | color | ultrasonic`.
 
 Each write-side command is **self-contained**: open → CLAIM → operate
 → close (auto-RELEASE).  When you need to hold a claim across

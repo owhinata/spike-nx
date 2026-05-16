@@ -73,12 +73,12 @@ struct class_entry_s
 
 static const struct class_entry_s g_class_table[] =
 {
-  { LEGOSENSOR_CLASS_COLOR,      "color",      "/dev/uorb/sensor_color",      3 },
-  { LEGOSENSOR_CLASS_ULTRASONIC, "ultrasonic", "/dev/uorb/sensor_ultrasonic", 4 },
-  { LEGOSENSOR_CLASS_FORCE,      "force",      "/dev/uorb/sensor_force",      0 },
-  { LEGOSENSOR_CLASS_MOTOR_M,    "motor_m",    "/dev/uorb/sensor_motor_m",    1 },
   { LEGOSENSOR_CLASS_MOTOR_R,    "motor_r",    "/dev/uorb/sensor_motor_r",    1 },
   { LEGOSENSOR_CLASS_MOTOR_L,    "motor_l",    "/dev/uorb/sensor_motor_l",    1 },
+  { LEGOSENSOR_CLASS_MOTOR_M,    "motor_m",    "/dev/uorb/sensor_motor_m",    1 },
+  { LEGOSENSOR_CLASS_FORCE,      "force",      "/dev/uorb/sensor_force",      0 },
+  { LEGOSENSOR_CLASS_COLOR,      "color",      "/dev/uorb/sensor_color",      3 },
+  { LEGOSENSOR_CLASS_ULTRASONIC, "ultrasonic", "/dev/uorb/sensor_ultrasonic", 4 },
 };
 
 #define CLASS_COUNT  (int)(sizeof(g_class_table) / sizeof(g_class_table[0]))
@@ -299,17 +299,20 @@ static int do_status_one(const struct class_entry_s *c)
   return 0;
 }
 
-/* Class-axis tabular layout matching `port lump status` (Issue #106).
- * The first column is the class name; the rest of the row mirrors the
- * port-side table 1:1 so the two views can be read side-by-side.
+/* Class-axis tabular layout (Issue #106 / #130).  Mostly mirrors
+ * `port lump status` so the two views can be read side-by-side, but the
+ * snapshot-ring `DqDrop` column is intentionally omitted: sensor class
+ * consumers use the on_data callback path, not the LUMP_POLL_DATA ring,
+ * so the drop counter is noise here (it just counts no one polling the
+ * ring).  Look at `port lump status` if you need it.
  */
 
 static int do_list(void)
 {
   printf("Class        Port  State    Type  Mode  Baud    RX(B)     TX(B)   "
-         "DqDrop  Err   BadMsg  Backoff  StkHWM      IsrPct  IsrAvgNs\n");
+         "Err   BadMsg  Backoff  StkHWM      IsrPct  IsrAvgNs\n");
   printf("-----------  ----  -------  ----  ----  ------  --------  ------  "
-         "------  ----  ------  -------  ----------  ------  --------\n");
+         "----  ------  -------  ----------  ------  --------\n");
 
   for (int i = 0; i < CLASS_COUNT; i++)
     {
@@ -343,14 +346,14 @@ static int do_list(void)
         }
 
       printf("%-11s   %c    %-7s  %3u   %3u   %6lu  %8lu  %6lu  "
-             "%6lu  %4lu  %6lu  %7lu  %4lu/%4lu  %3lu.%lu  %8lu\n",
+             "%4lu  %6lu  %7lu  %4lu/%4lu  %3lu.%lu  %8lu\n",
              c->name,
              ret_info == 0 ? 'A' + info_arg.port : '?',
              state_name(s.state),
              s.type_id, s.current_mode,
              (unsigned long)s.baud,
              (unsigned long)s.rx_bytes, (unsigned long)s.tx_bytes,
-             (unsigned long)s.dq_dropped, (unsigned long)s.err_count,
+             (unsigned long)s.err_count,
              (unsigned long)s.bad_msg_count, (unsigned long)s.backoff_step,
              (unsigned long)s.stk_used, (unsigned long)s.stk_size,
              (unsigned long)(s.isr_pct_x10 / 10u),

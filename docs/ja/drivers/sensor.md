@@ -287,7 +287,7 @@ sensor <class> send <mode> <hex>...    open → CLAIM → SEND → close
 sensor <class> pwm <ch0> [ch1 ch2 ch3] open → CLAIM → SET_PWM → close
 ```
 
-`<class>` は `color | ultrasonic | force | motor_m | motor_r | motor_l`。
+`<class>` は `motor_r | motor_l | motor_m | force | color | ultrasonic`。
 
 各書き込みコマンドは **1 プロセスで完結**: open → CLAIM → 操作 → close で auto-RELEASE。プロセス境界をまたいで claim を持続する必要がある場合は別途 daemon 化 (Issue #77 の drivebase を参照)。
 
