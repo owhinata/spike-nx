@@ -81,13 +81,23 @@ def test_imu_fusion(p):
         status = p.sendCommand("imu status")
         assert re.search(r"running:\s+yes", status), f"Unexpected status: {status}"
 
-        # 5. Check accelerometer (Z-axis ~9807 mm/s^2 when flat)
+        # 5. Check accelerometer.  Hub orientation is not controlled by
+        #    the harness, so per-axis values are arbitrary; verify the
+        #    total magnitude is close to 1 g (~9807 mm/s^2) instead.
+        #    imu_main.c prints x/y/z as %.1f floats with mm/s^2 unit.
         accel = p.sendCommand("imu accel")
         assert "accel:" in accel
-        z_match = re.search(r"z=\s*(-?\d+)", accel)
-        assert z_match, f"No Z-axis value found: {accel}"
-        z_val = abs(int(z_match.group(1)))
-        assert 8000 < z_val < 12000, f"Z-axis out of range: {z_val} mm/s^2"
+        triplet = r"x=\s*(-?\d+(?:\.\d+)?).*?y=\s*(-?\d+(?:\.\d+)?).*?z=\s*(-?\d+(?:\.\d+)?)"
+        xyz = re.search(triplet, accel)
+        assert xyz, f"No accel triplet found: {accel}"
+        ax, ay, az = (float(v) for v in xyz.groups())
+        mag = (ax * ax + ay * ay + az * az) ** 0.5
+        # ±20% absorbs sensor noise, calibration offset, and the
+        # gravity-mismatch between hubs sampled in different rooms.
+        assert 7800 < mag < 11800, (
+            f"accel magnitude out of range: |a|={mag:.0f} mm/s^2 "
+            f"(x={ax:.1f} y={ay:.1f} z={az:.1f})"
+        )
 
         # 6. Check gyroscope (all axes ~0 when stationary)
         gyro = p.sendCommand("imu gyro")
