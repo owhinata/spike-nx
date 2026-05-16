@@ -779,11 +779,15 @@ static int do_drive_run(const char *kind, int32_t arg1, int32_t arg2,
 
   if (strcmp(kind, "straight") == 0)
     {
-      rc = db_drivebase_drive_straight(&db, t0, arg1, on_completion);
+      rc = db_drivebase_drive_straight(&db, t0, arg1,
+                                       0 /* default speed */,
+                                       on_completion);
     }
   else if (strcmp(kind, "turn") == 0)
     {
-      rc = db_drivebase_turn(&db, t0, arg1, on_completion);
+      rc = db_drivebase_turn(&db, t0, arg1,
+                             0 /* default turn rate */,
+                             on_completion);
     }
   else if (strcmp(kind, "curve") == 0)
     {
@@ -1499,17 +1503,33 @@ int main(int argc, FAR char *argv[])
     {
       if (argc < 3)
         {
-          fprintf(stderr, "usage: drivebase straight <mm> [coast|brake|hold]\n");
+          fprintf(stderr, "usage: drivebase straight <mm> "
+                          "[<mmps>] [coast|brake|hold]\n");
           close(dev); return 1;
         }
-      struct drivebase_drive_straight_s a =
-        { .distance_mm = (int32_t)atoi(argv[2]),
-          .on_completion = DRIVEBASE_ON_COMPLETION_BRAKE };
-      if (argc >= 4)
+      struct drivebase_drive_straight_s a;
+      memset(&a, 0, sizeof(a));
+      a.distance_mm   = (int32_t)atoi(argv[2]);
+      a.on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+      a.speed_mmps    = 0;       /* 0 = use default                       */
+      /* argv[3] / argv[4]: either a numeric speed override or a
+       * completion keyword (coast/brake/hold), in any order.  Numeric =
+       * strtol consumes the whole token (Issue #137).
+       */
+      for (int i = 3; i < argc && i <= 4; i++)
         {
-          if      (strcmp(argv[3], "coast") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_COAST;
-          else if (strcmp(argv[3], "brake") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
-          else if (strcmp(argv[3], "hold")  == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_HOLD;
+          if      (strcmp(argv[i], "coast") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_COAST;
+          else if (strcmp(argv[i], "brake") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+          else if (strcmp(argv[i], "hold")  == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_HOLD;
+          else
+            {
+              char *endp;
+              long v = strtol(argv[i], &endp, 10);
+              if (endp != argv[i] && *endp == '\0')
+                {
+                  a.speed_mmps = (int32_t)v;
+                }
+            }
         }
       int rc = ioctl(dev, DRIVEBASE_DRIVE_STRAIGHT, (unsigned long)&a);
       close(dev);
@@ -1521,12 +1541,30 @@ int main(int argc, FAR char *argv[])
     {
       if (argc < 3)
         {
-          fprintf(stderr, "usage: drivebase turn <deg>\n");
+          fprintf(stderr, "usage: drivebase turn <deg> "
+                          "[<dps>] [coast|brake|hold]\n");
           close(dev); return 1;
         }
-      struct drivebase_turn_s a =
-        { .angle_deg = (int32_t)atoi(argv[2]),
-          .on_completion = DRIVEBASE_ON_COMPLETION_BRAKE };
+      struct drivebase_turn_s a;
+      memset(&a, 0, sizeof(a));
+      a.angle_deg     = (int32_t)atoi(argv[2]);
+      a.on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+      a.turn_rate_dps = 0;       /* 0 = use default                       */
+      for (int i = 3; i < argc && i <= 4; i++)
+        {
+          if      (strcmp(argv[i], "coast") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_COAST;
+          else if (strcmp(argv[i], "brake") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+          else if (strcmp(argv[i], "hold")  == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_HOLD;
+          else
+            {
+              char *endp;
+              long v = strtol(argv[i], &endp, 10);
+              if (endp != argv[i] && *endp == '\0')
+                {
+                  a.turn_rate_dps = (int32_t)v;
+                }
+            }
+        }
       int rc = ioctl(dev, DRIVEBASE_TURN, (unsigned long)&a);
       close(dev);
       if (rc < 0) { fprintf(stderr, "TURN: %s\n", strerror(errno)); return 1; }

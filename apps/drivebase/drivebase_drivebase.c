@@ -249,17 +249,25 @@ void db_drivebase_set_origin(struct db_drivebase_s *db,
 int db_drivebase_drive_straight(struct db_drivebase_s *db,
                                 uint64_t now_us,
                                 int32_t distance_mm,
+                                int32_t speed_mmps,
                                 uint8_t on_completion)
 {
   const struct db_traj_limits_s *dl =
     db_settings_distance_limits(db->wheel_d_um);
 
   /* Convert the trajectory limits (in motor mdeg/s) back to wheel
-   * mm/s for dispatch_position's sake.
+   * mm/s for dispatch_position's sake.  speed_mmps overrides v_max
+   * when non-zero (Issue #137).  Negative is treated as |speed_mmps|
+   * since v_max is a magnitude; sign of motion comes from distance_mm.
+   * accel/decel stay at the default — per-call override deferred.
    */
 
   int32_t v_mmps    = db_angle_mdegps_to_mmps(dl->v_max_mdegps,
                                               db->wheel_d_um);
+  if (speed_mmps != 0)
+    {
+      v_mmps = (speed_mmps < 0) ? -speed_mmps : speed_mmps;
+    }
   int32_t a_mmps2   = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
                                               db->wheel_d_um);
   int32_t d_mmps2   = db_angle_mdegps_to_mmps(dl->decel_mdegps2,
@@ -273,6 +281,7 @@ int db_drivebase_drive_straight(struct db_drivebase_s *db,
 int db_drivebase_turn(struct db_drivebase_s *db,
                       uint64_t now_us,
                       int32_t angle_deg,
+                      int32_t turn_rate_dps,
                       uint8_t on_completion)
 {
   /* l_diff = H_rad * axle_t = angle_deg * π/180 * axle_t */
@@ -289,12 +298,25 @@ int db_drivebase_turn(struct db_drivebase_s *db,
    * mdeg/s using wheel_d, an additional axle/wheel factor would
    * cancel).  Easiest: just lift the same numbers as the distance
    * limits, since at top speed both move equally fast in mm/s.
+   *
+   * turn_rate_dps overrides v_max when non-zero (Issue #137).  Convert
+   * to per-wheel mm/s magnitude:
+   *   v_diff_mmps  = turn_rate_dps · π/180 · axle_t  (R-L differential)
+   *   v_wheel_mmps = v_diff_mmps / 2                 (each wheel)
    */
 
   const struct db_traj_limits_s *dl =
     db_settings_distance_limits(db->wheel_d_um);
   int32_t v_mmps  = db_angle_mdegps_to_mmps(dl->v_max_mdegps,
                                             db->wheel_d_um);
+  if (turn_rate_dps != 0)
+    {
+      int32_t tr_abs   = (turn_rate_dps < 0) ? -turn_rate_dps
+                                             :  turn_rate_dps;
+      int32_t v_diff_mmps = heading_mdeg_to_diff_mm(tr_abs * 1000,
+                                                    db->axle_t_um);
+      v_mmps = v_diff_mmps / 2;
+    }
   int32_t a_mmps2 = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
                                             db->wheel_d_um);
   int32_t d_mmps2 = db_angle_mdegps_to_mmps(dl->decel_mdegps2,
@@ -354,6 +376,7 @@ int db_drivebase_drive_arc_distance(struct db_drivebase_s *db,
   if (radius_mm == 0)
     {
       return db_drivebase_drive_straight(db, now_us, distance_mm,
+                                         0 /* default speed */,
                                          on_completion);
     }
 

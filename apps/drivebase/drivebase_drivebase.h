@@ -109,18 +109,21 @@ int  db_drivebase_reset(struct db_drivebase_s *db, uint64_t now_us);
 void db_drivebase_set_origin(struct db_drivebase_s *db,
                              int32_t distance_mm, int32_t angle_mdeg);
 
-/* User-level drive commands.  Speed defaults come from
- * db_settings_distance_limits / heading_limits.
+/* User-level drive commands.  speed_mmps / turn_rate_dps == 0 falls
+ * back to the db_settings_distance_limits / heading_limits defaults
+ * (Issue #137).  Pass non-zero to override per-call.
  */
 
 int  db_drivebase_drive_straight(struct db_drivebase_s *db,
                                  uint64_t now_us,
                                  int32_t distance_mm,
+                                 int32_t speed_mmps,
                                  uint8_t on_completion);
 
 int  db_drivebase_turn(struct db_drivebase_s *db,
                        uint64_t now_us,
                        int32_t angle_deg,
+                       int32_t turn_rate_dps,
                        uint8_t on_completion);
 
 int  db_drivebase_drive_curve(struct db_drivebase_s *db,

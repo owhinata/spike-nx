@@ -169,7 +169,8 @@ struct drivebase_drive_straight_s
 {
   int32_t distance_mm;
   uint8_t on_completion;      /* enum drivebase_on_completion_e         */
-  uint8_t reserved[7];
+  uint8_t reserved[3];
+  int32_t speed_mmps;         /* 0 = use db_settings default            */
 };
 
 struct drivebase_drive_curve_s
@@ -199,6 +200,7 @@ struct drivebase_turn_s
   int32_t angle_deg;
   uint8_t on_completion;
   uint8_t reserved[3];
+  int32_t turn_rate_dps;      /* 0 = use db_settings default            */
 };
 
 struct drivebase_stop_s
@@ -358,7 +360,7 @@ _Static_assert(sizeof(struct drivebase_drive_straight_s) == 12, "drivebase_drive
 _Static_assert(sizeof(struct drivebase_drive_curve_s)    == 16, "drivebase_drive_curve_s ABI");
 _Static_assert(sizeof(struct drivebase_drive_arc_s)      == 16, "drivebase_drive_arc_s ABI");
 _Static_assert(sizeof(struct drivebase_drive_forever_s)  ==  8, "drivebase_drive_forever_s ABI");
-_Static_assert(sizeof(struct drivebase_turn_s)           ==  8, "drivebase_turn_s ABI");
+_Static_assert(sizeof(struct drivebase_turn_s)           == 12, "drivebase_turn_s ABI");
 _Static_assert(sizeof(struct drivebase_stop_s)           ==  8, "drivebase_stop_s ABI");
 _Static_assert(sizeof(struct drivebase_spike_forever_s)  ==  8, "drivebase_spike_forever_s ABI");
 _Static_assert(sizeof(struct drivebase_spike_time_s)     == 16, "drivebase_spike_time_s ABI");

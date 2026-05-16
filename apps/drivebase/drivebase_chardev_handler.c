@@ -69,6 +69,7 @@ static int dispatch_envelope(struct db_chardev_handler_s *h,
               (const struct drivebase_drive_straight_s *)env->payload;
           return db_drivebase_drive_straight(h->db, now_us,
                                              a->distance_mm,
+                                             a->speed_mmps,
                                              a->on_completion);
         }
 
@@ -79,6 +80,7 @@ static int dispatch_envelope(struct db_chardev_handler_s *h,
           const struct drivebase_turn_s *a =
               (const struct drivebase_turn_s *)env->payload;
           return db_drivebase_turn(h->db, now_us, a->angle_deg,
+                                   a->turn_rate_dps,
                                    a->on_completion);
         }
 
