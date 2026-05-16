@@ -374,12 +374,15 @@ def test_linetrace_run_max_turn_flag_retired(p, color_sensor_required):
         _ensure_stopped(p)
 
 
-def test_linetrace_run_dynamic_flags_validate(p):
+def test_linetrace_run_dynamic_flags_validate(p, color_sensor_required):
     """L-12: dynamic-speed flag range validation (#126).
 
     --v-min must be in [1, speed]; --v-alpha and --v-beta must be in
     [0.00, 100.00].  Daemon must be running for do_run to evaluate the
-    arguments past the daemon-running gate.
+    arguments past the daemon-running gate — same precondition as L-7,
+    L-8, and L-11 — so requires color_sensor_required.  Previously
+    passed by timing accident (do_run ran during the brief window
+    before color_open_select gave up on the missing sensor).
     """
 
     _ensure_stopped(p)

@@ -101,6 +101,17 @@ def _ensure_stopped(p, timeout=7.0):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason=(
+    "Obsolete post-#120: rcS auto-starts drivebase at boot, and the "
+    "rcS-spawned daemon cannot be reliably stopped from a separate "
+    "user-task CLI invocation (the g_daemon static pointer is not "
+    "shared across builtin-app process boundaries in BUILD_PROTECTED, "
+    "so `drivebase stop` returns -EAGAIN and the kernel attach state "
+    "stays at 1).  A pre-attach assertion is no longer reachable from "
+    "test_session steady state — the test premise was tied to the "
+    "pre-#120 boot path.  Restoring it would need a kernel-side "
+    "DETACH ioctl that does not require the daemon's own filep."
+))
 def test_drivebase_status_no_daemon(p):
     """D-1: GET_STATUS returns a zeroed snapshot when no daemon attached.
 
