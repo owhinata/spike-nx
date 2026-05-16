@@ -72,22 +72,37 @@ def _parse_state(text):
     return row
 
 
-def _ensure_stopped(p, timeout=7.0):
+def _ensure_stopped(p, timeout=15.0):
     """Make sure no daemon is alive entering a test.
 
     Issue #120 (9134953) added rcS auto-start of drivebase at boot, so
-    after reboot the daemon is already attached.  `drivebase stop`
-    returns as soon as the daemon posts teardown_done, but the kernel
-    chardev's daemon_attached flag only clears when the daemon task
-    actually exits and its open fd is closed by db_chardev_close — a
-    short window that empirically stretches past several seconds
-    right after boot under early-session CPU pressure.  Poll until
-    daemon_attached clears (7 s default) so the first drivebase test
-    of the session does not race the detach.
+    after reboot the daemon is already attached.  Two factors stretch
+    the time it takes for daemon_attached to actually clear after the
+    test issues `drivebase stop`:
+
+      1. drivebase_daemon_stop() only waits 2 s internally for
+         teardown_done; if the daemon is still in INITIALISING (motor
+         init / mode-2 select / IMU open), it does not poll `running`
+         until reaching the RUNNING idle loop — the CLI returns
+         -ETIMEDOUT but the daemon continues teardown asynchronously.
+      2. test_crash reboots the Hub four times immediately before the
+         drivebase tests, so D-1 hits the Hub mid-init right after the
+         last watchdog reset, when motor / IMU bring-up has not
+         finished.
+
+    Retry `drivebase stop` periodically and poll daemon_attached until
+    it clears or the (generous) outer deadline expires.
     """
-    p.sendCommand("drivebase stop", timeout=5)
     deadline = time.time() + timeout
+    last_stop = 0.0
     while time.time() < deadline:
+        # Re-issue stop every 3 s — covers the case where the first
+        # call hit -ETIMEDOUT because the daemon was still finishing
+        # INITIALISING, but the next attempt finds the daemon in
+        # RUNNING and the synchronous teardown wait succeeds.
+        if time.time() - last_stop > 3.0:
+            p.sendCommand("drivebase stop", timeout=5)
+            last_stop = time.time()
         time.sleep(0.3)
         st = _parse_status(p.sendCommand("drivebase status", timeout=5))
         if st.get("daemon_attached") == 0:
@@ -101,17 +116,6 @@ def _ensure_stopped(p, timeout=7.0):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason=(
-    "Obsolete post-#120: rcS auto-starts drivebase at boot, and the "
-    "rcS-spawned daemon cannot be reliably stopped from a separate "
-    "user-task CLI invocation (the g_daemon static pointer is not "
-    "shared across builtin-app process boundaries in BUILD_PROTECTED, "
-    "so `drivebase stop` returns -EAGAIN and the kernel attach state "
-    "stays at 1).  A pre-attach assertion is no longer reachable from "
-    "test_session steady state — the test premise was tied to the "
-    "pre-#120 boot path.  Restoring it would need a kernel-side "
-    "DETACH ioctl that does not require the daemon's own filep."
-))
 def test_drivebase_status_no_daemon(p):
     """D-1: GET_STATUS returns a zeroed snapshot when no daemon attached.
 
