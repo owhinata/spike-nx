@@ -72,11 +72,25 @@ def _parse_state(text):
     return row
 
 
-def _ensure_stopped(p):
-    """Best-effort: make sure no daemon is alive entering a test."""
+def _ensure_stopped(p, timeout=3.0):
+    """Make sure no daemon is alive entering a test.
+
+    Issue #120 (9134953) added rcS auto-start of drivebase at boot, so
+    after reboot the daemon is already attached.  A single
+    `drivebase stop` is normally enough, but right after boot the
+    close-cleanup + sem_post chain can take longer than 0.3 s — poll
+    `daemon_attached` until it clears so subsequent assertions about
+    the pre-attach state are reliable.
+    """
     p.sendCommand("drivebase stop", timeout=5)
-    # Give the kernel close-cleanup + sem_post a beat to settle.
-    time.sleep(0.3)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(0.2)
+        st = _parse_status(p.sendCommand("drivebase status", timeout=5))
+        if st.get("daemon_attached") == 0:
+            return
+    # Fall through with whatever state we have; the caller's assertion
+    # will surface the failure with the real status snapshot.
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +247,14 @@ def test_drivebase_get_state_under_live_daemon(p):
     state_db active-slot read) survives the same heap pressure
     scenario as GET_STATUS, and that the RT thread is actually
     running ticks.
+
+    `done` is intentionally NOT asserted on: drivebase_control.c
+    initializes pid.done=false at db_pid_init/reset and only flips it
+    to true after a finite trajectory finishes within tolerance for
+    `done_window_ms`.  At fresh start with no command issued there is
+    no trajectory, so the steady-state idle value is 0.  `cmd=0`
+    (no active command) is the meaningful invariant for "no command
+    in flight" and is checked instead.
     """
 
     _ensure_stopped(p)
@@ -241,10 +263,9 @@ def test_drivebase_get_state_under_live_daemon(p):
 
     out = p.sendCommand("drivebase get-state", timeout=8)
     state = _parse_state(out)
-    # `done=1` in the idle state, `cmd=0` (no active command).  The
-    # tick counter must be advancing at ~200 Hz — anything past a
-    # handful proves the RT pthread reached its loop.
-    assert state.get("done") == 1, f"unexpected get-state: {out!r}"
+    assert state.get("cmd") == 0, f"unexpected cmd in idle: {out!r}"
+    # tick must be advancing at the configured RT cadence — anything
+    # past a handful proves the RT pthread reached its loop.
     assert state.get("tick", 0) > 50, f"RT loop not progressing: {out!r}"
 
     p.sendCommand("drivebase stop", timeout=8)
