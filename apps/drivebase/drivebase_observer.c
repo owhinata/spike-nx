@@ -1,19 +1,25 @@
 /****************************************************************************
  * apps/drivebase/drivebase_observer.c
  *
- * Sliding-window slope velocity estimator + stall detector.
+ * Adaptive-window slope velocity estimator + stall detector +
+ * zero-speed hysteresis (Issue #136).
  *
  * Each call to update_sample() pushes one (t, x) pair into a ring of
- * DB_OBSERVER_RING_DEPTH slots (~64 ms at 1 kHz publish rate, plenty
- * of head room for our 5 ms tick).  The velocity estimate is the slope
- * between the newest entry and the oldest still inside `window_us`.
- * That denominator is real time, not sample count, so the estimator
- * keeps working even if encoder updates arrive irregularly (the
- * upper-half sensor framework can drop intermediate samples under
- * load — we always reach back at least `window_us`).
+ * DB_OBSERVER_RING_DEPTH slots (~128 ms at 1 kHz publish rate).  The
+ * velocity estimate walks back from the newest sample until both
+ * (a) the time span has reached `min_window_us` and (b) the
+ * accumulated |Δx| has reached MIN_LSB_COUNT × LSB.  At high speeds
+ * this leaves the window at the minimum (low lag); at low speeds it
+ * auto-extends so dx stays above the 1-LSB quantization noise floor.
  *
- * Stall detection is unchanged from the IIR-LP first cut: |v_est| <
- * threshold AND |duty| > threshold continuously for window_ms ⇒ stalled.
+ * Zero-speed hysteresis snaps |v_raw| < V_HYST_LOW to zero and
+ * requires |v_raw| > V_HYST_HIGH before releasing.  Suppresses the
+ * ±17 dps sign-flip chatter around rest.
+ *
+ * Stall detection: |v_est| < threshold AND |duty| > threshold
+ * continuously for stall_window_ms ⇒ stalled.  Uses the post-
+ * hysteresis estimate so a snapped-to-zero motor under duty is
+ * correctly flagged as stalled.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -27,11 +33,36 @@
 #define US_PER_S                ((int64_t)1000000)
 #define DB_OBSERVER_DEFAULT_MS  30
 
+/* Adaptive-window slope criteria (Issue #136).  LSB is the encoder
+ * quantum (1 deg = 1000 mdeg for LUMP MODE 2 POS).  Walk back from
+ * `newest` until accumulated |Δx| ≥ MIN_LSB_COUNT × LSB AND the time
+ * span has reached `min_window_us` — whichever requires more walking.
+ * At high speeds this leaves the window at the minimum (low latency);
+ * at low speeds it auto-extends to keep the dx large enough for
+ * meaningful SNR.
+ */
+
+#define DB_OBSERVER_LSB_MDEG          1000
+#define DB_OBSERVER_MIN_LSB_COUNT     3
+
+/* Zero-speed hysteresis (Issue #136).  Snap v_est to 0 when |v_raw| <
+ * V_HYST_LOW.  Stay snapped until |v_raw| > V_HYST_HIGH.  Suppresses
+ * the ±17 dps slope chatter that 1-LSB quantization produces around
+ * zero motion.
+ */
+
+#define DB_OBSERVER_V_HYST_LOW_MDEGPS  30000
+#define DB_OBSERVER_V_HYST_HIGH_MDEGPS 60000
+
 /****************************************************************************
  * Private Helpers
  ****************************************************************************/
 
-static int32_t v_slope_mdegps(const struct db_observer_s *o)
+static int64_t abs_i64(int64_t v) { return v < 0 ? -v : v; }
+
+/* Compute the raw adaptive-window slope (no hysteresis applied). */
+
+static int32_t v_slope_raw_mdegps(const struct db_observer_s *o)
 {
   if (o->count < 2)
     {
@@ -40,12 +71,16 @@ static int32_t v_slope_mdegps(const struct db_observer_s *o)
 
   uint8_t newest = (uint8_t)((o->head + DB_OBSERVER_RING_DEPTH - 1u) %
                               DB_OBSERVER_RING_DEPTH);
-  uint64_t t_new = o->ring[newest].t_us;
-  uint64_t deadline = (t_new > o->window_us) ? (t_new - o->window_us) : 0;
+  uint64_t t_new      = o->ring[newest].t_us;
+  int64_t  x_new      = o->ring[newest].x_mdeg;
+  const int64_t lsb_thr =
+    (int64_t)DB_OBSERVER_MIN_LSB_COUNT * DB_OBSERVER_LSB_MDEG;
 
-  /* Walk backwards from `newest` to find the oldest entry whose
-   * timestamp is still ≥ deadline.  count entries are valid; we
-   * include up to all of them.
+  /* Walk back from newest.  Stop once both criteria are met:
+   *   (a) time span ≥ min_window_us
+   *   (b) |Δx| ≥ MIN_LSB_COUNT × LSB
+   * If we exhaust the ring before either criterion is met, fall back
+   * to the oldest available entry (best effort).
    */
 
   uint8_t pick = newest;
@@ -53,11 +88,13 @@ static int32_t v_slope_mdegps(const struct db_observer_s *o)
     {
       uint8_t idx = (uint8_t)((newest + DB_OBSERVER_RING_DEPTH - i) %
                               DB_OBSERVER_RING_DEPTH);
-      if (o->ring[idx].t_us < deadline)
+      pick = idx;
+      uint64_t elapsed_us = t_new - o->ring[idx].t_us;
+      int64_t  dx_abs     = abs_i64(x_new - o->ring[idx].x_mdeg);
+      if (elapsed_us >= o->min_window_us && dx_abs >= lsb_thr)
         {
           break;
         }
-      pick = idx;
     }
 
   if (pick == newest)
@@ -70,11 +107,44 @@ static int32_t v_slope_mdegps(const struct db_observer_s *o)
     {
       return 0;
     }
-  int64_t dx = o->ring[newest].x_mdeg - o->ring[pick].x_mdeg;
+  int64_t dx = x_new - o->ring[pick].x_mdeg;
   int64_t v  = (dx * US_PER_S) / dt;
   if (v >  INT32_MAX) v = INT32_MAX;
   if (v <  INT32_MIN) v = INT32_MIN;
   return (int32_t)v;
+}
+
+/* Apply zero-speed hysteresis: snap small |v_raw| to 0, then require
+ * |v_raw| to exceed the upper threshold before releasing.  Avoids the
+ * sign-flip chatter the quantized slope produces near rest.
+ */
+
+static int32_t apply_zero_hysteresis(struct db_observer_s *o,
+                                     int32_t v_raw_mdegps)
+{
+  uint32_t v_abs = (uint32_t)((v_raw_mdegps < 0) ? -v_raw_mdegps
+                                                 :  v_raw_mdegps);
+  if (o->snapped_to_zero)
+    {
+      if (v_abs > DB_OBSERVER_V_HYST_HIGH_MDEGPS)
+        {
+          o->snapped_to_zero = false;
+          return v_raw_mdegps;
+        }
+      return 0;
+    }
+  if (v_abs < DB_OBSERVER_V_HYST_LOW_MDEGPS)
+    {
+      o->snapped_to_zero = true;
+      return 0;
+    }
+  return v_raw_mdegps;
+}
+
+static int32_t v_slope_mdegps(struct db_observer_s *o)
+{
+  int32_t v_raw = v_slope_raw_mdegps(o);
+  return apply_zero_hysteresis(o, v_raw);
 }
 
 static int32_t abs_i32(int32_t v) { return v < 0 ? -v : v; }
@@ -112,9 +182,10 @@ void db_observer_init(struct db_observer_s *o,
   o->head                   = 0;
   o->count                  = 0;
   o->v_est_mdegps           = 0;
-  o->window_us              =
+  o->min_window_us          =
     (uint64_t)(window_ms ? window_ms : DB_OBSERVER_DEFAULT_MS) * 1000u;
   o->primed                 = false;
+  o->snapped_to_zero        = true;
   o->stall_low_speed_mdegps = low_speed_mdegps;
   o->stall_min_duty         = min_duty;
   o->stall_window_ms        = stall_window_ms;
@@ -129,6 +200,7 @@ void db_observer_reset(struct db_observer_s *o,
   o->count                  = 0;
   o->v_est_mdegps           = 0;
   o->primed                 = true;
+  o->snapped_to_zero        = true;
   o->stall_streak_ms        = 0;
   o->stalled                = false;
 
@@ -187,9 +259,9 @@ void db_observer_idle_tick(struct db_observer_s *o, uint32_t dt_ms,
     }
 
   /* Recompute the slope: as wall-clock advances, older entries fall
-   * outside the window.  In the limit (motor stopped, no new samples
-   * for `window_us`) the slope estimate decays to 0 because every
-   * pair has dx ≈ 0.
+   * outside the adaptive window.  In the limit (motor stopped, no
+   * new samples for ≥ min_window_us) every pair has dx ≈ 0 so the
+   * slope decays to 0; the hysteresis then snaps and latches it.
    */
 
   o->v_est_mdegps = v_slope_mdegps(o);

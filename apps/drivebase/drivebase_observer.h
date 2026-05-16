@@ -1,19 +1,19 @@
 /****************************************************************************
  * apps/drivebase/drivebase_observer.h
  *
- * Speed observer + stall detector for the per-motor servo (Issue #77
- * commit #6.5).  The first cut was a per-sample IIR low-pass on
- * (Δx / Δt), but at 1-deg encoder resolution × 1 kHz LUMP publish a
- * single-pair velocity estimate is either 0 or ±1000 deg/s — pure
- * quantization noise that the LP filter cannot recover from no matter
- * how aggressive α is.
+ * Speed observer + stall detector for the per-motor servo.
  *
- * The replacement keeps a ring of recent (timestamp, position) pairs
- * spanning a configurable window (default ≈ 30 ms).  Velocity = slope
- * between the newest and the oldest entry still in the window.  At
- * 100 deg/s motor motion the 30 ms span covers 3 deg of encoder change
- * — well above the 1-deg quantization, so the slope reads the real
- * velocity within ~5 % rather than ±200 % per-sample noise.
+ * History.  Iteration 1 (Issue #77 commit #6.5) used a per-sample IIR
+ * low-pass on (Δx / Δt); at 1-deg encoder resolution × 1 kHz LUMP
+ * publish a single-pair velocity estimate is either 0 or ±1000 dps —
+ * pure quantization noise.  Iteration 2 replaced that with a fixed
+ * 30 ms sliding-window slope: at 100 dps the 30 ms span covers 3 deg
+ * of encoder change, so the slope reads ~5 % vs ±200 % per-sample
+ * noise.  Iteration 3 (Issue #136) made the window adaptive — walk
+ * back until accumulated |Δx| ≥ MIN_LSB_COUNT × LSB and elapsed
+ * ≥ min_window_us — so low-speed accuracy is no longer bounded by
+ * a single fixed window choice.  A zero-speed hysteresis was added on
+ * top to suppress sign-flip chatter near rest.
  *
  * Pybricks uses a fuller Luenberger observer with motor electrical
  * state.  We can swap that in later behind the same API if bench
@@ -35,9 +35,12 @@ extern "C"
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define DB_OBSERVER_RING_DEPTH   64
-                              /* covers 64 ms at 1 kHz publish rate;     */
-                              /* tick consumes 1-5 entries per 5 ms tick */
+#define DB_OBSERVER_RING_DEPTH   128
+                              /* covers 128 ms at 1 kHz publish rate.    */
+                              /* Larger ring (was 64) lets the adaptive  */
+                              /* slope window grow to ~128 ms at low     */
+                              /* speeds while still satisfying the 3-LSB */
+                              /* dx criterion — see Issue #136.          */
 
 /****************************************************************************
  * Types
@@ -62,8 +65,14 @@ struct db_observer_s
   /* Derived state */
 
   int32_t                     v_est_mdegps;
-  uint64_t                    window_us;       /* slope window           */
+  uint64_t                    min_window_us;   /* lower bound on the     */
+                                               /* adaptive slope window  */
+                                               /* (Issue #136)           */
   bool                        primed;
+  bool                        snapped_to_zero; /* zero-speed hysteresis: */
+                                               /* true while |v_raw| has */
+                                               /* not yet exceeded the   */
+                                               /* release threshold      */
 
   /* Stall detection */
 
