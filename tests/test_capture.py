@@ -107,14 +107,18 @@ def test_sensor_capture_in_help(p):
 # ---------------------------------------------------------------------------
 
 
-def test_capture_unmapped_mode_rejects(p):
+def test_capture_unmapped_mode_rejects(p, color_sensor_required):
     """K-3: `sensor color capture` exits ENOENT-cleanly for an unmapped mode.
 
-    The uORB topic publishes a synthetic sample with `mode_id=0` even
-    when no Color Sensor is plugged in, so do_capture() reaches the
-    schema lookup; mode 0 has no entry in g_capture_schemas (only modes
-    1=Reflection and 5=RGBI), so resolve_capture_schema returns NULL
-    and the verb prints the documented error before exiting.
+    With a Color Sensor attached and the LUMP-classified port in any
+    mode whose schema is not registered, do_capture() reads one uORB
+    sample, the schema lookup misses (only modes 1=Reflection and
+    5=RGBI are mapped), and the verb prints the documented error
+    before exiting.  An empirical observation: when no Color Sensor
+    is plugged in the uORB topic does not publish at all, so the
+    test would time out with "no sample within 200 ms" rather than
+    reach the schema lookup — `color_sensor_required` skips that
+    case.
 
     What this guards: the verb dispatch is wired (CONFIG_APP_CAPTURE
     on), `sensor color` opens its uORB fd, the first sample is read,

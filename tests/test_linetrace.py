@@ -250,8 +250,14 @@ def test_linetrace_set_without_daemon(p):
     assert "not running" in out, f"unexpected: {out!r}"
 
 
-def test_linetrace_set_missing_or_extra_args(p):
-    """L-7: bare or extra-arg invocation prints usage and rejects."""
+def test_linetrace_set_missing_or_extra_args(p, color_sensor_required):
+    """L-7: bare or extra-arg invocation prints usage and rejects.
+
+    `linetrace start` opens the color sensor SELECT path and only
+    succeeds when a real sensor is attached; without one the daemon
+    fails to spawn and subsequent verbs report "not running".
+    `color_sensor_required` skips this test cleanly in that case.
+    """
 
     _ensure_stopped(p)
     p.sendCommand("linetrace start", timeout=8)
@@ -268,8 +274,13 @@ def test_linetrace_set_missing_or_extra_args(p):
         _ensure_stopped(p)
 
 
-def test_linetrace_set_rejects_out_of_range(p):
-    """L-8: target outside the validated range is rejected."""
+def test_linetrace_set_rejects_out_of_range(p, color_sensor_required):
+    """L-8: target outside the validated range is rejected.
+
+    Like L-7, requires a real Color Sensor for `linetrace start` to
+    succeed; otherwise the daemon never comes up and the target
+    verb's range-check path is unreachable.
+    """
 
     _ensure_stopped(p)
     p.sendCommand("linetrace start", timeout=8)

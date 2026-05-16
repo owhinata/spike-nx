@@ -254,6 +254,23 @@ def p(pytestconfig):
     nuttx.close()
 
 
+@pytest.fixture(scope="session")
+def color_sensor_required(p):
+    """Skip the test if no SPIKE Color Sensor is bound to any port.
+
+    `sensor color` (no verb) calls do_status_one(), which prints a
+    `<unbound>` row when LEGOSENSOR_GET_STATUS returns ENODEV and a
+    `bound port : <X>` line when the sensor is attached and the LUMP
+    layer has classified it.  Tests that exercise the color uORB
+    sample path or `linetrace start` (which CLAIMs the color port)
+    cannot make progress without a real sensor and would otherwise
+    fail with a misleading timeout instead of skipping cleanly.
+    """
+    out = p.sendCommand("sensor color", timeout=5)
+    if "<unbound>" in out or "bound port" not in out:
+        pytest.skip("color sensor not attached")
+
+
 # ---------------------------------------------------------------------------
 # Collection hook: move interactive tests to the end
 # ---------------------------------------------------------------------------
