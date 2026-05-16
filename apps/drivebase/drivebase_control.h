@@ -57,6 +57,18 @@ struct db_pid_state_s
   uint32_t smart_hold_streak_ms;
   bool     smart_hold_active;     /* true while still in passive hold    */
   bool     smart_hold_expired;    /* set true once hold time elapsed     */
+
+  /* Latched passive completion (Issue #132).  Once a natural COAST/    */
+  /* BRAKE completion fires, the controller stays off until the caller  */
+  /* arms a new trajectory (db_pid_reset) or unpauses explicitly        */
+  /* (db_pid_pause false).  Without this latch, a disturbance after     */
+  /* completion shrinks the done streak, drops actuation back to HOLD   */
+  /* (the default), and re-engages the PID at whatever duty the gains   */
+  /* produce.                                                           */
+
+  bool     latched_passive_done;
+  uint8_t  latched_actuation;     /* enum drivebase_on_completion_e —   */
+                                  /* COAST or BRAKE while latched       */
 };
 
 struct db_pid_input_s

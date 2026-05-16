@@ -76,11 +76,25 @@ void db_pid_reset(struct db_pid_state_s *st)
   st->smart_hold_streak_ms  = 0;
   st->smart_hold_active     = false;
   st->smart_hold_expired    = false;
+  st->latched_passive_done  = false;
+  st->latched_actuation     = 0;
 }
 
 void db_pid_pause(struct db_pid_state_s *st, bool paused)
 {
   st->paused = paused;
+
+  /* Explicit unpause restarts the controller; drop any stale passive
+   * latch so the next update can drive duty again.  Pause-true is
+   * also called from the COAST/BRAKE completion branch which sets the
+   * latch immediately afterwards, so we only clear on pause-false.
+   */
+
+  if (!paused)
+    {
+      st->latched_passive_done = false;
+      st->latched_actuation    = 0;
+    }
 }
 
 void db_pid_stop_passive(struct db_pid_state_s *st)
@@ -100,6 +114,20 @@ void db_pid_update(struct db_pid_state_s *st,
 {
   const struct db_servo_gains_s        *g  = in->gains;
   const struct db_completion_settings_s *c  = in->completion;
+
+  /* Latched passive completion (Issue #132).  Once natural COAST/BRAKE
+   * completion has fired, stay off — return the latched actuation with
+   * zero duty regardless of pos_err/speed_err.  Cleared by
+   * db_pid_reset() or an explicit db_pid_pause(false).
+   */
+
+  if (st->latched_passive_done)
+    {
+      out->duty      = 0;
+      out->actuation = st->latched_actuation;
+      out->done      = true;
+      return;
+    }
 
   /* Compute errors.  Position error is clamped to int32 to keep the
    * P term well-behaved even after a long-running RESET (the daemon
@@ -197,12 +225,16 @@ void db_pid_update(struct db_pid_state_s *st,
             actuation = DRIVEBASE_ON_COMPLETION_COAST;
             db_pid_pause(st, true);
             duty      = 0;
+            st->latched_passive_done = true;
+            st->latched_actuation    = DRIVEBASE_ON_COMPLETION_COAST;
             break;
 
           case DRIVEBASE_ON_COMPLETION_BRAKE:
             actuation = DRIVEBASE_ON_COMPLETION_BRAKE;
             db_pid_pause(st, true);
             duty      = 0;
+            st->latched_passive_done = true;
+            st->latched_actuation    = DRIVEBASE_ON_COMPLETION_BRAKE;
             break;
 
           case DRIVEBASE_ON_COMPLETION_HOLD:
@@ -245,6 +277,8 @@ void db_pid_update(struct db_pid_state_s *st,
                             DRIVEBASE_ON_COMPLETION_COAST;
                 db_pid_pause(st, true);
                 duty = 0;
+                st->latched_passive_done = true;
+                st->latched_actuation    = actuation;
               }
             else
               {
