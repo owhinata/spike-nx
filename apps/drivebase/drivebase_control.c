@@ -35,6 +35,19 @@ static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
   return v;
 }
 
+/* Clamp an int64 to [lo, hi] (both int32) and return as int32.  Lets
+ * the caller avoid the implementation-defined narrowing conversion
+ * that would occur if a large out-of-range int64 were cast to int32
+ * before being clamped (Issue #134).
+ */
+
+static int32_t clamp_i64_to_i32(int64_t v, int32_t lo, int32_t hi)
+{
+  if (v < (int64_t)lo) return lo;
+  if (v > (int64_t)hi) return hi;
+  return (int32_t)v;
+}
+
 static int32_t abs32(int32_t v)
 {
   return v < 0 ? -v : v;
@@ -166,7 +179,14 @@ void db_pid_update(struct db_pid_state_s *st,
 
   int64_t out_unsat = p_term + d_term + kpv + (st->i_acc / DB_IACC_SCALE);
 
-  int32_t duty = clamp_i32((int32_t)out_unsat, g->out_min, g->out_max);
+  /* Clamp in int64 first then cast — casting out_unsat to int32 before
+   * clamping is implementation-defined when it overflows, and a large
+   * positive out_unsat could wrap into a negative int32 that then
+   * clamp_i32 would pin at g->out_min, producing reverse full-duty.
+   * Issue #134.
+   */
+
+  int32_t duty = clamp_i64_to_i32(out_unsat, g->out_min, g->out_max);
 
   bool sat_high = (out_unsat > g->out_max);
   bool sat_low  = (out_unsat < g->out_min);
