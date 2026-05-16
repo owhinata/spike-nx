@@ -348,8 +348,17 @@ def test_linetrace_max_turn_subcommand_retired(p):
         _ensure_stopped(p)
 
 
-def test_linetrace_run_max_turn_flag_retired(p):
-    """L-11: `linetrace run ... --max-turn N` is rejected (#126)."""
+def test_linetrace_run_max_turn_flag_retired(p, color_sensor_required):
+    """L-11: `linetrace run ... --max-turn N` is rejected (#126).
+
+    do_run() checks g_daemon_running before parsing the flag list, so
+    the "unknown option" message only fires when the daemon is alive
+    — which in turn requires color_open_select() to succeed (CLAIM
+    on /dev/uorb/sensor_color).  Without a real sensor the daemon
+    fails its CLAIM, sets g_daemon_running=false, and `linetrace run`
+    falls into the "not running" path instead of reaching the flag
+    parser.  Skip cleanly via color_sensor_required in that case.
+    """
 
     _ensure_stopped(p)
     p.sendCommand("linetrace start", timeout=8)

@@ -72,20 +72,23 @@ def _parse_state(text):
     return row
 
 
-def _ensure_stopped(p, timeout=3.0):
+def _ensure_stopped(p, timeout=7.0):
     """Make sure no daemon is alive entering a test.
 
     Issue #120 (9134953) added rcS auto-start of drivebase at boot, so
-    after reboot the daemon is already attached.  A single
-    `drivebase stop` is normally enough, but right after boot the
-    close-cleanup + sem_post chain can take longer than 0.3 s — poll
-    `daemon_attached` until it clears so subsequent assertions about
-    the pre-attach state are reliable.
+    after reboot the daemon is already attached.  `drivebase stop`
+    returns as soon as the daemon posts teardown_done, but the kernel
+    chardev's daemon_attached flag only clears when the daemon task
+    actually exits and its open fd is closed by db_chardev_close — a
+    short window that empirically stretches past several seconds
+    right after boot under early-session CPU pressure.  Poll until
+    daemon_attached clears (7 s default) so the first drivebase test
+    of the session does not race the detach.
     """
     p.sendCommand("drivebase stop", timeout=5)
     deadline = time.time() + timeout
     while time.time() < deadline:
-        time.sleep(0.2)
+        time.sleep(0.3)
         st = _parse_status(p.sendCommand("drivebase status", timeout=5))
         if st.get("daemon_attached") == 0:
             return
