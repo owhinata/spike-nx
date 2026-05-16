@@ -112,16 +112,19 @@ def test_bt_btsensor_hci_working(p):
     test session has run sometimes fails to reach HCI_STATE_WORKING
     (the action queue then returns ``timed out``).  A clean boot
     consistently brings HCI up within ~1 s.
+
+    rcS auto-launches btsensor at boot (Issue #111), so after the
+    reboot the daemon is usually already running and `btsensor start`
+    returns "already running".  Both outcomes are equivalent for the
+    HCI banner check; the banner is emitted once per daemon start
+    regardless of who called it.
     """
     p.reboot(timeout=15)
 
-    # Drain pre-existing RAMLOG content so the banner search is not
-    # confused by leftovers from earlier sessions.  RAMLOG_NONBLOCK is
-    # off so dmesg blocks-then-returns the buffered text.
-    p.sendCommand("dmesg", timeout=10)
-
     out = p.sendCommand("btsensor start", timeout=5)
-    assert "started (pid" in out, f"btsensor start failed: {out!r}"
+    assert ("started (pid" in out) or ("already running" in out), (
+        f"btsensor start neither started nor reported already running: {out!r}"
+    )
 
     # HCI bring-up over the CC2564C UART completes in ~1 s on a fresh
     # boot; allow up to 6 s to absorb jitter.
@@ -132,24 +135,19 @@ def test_bt_btsensor_hci_working(p):
     )
     bdaddr = None
     deadline = time.time() + 6.0
-    try:
-        while time.time() < deadline:
-            time.sleep(0.5)
-            log = p.sendCommand("dmesg", timeout=10)
-            m = pattern.search(log)
-            if m:
-                bdaddr = m.group(1)
-                break
+    while time.time() < deadline:
+        time.sleep(0.5)
+        log = p.sendCommand("dmesg", timeout=10)
+        m = pattern.search(log)
+        if m:
+            bdaddr = m.group(1)
+            break
 
-        assert bdaddr is not None, (
-            "btsensor: HCI working banner not seen within 6 s"
-        )
-        assert bdaddr != "00:00:00:00:00:00", f"BD address all zeros: {bdaddr}"
-        assert bdaddr != "ff:ff:ff:ff:ff:ff", f"BD address all ones: {bdaddr}"
-    finally:
-        # Always stop so subsequent tests start from a clean state.
-        p.sendCommand("btsensor stop", timeout=5)
-        time.sleep(1)
+    assert bdaddr is not None, (
+        "btsensor: HCI working banner not seen within 6 s"
+    )
+    assert bdaddr != "00:00:00:00:00:00", f"BD address all zeros: {bdaddr}"
+    assert bdaddr != "ff:ff:ff:ff:ff:ff", f"BD address all ones: {bdaddr}"
 
 
 @pytest.mark.interactive

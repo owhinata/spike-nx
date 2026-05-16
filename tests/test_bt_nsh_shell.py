@@ -143,22 +143,23 @@ def test_bt_nsh_shell_fifos_present(p):
     """H-9-aux (automatable): /dev/btnsh_in and /dev/btnsh_out exist
     after `btsensor start`.
 
-    Quick sanity check that the daemon's mkfifo() succeeded and that
-    the nodes survive a stop+start cycle.
+    rcS auto-launches btsensor at boot (Issue #111), so after the
+    reboot the daemon is already running and the FIFOs should already
+    be present — `btsensor start` then returns "already running",
+    which is the expected post-boot state.  We accept either outcome
+    and verify the post-condition that matters: the FIFO nodes exist.
     """
     p.reboot(timeout=15)
 
-    try:
-        out = p.sendCommand("btsensor start", timeout=5)
-        assert "started (pid" in out, f"btsensor start failed: {out!r}"
+    out = p.sendCommand("btsensor start", timeout=5)
+    assert ("started (pid" in out) or ("already running" in out), (
+        f"btsensor start neither started nor reported already running: {out!r}"
+    )
 
-        # Wait briefly for shell_init() to run (it happens early in the
-        # daemon entry, before HCI bring-up).
-        time.sleep(1.0)
+    # Wait briefly for shell_init() to run (it happens early in the
+    # daemon entry, before HCI bring-up).
+    time.sleep(1.0)
 
-        out = p.sendCommand("ls /dev", timeout=5)
-        assert "btnsh_in" in out, f"/dev/btnsh_in not present: {out!r}"
-        assert "btnsh_out" in out, f"/dev/btnsh_out not present: {out!r}"
-    finally:
-        p.sendCommand("btsensor stop", timeout=5)
-        time.sleep(1)
+    out = p.sendCommand("ls /dev", timeout=5)
+    assert "btnsh_in" in out, f"/dev/btnsh_in not present: {out!r}"
+    assert "btnsh_out" in out, f"/dev/btnsh_out not present: {out!r}"
