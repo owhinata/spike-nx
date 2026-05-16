@@ -12,6 +12,19 @@
 #include "drivebase_control.h"
 
 /****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+/* Integrator accumulator scale (Issue #133).  The I-term internally
+ * runs in (duty << 8) so very small ki * pos_err * dt steps don't lose
+ * resolution to integer truncation.  The contribution to the output
+ * divides by DB_IACC_SCALE, and the saturation clip multiplies by
+ * DB_IACC_SCALE — keep these in lockstep through this single define.
+ */
+
+#define DB_IACC_SCALE  256
+
+/****************************************************************************
  * Private Helpers
  ****************************************************************************/
 
@@ -151,15 +164,15 @@ void db_pid_update(struct db_pid_state_s *st,
     }
   int64_t kpv     = (int64_t)g->kp_speed * speed_err / 1000;
 
-  int64_t out_unsat = p_term + d_term + kpv + (st->i_acc / 256);
+  int64_t out_unsat = p_term + d_term + kpv + (st->i_acc / DB_IACC_SCALE);
 
   int32_t duty = clamp_i32((int32_t)out_unsat, g->out_min, g->out_max);
 
   bool sat_high = (out_unsat > g->out_max);
   bool sat_low  = (out_unsat < g->out_min);
 
-  /* Anti-windup gated I update.  Integrate against the position error
-   * (Q12 internal scale to avoid resolution loss with small errors).
+  /* Anti-windup gated I update.  i_acc carries DB_IACC_SCALE × duty
+   * so very small ki·err·dt steps survive integer truncation.
    */
 
   if (!should_freeze_integrator(st, g, pos_err, sat_high, sat_low))
@@ -175,11 +188,11 @@ void db_pid_update(struct db_pid_state_s *st,
              (int64_t)in->dt_ms / 1000;
       st->i_acc += step;
 
-      /* Cap accumulator at ±out_max scaled by the 4096 factor used at */
-      /* the contribution stage, so it can never single-handedly       */
-      /* saturate the output.                                          */
+      /* Cap accumulator at ±out_max × DB_IACC_SCALE so the post-divide
+       * contribution can never single-handedly saturate the output.
+       */
 
-      int64_t i_clip = (int64_t)g->out_max * 256;
+      int64_t i_clip = (int64_t)g->out_max * DB_IACC_SCALE;
       if (st->i_acc >  i_clip) st->i_acc =  i_clip;
       if (st->i_acc < -i_clip) st->i_acc = -i_clip;
     }

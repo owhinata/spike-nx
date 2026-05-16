@@ -40,8 +40,10 @@ extern "C"
 
 struct db_pid_state_s
 {
-  int64_t  i_acc;             /* integrator accumulator (units: q12 *    */
-                              /* duty)                                   */
+  int64_t  i_acc;             /* integrator accumulator, scaled by      */
+                              /* DB_IACC_SCALE (=256, i.e. Q8 of duty)   */
+                              /* — divide by DB_IACC_SCALE before adding */
+                              /* to the duty output (Issue #133).        */
   int32_t  prev_pos_err_mdeg; /* for D term                              */
   bool     paused;
   bool     output_saturated_high;
