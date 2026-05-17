@@ -379,12 +379,16 @@ Trapezoidal profile (accel / cruise / decel).  Short moves degenerate to a trian
 
 ### 8.3 PID + completion (`drivebase_control.c`)
 
-Cascade PID (position P+I+D feeding velocity P+I).  Anti-windup:
-- Position error inside the deadband (±3000 mdeg = ±3°) → freeze the integrator
-- Output saturated → clamp the integrator's accumulation direction
+Cascade PID (position P+I+D feeding velocity P+I).  Anti-windup is two-tiered:
+
+1. **I-term freeze** (`should_freeze_integrator`) — stops accumulation when error is inside the deadband (±3000 mdeg = ±3°), when output is saturated in the windup direction, or when the controller is paused.
+2. **Reference-time pause** (Issue [#142](https://github.com/owhinata/spike-nx/issues/142) Phase 5, `drivebase_aggregate.c`) — freezes trajectory time itself when the P term is rail-clamped in its own direction AND the reference is not decelerating away.  The reference cannot run ahead of the state during prolonged saturation, structurally cutting the path where `pos_err` grows during the accel phase and inflates `i_acc`.
+
+Both tiers fire per-axis (distance / heading) independently.  Ported from pybricks `pbio_position_integrator` (lib/pbio/src/integrator.c L142-218).
 
 Completion gate:
-- `|position_error| < pos_tolerance (3000 mdeg)` && `|speed_error| < speed_tolerance (30 dps)` held for `done_window_ms (50 ms)` consecutively → `is_done = true`
+- `|position_error| < pos_tolerance` && `|speed_error| < speed_tolerance (30 dps)` held for `done_window_ms (50 ms)` consecutively → `is_done = true`
+- `pos_tolerance` is derived from kp_pos (Issue [#140](https://github.com/owhinata/spike-nx/issues/140) Phase 1 F): `max(1000, 400 × 1000 / kp_pos)` mdeg = 8000 mdeg (≈ 4 mm wheel) at kp=50
 
 Per `on_completion` final action:
 
@@ -410,7 +414,16 @@ Two PIDs (distance and heading) produce mm/s and deg/s outputs, then the inverse
 
 ### 8.5 Settings (`drivebase_settings.c`)
 
-Defaults targeted at SPIKE Medium Motor (position P=50 / I=20 / D=0, velocity P=5 / I=0).  drive_speed defaults are derived from `wheel_diameter` (`v_max_mdegps`, `accel = v_max × 4 / 1` = reach max speed in 1/4 s).  `drivebase _alg settings` dumps the live values.
+Defaults targeted at SPIKE Medium Motor (per-axis, aggregated since Issue #141 Phase 2):
+
+| Axis | kp_pos | ki_pos | kd_pos | kp_speed | out_max |
+|---|---|---|---|---|---|
+| distance | 50 | 15 | 0 | 5 | ±10000 (±100% duty) |
+| heading | 50 | 15 | 0 | 5 | ±8000 (±80% duty — leaves L/R compose headroom) |
+
+`ki_pos = 15` is what overcomes the SPIKE Medium Motor's static-friction floor (~12-18% breakaway) under direct duty drive without feed-forward.  The pybricks rule "drivebase aggregate PID uses ki=0" assumes torque output and cannot be adopted here.  Issue #142 Phase 5 Step B confirmed empirically: `ki=10` short-undershoots by ~5 mm on `straight 50` and prevents `turn 180 coast` from ever asserting `done`, so `ki=15` stays optimal until feed-forward arrives in Phase 6.
+
+drive_speed defaults are derived from `wheel_diameter` (`v_max_mdegps`, `accel = v_max × 4 / 1` = reach max speed in 1/4 s).  `drivebase _alg settings` dumps the live values.
 
 ## 9. Linux portability (FUSE)
 

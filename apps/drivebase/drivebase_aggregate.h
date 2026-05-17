@@ -90,6 +90,23 @@ struct db_aggregate_control_s
 
   const struct db_servo_gains_s        *gains;
   const struct db_completion_settings_s *completion;
+
+  /* Reference-time pause for trajectory anti-windup (Issue #142, Phase 5
+   * D).  Mirrors pybricks `pbio_position_integrator` (lib/pbio/src/
+   * integrator.c L142-218): when the proportional output is pinned at
+   * its rail in the direction of the position error and ref is not
+   * decelerating, freeze trajectory time so the reference does not run
+   * away from the state.  Each axis owns its own pause clock; resume
+   * adds (now - pause_begin) to total_us so phase is continuous.
+   *
+   * Invariant: trajectory_active == false ⇒ traj_paused == false.
+   * Enforced by aggregate_reset_pause() on every command/reset/stop and
+   * by a safety-net check at the top of db_aggregate_control_update().
+   */
+
+  bool                      traj_paused;
+  uint64_t                  traj_pause_begin_us;
+  uint64_t                  traj_pause_total_us;
 };
 
 struct db_aggregate_output_s

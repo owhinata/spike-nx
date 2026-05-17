@@ -379,12 +379,16 @@ sliding-window slope estimator (per-sample IIR LP より高 SNR):
 
 ### 8.3 PID + 完了判定 (`drivebase_control.c`)
 
-cascade PID (位置 P+I+D + 速度 P+I)。anti-windup は:
-- error が deadband 内 (±3000 mdeg = ±3°) → I 項の積算停止
-- output が saturate → I 項の積算方向を制限
+cascade PID (位置 P+I+D + 速度 P+I)。anti-windup は二段構え:
+
+1. **I 項凍結** (`should_freeze_integrator`) — error が deadband 内 (±3000 mdeg = ±3°) / output が windup 方向に saturate / controller paused のとき積算停止
+2. **Reference-time pause** (Issue [#142](https://github.com/owhinata/spike-nx/issues/142) Phase 5、`drivebase_aggregate.c`) — P 項と同方向に出力が rail clamp され、かつ ref が逆方向に減速していないとき trajectory 時刻自体を凍結。state が catch-up するまで ref を進めず、加速 phase で pos_err が育って i_acc が暴走する経路を構造的に断つ
+
+両者は per-axis (distance / heading) で独立して発火。pybricks `pbio_position_integrator` (lib/pbio/src/integrator.c L142-218) の移植。
 
 完了判定:
-- `|position_error| < pos_tolerance (3000 mdeg)` && `|speed_error| < speed_tolerance (30 dps)` を `done_window_ms (50 ms)` 連続維持 → `is_done = true`
+- `|position_error| < pos_tolerance` && `|speed_error| < speed_tolerance (30 dps)` を `done_window_ms (50 ms)` 連続維持 → `is_done = true`
+- `pos_tolerance` は kp_pos から物理導出 (Issue [#140](https://github.com/owhinata/spike-nx/issues/140) Phase 1 F): `max(1000, 400 × 1000 / kp_pos)` mdeg = kp=50 で 8000 mdeg (≈ 4 mm wheel)
 
 `on_completion` 種別ごとの終端動作:
 
@@ -409,7 +413,16 @@ distance + heading の 2 系 PID 出力 (mm/s, deg/s) を逆変換して L/R 各
 
 ### 8.5 設定 (`drivebase_settings.c`)
 
-SPIKE Medium Motor 用 default gain (位置 P=50 / I=20 / D=0、速度 P=5 / I=0)。drive_speed default は wheel_diameter から算出 (`v_max_mdegps`、`accel = v_max × 4 / 1` = 1/4 sec で max speed)。`drivebase _alg settings` でダンプ可能。
+SPIKE Medium Motor 用 default gain (per-axis、Issue #141 Phase 2 で集約 PID 化):
+
+| 軸 | kp_pos | ki_pos | kd_pos | kp_speed | out_max |
+|---|---|---|---|---|---|
+| distance | 50 | 15 | 0 | 5 | ±10000 (±100% duty) |
+| heading | 50 | 15 | 0 | 5 | ±8000 (±80% duty、L/R compose 余裕) |
+
+ki_pos=15 は SPIKE duty 直駆動 + feed-forward なし環境で静摩擦 (~12-18% breakaway) を超えるための値。pybricks の "drivebase 集約 PID は ki=0" は torque-output 前提なので採用不可。Issue #142 Phase 5 Step B で ki=10 を試したが短距離で 5 mm undershoot、長距離で done 立たずの regression が出たため ki=15 に確定 (Phase 6 で feed-forward 導入後に再評価)。
+
+drive_speed default は wheel_diameter から算出 (`v_max_mdegps`、`accel = v_max × 4 / 1` = 1/4 sec で max speed)。`drivebase _alg settings` でダンプ可能。
 
 ## 9. Linux への移植性 (FUSE)
 

@@ -152,7 +152,14 @@ static const struct db_servo_gains_s g_pid_gains_distance =
   .ki_pos        = 15,          /* ki for static-friction break (#141  */
                                 /* bench: ki=5 left ~8 mm undershoot,  */
                                 /* ki=15 mirrors pre-#140 effective    */
-                                /* duty rate within ~1 s)              */
+                                /* duty rate within ~1 s.              */
+                                /* #142 Step B confirmed ki=10 also    */
+                                /* undershoots short straight 50 by    */
+                                /* ~5 mm and prevents long turn 180    */
+                                /* from completing due to slow i_acc   */
+                                /* decay — ki=15 stays optimal until   */
+                                /* a feed-forward path (Phase 6)       */
+                                /* compensates static friction.)       */
   .kd_pos        = 0,
   .kp_speed      = 5,
   .ki_speed      = 0,
@@ -164,7 +171,10 @@ static const struct db_servo_gains_s g_pid_gains_distance =
 static const struct db_servo_gains_s g_pid_gains_heading =
 {
   .kp_pos        = DB_KP_POS_DEFAULT,
-  .ki_pos        = 15,          /* same breakaway rationale as dist    */
+  .ki_pos        = 15,          /* same breakaway rationale as dist;    */
+                                /* #142 Step B: ki=10 leaves turn 90    */
+                                /* hold at -2.52° (within tolerance     */
+                                /* but quality regression).             */
   .kd_pos        = 0,
   .kp_speed      = 5,
   .ki_speed      = 0,
