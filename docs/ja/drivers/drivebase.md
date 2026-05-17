@@ -202,8 +202,10 @@ PROGNAME = `drivebase` (NSH builtin)。stack size は 4096 (§7 参照)。
 | `drivebase stop` | daemon 停止 (グレースフル teardown、~2 秒以内) |
 | `drivebase config <wheel_mm> <axle_mm>` | DRIVEBASE_CONFIG。小数 OK (内部 ABI が μm 単位なので sub-mm 精度を保持)。現状は daemon の起動時 default を使うので通常不要 |
 | `drivebase reset [distance_mm] [angle_deg]` | DRIVEBASE_RESET — daemon の publish する distance/heading を指定値 (default 0/0) に再 anchor。`drivebase start` 時にも自動的に 0/0 に reset されるので、本 verb は主にセッション途中で再ゼロ化したいとき用 |
-| `drivebase straight <mm> [coast\|brake\|hold]` | DRIVE_STRAIGHT |
-| `drivebase turn <deg>` | TURN (CCW positive) |
+| `drivebase straight <mm> [<mmps>] [coast\|brake\|hold]` | DRIVE_STRAIGHT。`mmps` 省略 (or `0`) で `db_settings` の default |
+| `drivebase turn <deg> [<dps>] [coast\|brake\|hold]` | TURN (CCW positive)。`dps` 省略で default |
+| `drivebase curve <radius_mm> <angle_deg> [coast\|brake\|hold]` | DRIVE_CURVE (Issue [#138](https://github.com/owhinata/spike-nx/issues/138)、半径 `R` の円弧を `angle_deg` 描く)。`R == 0` は `turn` にフォールバック。Phase 4 (C) trajectory_stretch (§8.2.1) で distance と heading が同時完了 |
+| `drivebase arc <radius_mm> <distance_mm> [coast\|brake\|hold]` | DRIVE_ARC_DISTANCE (Issue [#138](https://github.com/owhinata/spike-nx/issues/138)、半径 `R` の円弧を距離 `distance_mm` 進む)。`R == 0` は `straight` にフォールバック |
 | `drivebase forever <mmps> <dps>` | DRIVE_FOREVER (停止しない、distance + heading 同時) |
 | `drivebase stop-motion <coast\|brake\|hold>` | DRIVEBASE_STOP (緊急停止 fast path) |
 | `drivebase get-state [duration_ms [interval_ms]]` | DRIVEBASE_GET_STATE。引数なしは 1 行のみ。`duration_ms` 指定時は `interval_ms` 毎 (default 100ms) にサンプリングして 1 行ずつ表形式で出力 |

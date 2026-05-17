@@ -202,8 +202,10 @@ PROGNAME = `drivebase` (NSH builtin).  STACKSIZE = 4096 (see §7).
 | `drivebase stop` | graceful daemon teardown (returns within ~2 s) |
 | `drivebase config <wheel_mm> <axle_mm>` | DRIVEBASE_CONFIG.  Decimals OK; the wire ABI carries micrometers so sub-mm precision survives (currently optional — daemon already takes wheel/axle from `start`) |
 | `drivebase reset [distance_mm] [angle_deg]` | DRIVEBASE_RESET — re-anchors the published distance/heading at the requested baseline (default 0/0).  Daemon also auto-resets on `drivebase start`, so this verb is mainly for re-zeroing mid-session |
-| `drivebase straight <mm> [coast\|brake\|hold]` | DRIVE_STRAIGHT |
-| `drivebase turn <deg>` | TURN (CCW positive) |
+| `drivebase straight <mm> [<mmps>] [coast\|brake\|hold]` | DRIVE_STRAIGHT.  Omit `mmps` (or pass `0`) to use the `db_settings` default |
+| `drivebase turn <deg> [<dps>] [coast\|brake\|hold]` | TURN (CCW positive).  Omit `dps` for the default |
+| `drivebase curve <radius_mm> <angle_deg> [coast\|brake\|hold]` | DRIVE_CURVE (Issue [#138](https://github.com/owhinata/spike-nx/issues/138)) — sweep an arc of radius `R` over `angle_deg`.  `R == 0` falls back to `turn`.  Phase 4 (C) `trajectory_stretch` (§8.2.1) keeps distance and heading completing simultaneously |
+| `drivebase arc <radius_mm> <distance_mm> [coast\|brake\|hold]` | DRIVE_ARC_DISTANCE (Issue [#138](https://github.com/owhinata/spike-nx/issues/138)) — travel `distance_mm` along an arc of radius `R`.  `R == 0` falls back to `straight` |
 | `drivebase forever <mmps> <dps>` | DRIVE_FOREVER (no completion, distance + heading concurrently) |
 | `drivebase stop-motion <coast\|brake\|hold>` | DRIVEBASE_STOP (emergency fast path) |
 | `drivebase get-state [duration_ms [interval_ms]]` | DRIVEBASE_GET_STATE.  Default = single-row table; with `duration_ms` polls every `interval_ms` (default 100 ms) and prints one row per sample |

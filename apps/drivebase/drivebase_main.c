@@ -1470,8 +1470,14 @@ static void usage(void)
           "  drivebase stop                              teardown daemon\n"
           "  drivebase config <wheel_mm> <axle_mm>       DRIVEBASE_CONFIG (decimals OK)\n"
           "  drivebase reset [distance_mm] [angle_deg]   DRIVEBASE_RESET (default 0 0)\n"
-          "  drivebase straight <mm> [coast|brake|hold]  DRIVE_STRAIGHT\n"
-          "  drivebase turn <deg>                        TURN\n"
+          "  drivebase straight <mm> [<mmps>] [coast|brake|hold]\n"
+          "                                              DRIVE_STRAIGHT\n"
+          "  drivebase turn <deg> [<dps>] [coast|brake|hold]\n"
+          "                                              TURN\n"
+          "  drivebase curve <radius_mm> <angle_deg> [coast|brake|hold]\n"
+          "                                              DRIVE_CURVE\n"
+          "  drivebase arc <radius_mm> <distance_mm> [coast|brake|hold]\n"
+          "                                              DRIVE_ARC_DISTANCE\n"
           "  drivebase forever <speed_mmps> <turn_dps>   DRIVE_FOREVER\n"
           "  drivebase stop-motion <coast|brake|hold>    STOP\n"
           "  drivebase get-state [duration_ms [interval_ms]]\n"
@@ -1685,6 +1691,7 @@ int main(int argc, FAR char *argv[])
   int dev = -1;
   if (strcmp(verb, "config")     == 0 || strcmp(verb, "reset")     == 0 ||
       strcmp(verb, "straight")   == 0 || strcmp(verb, "turn")      == 0 ||
+      strcmp(verb, "curve")      == 0 || strcmp(verb, "arc")       == 0 ||
       strcmp(verb, "forever")    == 0 || strcmp(verb, "stop-motion")== 0 ||
       strcmp(verb, "get-state")  == 0 || strcmp(verb, "set-gyro")  == 0 ||
       strcmp(verb, "jitter")     == 0)
@@ -1833,6 +1840,65 @@ int main(int argc, FAR char *argv[])
       int rc = ioctl(dev, DRIVEBASE_TURN, (unsigned long)&a);
       close(dev);
       if (rc < 0) { fprintf(stderr, "TURN: %s\n", strerror(errno)); return 1; }
+      return 0;
+    }
+
+  /* Issue #138: public CLI for curve / arc.  Both target ioctls
+   * (DRIVEBASE_DRIVE_CURVE / DRIVEBASE_DRIVE_ARC_DISTANCE) and the
+   * underlying db_drivebase_drive_{curve,arc_distance} were already
+   * wired internally; only the user-facing verbs were missing.  Per
+   * Issue #138 we expose distance-mode arc (radius + distance_mm);
+   * angle-mode arc remains internal — equivalent input is achievable
+   * through `curve <r> <angle>`.
+   */
+
+  if (strcmp(verb, "curve") == 0)
+    {
+      if (argc < 4)
+        {
+          fprintf(stderr, "usage: drivebase curve <radius_mm> "
+                          "<angle_deg> [coast|brake|hold]\n");
+          close(dev); return 1;
+        }
+      struct drivebase_drive_curve_s a;
+      memset(&a, 0, sizeof(a));
+      a.radius_mm     = (int32_t)atoi(argv[2]);
+      a.angle_deg     = (int32_t)atoi(argv[3]);
+      a.on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+      if (argc >= 5)
+        {
+          if      (strcmp(argv[4], "coast") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_COAST;
+          else if (strcmp(argv[4], "brake") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+          else if (strcmp(argv[4], "hold")  == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_HOLD;
+        }
+      int rc = ioctl(dev, DRIVEBASE_DRIVE_CURVE, (unsigned long)&a);
+      close(dev);
+      if (rc < 0) { fprintf(stderr, "DRIVE_CURVE: %s\n", strerror(errno)); return 1; }
+      return 0;
+    }
+
+  if (strcmp(verb, "arc") == 0)
+    {
+      if (argc < 4)
+        {
+          fprintf(stderr, "usage: drivebase arc <radius_mm> "
+                          "<distance_mm> [coast|brake|hold]\n");
+          close(dev); return 1;
+        }
+      struct drivebase_drive_arc_s a;
+      memset(&a, 0, sizeof(a));
+      a.radius_mm     = (int32_t)atoi(argv[2]);
+      a.arg           = (int32_t)atoi(argv[3]);  /* distance_mm */
+      a.on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+      if (argc >= 5)
+        {
+          if      (strcmp(argv[4], "coast") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_COAST;
+          else if (strcmp(argv[4], "brake") == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_BRAKE;
+          else if (strcmp(argv[4], "hold")  == 0) a.on_completion = DRIVEBASE_ON_COMPLETION_HOLD;
+        }
+      int rc = ioctl(dev, DRIVEBASE_DRIVE_ARC_DISTANCE, (unsigned long)&a);
+      close(dev);
+      if (rc < 0) { fprintf(stderr, "DRIVE_ARC_DISTANCE: %s\n", strerror(errno)); return 1; }
       return 0;
     }
 
