@@ -20,6 +20,7 @@
 
 #include <nuttx/config.h>
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -419,4 +420,203 @@ bool db_trajectory_is_done(const struct db_trajectory_s *tr,
       return false;
     }
   return (t_us >= tr->t0_us + tr->total_dt_us);
+}
+
+/****************************************************************************
+ * Trajectory stretch (Issue #144 Phase 4 C)
+ *
+ * Slow a trapezoidal trajectory down to a target total duration while
+ * preserving the displacement |x1 - x0| and the accel/decel ratio.
+ * Used by db_drivebase_drive_curve so distance and heading trajectories
+ * finish at the same wall-clock time, eliminating the post-heading
+ * tangent that current curves produce at large radii.
+ *
+ * pybricks reference: lib/pbio/src/trajectory.c:pbio_trajectory_stretch.
+ * That version is parameterised by absolute time stamps (t1/t2/t3) and
+ * solves the trapezoid analytically.  Our parameterisation uses dt
+ * segments and explicit boundary positions, so we solve numerically:
+ * binary search v_peak for compute_total_dt(v) ≈ T_target, then force
+ * total_dt exact by setting cruise_dt = T_target - accel_dt - decel_dt.
+ * The displacement residual lands in the cruise segment and is absorbed
+ * by the existing end-time clamp in db_trajectory_get_reference.
+ ****************************************************************************/
+
+/* Total trajectory duration as a function of v_peak, with fixed a, d
+ * and target displacement D_abs.  Used as the search target by
+ * db_trajectory_stretch_to_total.  Monotonically non-increasing in v.
+ */
+
+static uint64_t stretch_total_dt(int32_t v, int32_t a, int32_t d,
+                                 uint64_t D_abs)
+{
+  if (v <= 0)
+    {
+      return UINT64_MAX;
+    }
+  uint64_t t_a = dt_to_reach_v(v, a);
+  uint64_t t_d = dt_to_reach_v(v, d);
+  uint64_t d_a = dx_from_a(a, t_a);
+  uint64_t d_d = dx_from_a(d, t_d);
+  if (d_a + d_d >= D_abs)
+    {
+      /* Triangle branch: v cannot actually be reached given D_abs.
+       * Total degenerates to the ramp duration alone.
+       */
+
+      return t_a + t_d;
+    }
+  uint64_t d_cruise = D_abs - d_a - d_d;
+  uint64_t t_c      = (d_cruise * US_PER_S) / (uint32_t)v;
+  return t_a + t_c + t_d;
+}
+
+int db_trajectory_stretch_to_total(struct db_trajectory_s *tr,
+                                   uint64_t T_target_us)
+{
+  if (tr == NULL)                         return -EINVAL;
+  if (tr->infinite)                       return -EINVAL;
+  if (tr->direction == 0)                 return -EINVAL;
+  if (tr->total_dt_us == 0)               return -EINVAL;
+  if (T_target_us <= tr->total_dt_us)     return -EINVAL;
+
+  int64_t D_abs64 = (int64_t)tr->direction *
+                    (tr->x1_mdeg - tr->x0_mdeg);
+  if (D_abs64 <= 0)                       return -EINVAL;
+  uint64_t D_abs  = (uint64_t)D_abs64;
+
+  int32_t a = tr->accel_mdegps2;
+  int32_t d = tr->decel_mdegps2;
+  if (a <= 0 || d <= 0)                   return -EINVAL;
+
+  /* Binary search for v_peak ∈ [1, current_v_peak].  total(v) is
+   * monotonically non-increasing in v: higher v -> shorter cruise ->
+   * shorter total.  Floor-based integer arithmetic in stretch_total_dt
+   * can introduce 1-µs plateaus, so we keep the best candidate seen
+   * during the search and probe a neighbourhood at the end.
+   */
+
+  int32_t lo = 1;
+  int32_t hi = tr->v_peak_mdegps;
+  if (hi < 1)                             return -ERANGE;
+
+  int32_t  best     = lo;
+  uint64_t best_err = UINT64_MAX;
+
+  while (lo + 1 < hi)
+    {
+      int32_t mid = (int32_t)(((int64_t)lo + hi) / 2);
+      uint64_t total = stretch_total_dt(mid, a, d, D_abs);
+
+      uint64_t err = (total >= T_target_us)
+                   ? (total - T_target_us)
+                   : (T_target_us - total);
+      if (err < best_err) { best_err = err; best = mid; }
+
+      if (total > T_target_us)
+        {
+          lo = mid;       /* still too slow, raise v */
+        }
+      else
+        {
+          hi = mid;       /* fast enough, lower v   */
+        }
+    }
+
+  /* Wider neighbourhood probe to handle integer plateaus.  ±32 covers
+   * the typical floor-rounding plateau width; if the trajectory limits
+   * are pathological the helper still returns the best found, with the
+   * residual reflected in cruise_dt below.
+   */
+
+  int32_t pmin = (best > 32) ? (best - 32) : 1;
+  int32_t pmax = (best < tr->v_peak_mdegps - 32)
+               ? (best + 32) : tr->v_peak_mdegps;
+
+  /* Loop counter is int64 so the trailing probe++ at pmax==INT32_MAX
+   * cannot signed-overflow even on pathological limit inputs.
+   */
+
+  for (int64_t probe = pmin; probe <= pmax; probe++)
+    {
+      uint64_t total = stretch_total_dt((int32_t)probe, a, d, D_abs);
+      uint64_t err = (total >= T_target_us)
+                   ? (total - T_target_us)
+                   : (T_target_us - total);
+      if (err < best_err) { best_err = err; best = (int32_t)probe; }
+    }
+
+  int32_t v_new = best;
+  if (v_new <= 0)                         return -ERANGE;
+
+  uint64_t t_a = dt_to_reach_v(v_new, a);
+  uint64_t t_d = dt_to_reach_v(v_new, d);
+
+  /* Sanity: t_a + t_d must fit within T_target_us.  Only reachable if
+   * the caller fed a pathological limit pair the search couldn't solve.
+   * Leave tr untouched and report -ERANGE; caller decides whether to
+   * fall back gracefully.
+   */
+
+  if (t_a + t_d >= T_target_us)           return -ERANGE;
+
+  uint64_t t_c = T_target_us - t_a - t_d;
+
+  /* Snapshot original fields so we can roll back if the post-mutation
+   * residual gate trips below.  Only the fields we're about to write
+   * need preserving — x0/x1/t0/direction/infinite/accel/decel are
+   * untouched per the precondition contract.
+   */
+
+  int32_t  orig_v_peak       = tr->v_peak_mdegps;
+  uint64_t orig_accel_dt     = tr->accel_dt_us;
+  uint64_t orig_cruise_dt    = tr->cruise_dt_us;
+  uint64_t orig_decel_dt     = tr->decel_dt_us;
+  uint64_t orig_total_dt     = tr->total_dt_us;
+  int64_t  orig_x_accel_end  = tr->x_accel_end_mdeg;
+  int64_t  orig_x_cruise_end = tr->x_cruise_end_mdeg;
+
+  /* Commit candidate state. */
+
+  tr->v_peak_mdegps     = v_new;
+  tr->accel_dt_us       = t_a;
+  tr->cruise_dt_us      = t_c;
+  tr->decel_dt_us       = t_d;
+  tr->total_dt_us       = T_target_us;
+
+  int64_t x_off_accel  = (int64_t)dx_from_a(a, t_a);
+  int64_t x_off_cruise = x_off_accel + dx_from_v(v_new, t_c);
+  tr->x_accel_end_mdeg  = tr->x0_mdeg +
+                          (int64_t)tr->direction * x_off_accel;
+  tr->x_cruise_end_mdeg = tr->x0_mdeg +
+                          (int64_t)tr->direction * x_off_cruise;
+
+  /* Residual displacement gate (Issue #144 C2): sample the trajectory
+   * one µs before the terminal clamp.  Floor rounding in cruise_dt_us
+   * leaves a small displacement gap; v3 plan sets the bound at
+   * 100 mdeg (= 0.1° of motor angle), well below the kp-derived
+   * pos_tolerance (8000 mdeg @ kp_pos=50, Issue #140).  If the gap
+   * exceeds the bound we roll back so callers see a clean -ERANGE
+   * and can fall back to the unstretched trajectory.
+   */
+
+  struct db_trajectory_ref_s ref_end;
+  db_trajectory_get_reference(tr, T_target_us - 1, &ref_end);
+  int64_t residual = ref_end.x_mdeg - tr->x1_mdeg;
+  if (residual < 0)
+    {
+      residual = -residual;
+    }
+  if (residual > 100)
+    {
+      tr->v_peak_mdegps     = orig_v_peak;
+      tr->accel_dt_us       = orig_accel_dt;
+      tr->cruise_dt_us      = orig_cruise_dt;
+      tr->decel_dt_us       = orig_decel_dt;
+      tr->total_dt_us       = orig_total_dt;
+      tr->x_accel_end_mdeg  = orig_x_accel_end;
+      tr->x_cruise_end_mdeg = orig_x_cruise_end;
+      return -ERANGE;
+    }
+
+  return 0;
 }

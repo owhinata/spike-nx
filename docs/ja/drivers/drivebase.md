@@ -377,6 +377,35 @@ sliding-window slope estimator (per-sample IIR LP より高 SNR):
 
 `db_trajectory_init_position(t0, x0, x1, v_peak, accel, decel)` で plan、`db_trajectory_get_reference(tr, t)` で `(x_mdeg, v_mdegps, a_mdegps2, done)` を引く。
 
+#### 8.2.1 trajectory_stretch (Phase 4 C、Issue [#144](https://github.com/owhinata/spike-nx/issues/144))
+
+`db_drivebase_drive_curve` は distance と heading の trajectory を独立に planning するため、半径と角度の組み合わせによっては `total_dt_us` が大きくずれる。短い軸 (通常 heading) が先に完了すると、残った軸 (distance) が arc から外れた直線 tangent を走り続けて幾何が崩れる (post-#142 bench: R=300×90 で ~1.5 秒の tangent)。
+
+`db_trajectory_stretch_to_total(tr, T_target_us)` は finite trajectory を slower trapezoid に再 plan して `total_dt_us` を厳密に `T_target_us` へ合わせる:
+
+- `|x1 - x0|` (displacement) は保持
+- accel/decel 比は維持 (`accel_mdegps2` / `decel_mdegps2` 不変)
+- 二分探索で v_peak ∈ [1, current_v_peak] を求める。各 candidate で `compute_total_dt(v)` を計算、best candidate を保持しながら closest を選ぶ。最後に ±32 の近傍 probe で整数 floor 由来の plateau を吸収
+- `cruise_dt = T_target - accel_dt - decel_dt` で時間を厳密一致させ、displacement の微小残差 (≤ 100 mdeg = 0.1°) は `db_trajectory_get_reference()` の最終時刻 clamp (`x = x1` at `t >= total_dt`) で吸収
+
+エラー時は `tr` を mutate しない設計 (`-EINVAL` precondition violation, `-ERANGE` 数値解 fail or residual 100 mdeg 超過)。`db_drivebase_drive_curve` 側は **tmp copy で stretch → 成功時のみ commit** pattern で呼び、失敗時は `syslog(LOG_WARNING)` を出して unstretched fallback (curve 自体は実行され、tangent が出るが user command を abort しない)。
+
+stretch 適用には duration 比のゲート (`DB_TRAJECTORY_STRETCH_RATIO_THRESHOLD_MIL = 1500` = 1.5×) を設けている。2 軸の総 dt 比がこれ未満なら stretch をスキップし、Phase 2 までと同じ独立完了挙動に戻す。理由: 比が小さい (近似的に同期している) curve で stretch を掛けると、heading 軸が slower trajectory を追従する間に `ki_pos=15` の i_acc が積算され、ramp 終端で overshoot が増える regression を実機で確認。実機 bench (post-#142):
+
+| Curve | Duration ratio | Stretch | 結果 |
+|---|---|---|---|
+| `curve 150 90` | 1.25× | スキップ | baseline 通り (~0.3 秒の軽微な desync のみ) |
+| `curve 200 360` | 1.73× | 適用 | tangent 消失 |
+| `curve 300 90` | 2.26× | 適用 | tangent 消失 |
+
+閾値は将来 Phase 6 (feed-forward) で再評価。
+
+pybricks reference: `lib/pbio/src/trajectory.c:pbio_trajectory_stretch`。pybricks は時刻ベース parameterization (t1/t2/t3) で連立方程式を解析的に解くが、spike-nx は dt セグメント + 距離ベース parameterization なので数値解 (二分探索) を採用している。
+
+dev verb: `drivebase _alg stretch <f_x1> <f_v> <f_a> <f_d> <l_x1> <l_v> <l_a> <l_d>` で BEFORE/AFTER + 0/25/50/75/100% timeline サンプル + residual bound check (≤100 mdeg threshold) をハードウェア無しで実行可能。
+
+注意: Phase 5 (#142) の reference-time pause は per-axis 実装。片軸だけ pause すると stretch で同期させた pair が崩れる可能性があるが、これは #142 既存仕様として許容 (drivebase-level shared pause は別 Issue 候補)。
+
 ### 8.3 PID + 完了判定 (`drivebase_control.c`)
 
 cascade PID (位置 P+I+D + 速度 P+I)。anti-windup は二段構え:

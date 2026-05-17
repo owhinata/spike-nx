@@ -31,6 +31,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <syslog.h>
 
 #include "drivebase_drivebase.h"
 #include "drivebase_motor.h"
@@ -44,6 +45,22 @@
 
 #define DB_PI_NUM   355
 #define DB_PI_DEN   113
+
+/* Phase 4 C stretch ratio threshold (Issue #144).  Stretch only kicks
+ * in when the duration ratio between the longer and shorter axes
+ * exceeds this threshold (expressed as a fraction × 1000).  Stretching
+ * a near-symmetric pair slows the follower trajectory enough to let the
+ * heading PID accumulate i_acc and overshoot — the regression observed
+ * on `curve 150 90` (ratio ~1.25×).  At ratio >= 1.5× the tangent
+ * regression dominates and stretching wins.  1500 = 1.5 split the two
+ * regimes cleanly on bench (post-#142):
+ *   - ratio 1.25× (curve 150 90): skip stretch, keep baseline behaviour
+ *   - ratio 1.73× (curve 200 360): stretch, eliminate tangent
+ *   - ratio 2.26× (curve 300 90):  stretch, eliminate tangent
+ * Tuning this knob downwards is a Phase 6 (feed-forward) follow-up.
+ */
+
+#define DB_TRAJECTORY_STRETCH_RATIO_THRESHOLD_MIL  1500
 
 /****************************************************************************
  * Private Helpers — geometry conversions
@@ -357,7 +374,23 @@ int db_drivebase_drive_curve(struct db_drivebase_s *db,
   /* Curve: travel arc of `angle_deg` along a circle of `radius_mm`.
    *   centre travel  (mm)         = R · |angle_rad|   sign = sgn(angle)
    *   heading change (deg)        = angle_deg
+   *
+   * Stationary-axis fallbacks (Issue #144 B2): degenerate inputs route
+   * through the dedicated turn/straight paths.  This avoids planning a
+   * direction=0 trajectory on one axis (which db_trajectory_stretch_to
+   * _total cannot stretch) and the matching COAST/BRAKE early-done
+   * propagation that would otherwise stop the active axis prematurely.
    */
+
+  if (radius_mm == 0)
+    {
+      return db_drivebase_turn(db, now_us, angle_deg, 0, on_completion);
+    }
+  if (angle_deg == 0)
+    {
+      db->active_command = DRIVEBASE_ACTIVE_NONE;
+      return 0;
+    }
 
   int32_t dl_avg_mm = (int32_t)((int64_t)radius_mm * angle_deg *
                                  DB_PI_NUM / DB_PI_DEN / 180);
@@ -366,6 +399,26 @@ int db_drivebase_drive_curve(struct db_drivebase_s *db,
   int64_t heading_delta_mdeg =
       heading_mdeg_to_state_mdeg(angle_deg * 1000,
                                  db->wheel_d_um, db->axle_t_um);
+
+  /* Rounding can collapse one delta to zero even though the original
+   * (radius, angle) pair is non-degenerate.  Route to the single-axis
+   * primitives in that case so the auxiliary axis is held via HOLD.
+   */
+
+  if (dist_delta_mdeg == 0 && heading_delta_mdeg != 0)
+    {
+      return db_drivebase_turn(db, now_us, angle_deg, 0, on_completion);
+    }
+  if (heading_delta_mdeg == 0 && dist_delta_mdeg != 0)
+    {
+      return db_drivebase_drive_straight(db, now_us, dl_avg_mm, 0,
+                                         on_completion);
+    }
+  if (dist_delta_mdeg == 0 && heading_delta_mdeg == 0)
+    {
+      db->active_command = DRIVEBASE_ACTIVE_NONE;
+      return 0;
+    }
 
   db->active_command = DRIVEBASE_ACTIVE_CURVE;
 
@@ -393,6 +446,93 @@ int db_drivebase_drive_curve(struct db_drivebase_s *db,
       s.heading_x_mdeg, heading_delta_mdeg,
       hl->v_max_mdegps, hl->accel_mdegps2, hl->decel_mdegps2,
       on_completion);
+
+  /* Phase 4 C: equalise trajectory durations so both axes complete
+   * simultaneously.  Without this step, a large-radius curve has the
+   * heading axis finishing well ahead of the distance axis, after
+   * which the heading PID holds yaw while distance continues straight
+   * — visible as a tangent line at the end of the arc (Issue #144).
+   *
+   * Threshold gate: when the duration ratio is below
+   * DB_TRAJECTORY_STRETCH_RATIO_THRESHOLD_MIL, the two trajectories
+   * are similar enough that the tangent is barely visible AND
+   * stretching the shorter trajectory invites integral wind-up on the
+   * heading PID (regression observed at ratio ~1.25× on bench).
+   *
+   * Tmp-copy commit pattern (Issue #144 B3): build the stretched
+   * trajectory on a stack copy, only overwrite the live trajectory on
+   * success.  On failure (precondition violation, numerical solver
+   * giving up, or residual gate trip inside the helper) leave the
+   * trajectory unstretched and log a warning so the regression is
+   * observable in dmesg.  Valid (radius, angle) inputs satisfy the
+   * helper's preconditions, so this path is defensive only.
+   *
+   * Note (Issue #144 C4): the per-axis reference-time pause introduced
+   * in #142 can desynchronise the two trajectories if only one axis
+   * pauses mid-curve.  This is the existing #142 design and is
+   * accepted for Phase 4; a drivebase-level shared pause would
+   * require pybricks-style restructuring (out of scope here).
+   */
+
+  struct db_trajectory_s *trj_d =
+      &db->control[DB_AXIS_DISTANCE].trajectory;
+  struct db_trajectory_s *trj_h =
+      &db->control[DB_AXIS_HEADING].trajectory;
+
+  struct db_trajectory_s *follower_p = NULL;
+  uint64_t                target_dt  = 0;
+  uint64_t                short_dt   = 0;
+  enum db_axis_e          follower_axis = DB_AXIS_DISTANCE;
+
+  if (trj_d->total_dt_us > trj_h->total_dt_us)
+    {
+      follower_p    = trj_h;
+      follower_axis = DB_AXIS_HEADING;
+      target_dt     = trj_d->total_dt_us;
+      short_dt      = trj_h->total_dt_us;
+    }
+  else if (trj_h->total_dt_us > trj_d->total_dt_us)
+    {
+      follower_p    = trj_d;
+      follower_axis = DB_AXIS_DISTANCE;
+      target_dt     = trj_h->total_dt_us;
+      short_dt      = trj_d->total_dt_us;
+    }
+
+  /* Ratio gate: skip stretch when target_dt / short_dt < threshold.
+   * `target_dt * 1000 < short_dt * threshold_mil` keeps the comparison
+   * in integers and matches the comment.  short_dt > 0 because we set
+   * follower_p only when one duration strictly exceeds the other and
+   * both came from db_trajectory_init_position with non-zero deltas.
+   */
+
+  if (follower_p != NULL && short_dt > 0 &&
+      target_dt * 1000ULL <
+        short_dt * (uint64_t)DB_TRAJECTORY_STRETCH_RATIO_THRESHOLD_MIL)
+    {
+      follower_p = NULL;
+    }
+
+  if (follower_p != NULL)
+    {
+      struct db_trajectory_s tmp = *follower_p;
+      int rc = db_trajectory_stretch_to_total(&tmp, target_dt);
+      if (rc == 0)
+        {
+          *follower_p = tmp;
+        }
+      else
+        {
+          syslog(LOG_WARNING,
+                 "drivebase: curve stretch failed axis=%d rc=%d "
+                 "(R=%ld a=%ld dist_dt=%llu hdg_dt=%llu); falling back "
+                 "to unstretched trajectories\n",
+                 (int)follower_axis, rc, (long)radius_mm, (long)angle_deg,
+                 (unsigned long long)trj_d->total_dt_us,
+                 (unsigned long long)trj_h->total_dt_us);
+        }
+    }
+
   return 0;
 }
 

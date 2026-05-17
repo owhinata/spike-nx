@@ -377,6 +377,35 @@ Trapezoidal profile (accel / cruise / decel).  Short moves degenerate to a trian
 
 `db_trajectory_init_position(t0, x0, x1, v_peak, accel, decel)` plans the move; `db_trajectory_get_reference(tr, t)` returns `(x_mdeg, v_mdegps, a_mdegps2, done)`.
 
+#### 8.2.1 trajectory_stretch (Phase 4 C, Issue [#144](https://github.com/owhinata/spike-nx/issues/144))
+
+`db_drivebase_drive_curve` plans the distance and heading trajectories independently, so the two `total_dt_us` values can diverge depending on (radius, angle).  When the shorter axis (usually heading) finishes first, the longer axis (usually distance) continues, producing a visible straight-line tangent at the tail of the arc (post-#142 bench: ~1.5 s tangent at R=300×90).
+
+`db_trajectory_stretch_to_total(tr, T_target_us)` re-plans a finite trajectory as a slower trapezoid that takes exactly `T_target_us`:
+
+- `|x1 - x0|` (displacement) preserved
+- accel/decel ratio preserved (`accel_mdegps2` / `decel_mdegps2` unchanged)
+- binary search picks `v_peak ∈ [1, current_v_peak]` minimising `|compute_total_dt(v) - T_target|`, keeping a best candidate during the descent, then probes ±32 around the converged value to absorb integer-floor plateaus
+- `cruise_dt = T_target - accel_dt - decel_dt` forces exact `total_dt`; the displacement residual (≤ 100 mdeg = 0.1°) is absorbed by `db_trajectory_get_reference()`'s end-time clamp (`x = x1` at `t >= total_dt`)
+
+On failure (precondition `-EINVAL`, numerical solver `-ERANGE`, or residual gate trip > 100 mdeg) the helper leaves `tr` untouched.  `db_drivebase_drive_curve` uses a **tmp-copy commit pattern**: stretch a local copy, only overwrite the live trajectory on success.  Failure emits a `syslog(LOG_WARNING)` and falls back to the unstretched curve so the user command is not aborted (the tangent regression is observable instead).
+
+Stretch is gated by a duration-ratio threshold (`DB_TRAJECTORY_STRETCH_RATIO_THRESHOLD_MIL = 1500`, i.e. 1.5×).  When the two axes' total_dt ratio is below the threshold the trajectories are similar enough that the tangent is barely visible; stretching the shorter one would make the heading PID accumulate i_acc (`ki_pos = 15`) over a needlessly longer trajectory and overshoot at the ramp end (regression observed on bench at ratio 1.25×).  Above the threshold the tangent regression dominates and stretching wins.  Empirical bench (post-#142):
+
+| Curve | Duration ratio | Stretch | Outcome |
+|---|---|---|---|
+| `curve 150 90` | 1.25× | skipped | clean baseline preserved (~0.3 s mild desync) |
+| `curve 200 360` | 1.73× | applied | tangent eliminated |
+| `curve 300 90` | 2.26× | applied | tangent eliminated |
+
+Tuning this knob downwards is a Phase 6 (feed-forward) follow-up.
+
+pybricks reference: `lib/pbio/src/trajectory.c:pbio_trajectory_stretch`.  pybricks parametrises trajectories by absolute timestamps (t1/t2/t3) and solves the trapezoid analytically; spike-nx uses dt segments and a displacement-based parametrisation, so we solve numerically with binary search.
+
+Dev verb: `drivebase _alg stretch <f_x1> <f_v> <f_a> <f_d> <l_x1> <l_v> <l_a> <l_d>` exercises the helper without hardware — prints BEFORE/AFTER state, a 0/25/50/75/100% timeline sample of both trajectories, and a residual-bound PASS/FAIL gate (≤ 100 mdeg).
+
+Caveat: the reference-time pause from #142 is per-axis.  If only one axis pauses mid-curve the stretched pair desynchronises — accepted as the existing #142 design (a drivebase-level shared pause is a follow-up Issue candidate).
+
 ### 8.3 PID + completion (`drivebase_control.c`)
 
 Cascade PID (position P+I+D feeding velocity P+I).  Anti-windup is two-tiered:

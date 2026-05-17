@@ -133,6 +133,41 @@ void db_trajectory_get_reference(const struct db_trajectory_s *tr,
 bool db_trajectory_is_done(const struct db_trajectory_s *tr,
                            uint64_t t_us);
 
+/* Stretch a finite trajectory so its total_dt_us matches T_target_us.
+ * Preserves |x1 - x0| (= the displacement command) and the accel/decel
+ * shape; lowers v_peak and lengthens cruise to slow the trajectory
+ * down to the target duration.  Used by drivebase curve / arc to make
+ * the distance and heading trajectories complete simultaneously
+ * (Issue #144 Phase 4 C, pybricks `pbio_trajectory_stretch`).
+ *
+ * Preconditions (returns -EINVAL if violated):
+ *   - tr != NULL, initialised by db_trajectory_init_position
+ *   - tr->infinite == false
+ *   - tr->direction != 0 (zero-length trajectory cannot be stretched)
+ *   - tr->total_dt_us > 0
+ *   - T_target_us > tr->total_dt_us  (no compression, only stretch)
+ *
+ * Postconditions on success (return 0):
+ *   - tr->total_dt_us == T_target_us (exact)
+ *   - tr->x1_mdeg, x0_mdeg, t0_us, direction, infinite,
+ *     accel_mdegps2, decel_mdegps2 unchanged
+ *   - tr->v_peak_mdegps strictly less than its input value
+ *   - tr->accel_dt_us / cruise_dt_us / decel_dt_us / x_accel_end_mdeg /
+ *     x_cruise_end_mdeg recomputed consistently
+ *
+ * On error (-EINVAL precondition, -ERANGE numerical solver fail):
+ *   - tr is left untouched
+ *
+ * Residual displacement bound: |x(total_dt_us - 1) - x1| <= 100 mdeg
+ * (= 0.1 deg of motor angle).  The trajectory's existing end-time clamp
+ * (db_trajectory_get_reference at t >= total_dt_us) makes the sampled
+ * reference exactly x1 at the end, so PID completion judgement is not
+ * affected by the residual.
+ */
+
+int db_trajectory_stretch_to_total(struct db_trajectory_s *tr,
+                                   uint64_t T_target_us);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1262,17 +1262,131 @@ static int do_alg_angle(int argc, FAR char *argv[])
   return 0;
 }
 
+/* `drivebase _alg stretch` (Issue #144 Phase 4 C): exercise
+ * db_trajectory_stretch_to_total on host-side parameters without any
+ * hardware.  Builds a follower + leader pair, stretches the follower
+ * to match the leader's total_dt_us, and reports BEFORE/AFTER state +
+ * a 5-point sampling along the leader's timeline.  The displacement
+ * residual is sampled at total_dt_us - 1 us (the last sample before
+ * the trajectory's final-time clamp); the assertion gate is 100 mdeg.
+ */
+
+static int do_alg_stretch(int argc, FAR char *argv[])
+{
+  if (argc < 8)
+    {
+      fprintf(stderr,
+              "usage: drivebase _alg stretch "
+              "<f_x1> <f_v> <f_a> <f_d> "
+              "<l_x1> <l_v> <l_a> <l_d>\n"
+              "  follower / leader trapezoidal params (x0=0 each).\n"
+              "  Stretches the follower so its total_dt matches the\n"
+              "  leader's, preserving displacement (|x1 - x0|).\n");
+      return 1;
+    }
+
+  int64_t f_x1 = (int64_t)atoll(argv[0]);
+  int32_t f_v  = (int32_t)atol(argv[1]);
+  int32_t f_a  = (int32_t)atol(argv[2]);
+  int32_t f_d  = (int32_t)atol(argv[3]);
+  int64_t l_x1 = (int64_t)atoll(argv[4]);
+  int32_t l_v  = (int32_t)atol(argv[5]);
+  int32_t l_a  = (int32_t)atol(argv[6]);
+  int32_t l_d  = (int32_t)atol(argv[7]);
+
+  struct db_trajectory_s f;
+  struct db_trajectory_s l;
+  db_trajectory_init_position(&f, 0, 0, f_x1, f_v, f_a, f_d);
+  db_trajectory_init_position(&l, 0, 0, l_x1, l_v, l_a, l_d);
+
+  printf("BEFORE follower: dir=%d v_peak=%ld accel_dt=%llu cruise_dt=%llu "
+         "decel_dt=%llu total=%llu us  x1=%lld\n",
+         f.direction, (long)f.v_peak_mdegps,
+         (unsigned long long)f.accel_dt_us,
+         (unsigned long long)f.cruise_dt_us,
+         (unsigned long long)f.decel_dt_us,
+         (unsigned long long)f.total_dt_us,
+         (long long)f.x1_mdeg);
+  printf("BEFORE leader:   dir=%d v_peak=%ld accel_dt=%llu cruise_dt=%llu "
+         "decel_dt=%llu total=%llu us  x1=%lld\n",
+         l.direction, (long)l.v_peak_mdegps,
+         (unsigned long long)l.accel_dt_us,
+         (unsigned long long)l.cruise_dt_us,
+         (unsigned long long)l.decel_dt_us,
+         (unsigned long long)l.total_dt_us,
+         (long long)l.x1_mdeg);
+
+  int rc = -EINVAL;
+  if (l.total_dt_us > f.total_dt_us)
+    {
+      rc = db_trajectory_stretch_to_total(&f, l.total_dt_us);
+    }
+  printf("stretch rc=%d\n", rc);
+  printf("AFTER  follower: dir=%d v_peak=%ld accel_dt=%llu cruise_dt=%llu "
+         "decel_dt=%llu total=%llu us  x1=%lld\n",
+         f.direction, (long)f.v_peak_mdegps,
+         (unsigned long long)f.accel_dt_us,
+         (unsigned long long)f.cruise_dt_us,
+         (unsigned long long)f.decel_dt_us,
+         (unsigned long long)f.total_dt_us,
+         (long long)f.x1_mdeg);
+
+  printf("validation: total_match=%d  x1_match=%d\n",
+         (int)(rc == 0 && f.total_dt_us == l.total_dt_us),
+         (int)(f.x1_mdeg == f_x1));
+
+  /* 0/25/50/75/100 % timeline sampling using the leader's total_dt. */
+
+  uint64_t T = l.total_dt_us;
+  for (int i = 0; i <= 4; i++)
+    {
+      uint64_t t = T * (uint64_t)i / 4;
+      struct db_trajectory_ref_s rf;
+      struct db_trajectory_ref_s rl;
+      db_trajectory_get_reference(&f, t, &rf);
+      db_trajectory_get_reference(&l, t, &rl);
+      printf("  t=%llu us  follower x=%lld v=%ld done=%d  "
+             "leader x=%lld v=%ld done=%d\n",
+             (unsigned long long)t,
+             (long long)rf.x_mdeg, (long)rf.v_mdegps, (int)rf.done,
+             (long long)rl.x_mdeg, (long)rl.v_mdegps, (int)rl.done);
+    }
+
+  /* Residual displacement at end-of-decel, sampled just before the
+   * trajectory's terminal x1 clamp.  Threshold = 100 mdeg per v3 plan.
+   */
+
+  if (rc == 0 && f.total_dt_us > 0)
+    {
+      uint64_t t_just_before = f.total_dt_us - 1;
+      struct db_trajectory_ref_s rf_end;
+      db_trajectory_get_reference(&f, t_just_before, &rf_end);
+      int64_t residual = rf_end.x_mdeg - f.x1_mdeg;
+      int64_t abs_residual = residual < 0 ? -residual : residual;
+      printf("residual at (total_dt - 1us): %lld mdeg (%lld µdeg)\n",
+             (long long)residual, (long long)residual * 1000);
+      printf("residual bound: %s (<= 100 mdeg threshold)\n",
+             abs_residual <= 100 ? "PASS" : "FAIL");
+    }
+
+  return rc;
+}
+
 static int do_alg_subcmd(int argc, FAR char *argv[])
 {
   if (argc < 1)
     {
       fprintf(stderr,
-              "usage: drivebase _alg {traj|settings|angle} ...\n");
+              "usage: drivebase _alg {traj|stretch|settings|angle} ...\n");
       return 1;
     }
   if (strcmp(argv[0], "traj") == 0)
     {
       return do_alg_traj(argc - 1, &argv[1]);
+    }
+  if (strcmp(argv[0], "stretch") == 0)
+    {
+      return do_alg_stretch(argc - 1, &argv[1]);
     }
   if (strcmp(argv[0], "settings") == 0)
     {
