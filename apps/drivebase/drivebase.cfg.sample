@@ -1,0 +1,97 @@
+# /mnt/flash/drivebase.cfg — drivebase runtime tuning (Issue #143)
+#
+# Loaded by `drivebase start` from /mnt/flash/drivebase.cfg.  Keys that
+# are absent revert to compiled defaults.  Unknown keys, parse errors,
+# and out-of-range values are logged via syslog and skipped per-line
+# (the rest of the file still applies).
+#
+# Precedence: CLI args to `drivebase start` > this file > compiled.
+# `vi /mnt/flash/drivebase.cfg` to edit, then `drivebase stop; drivebase start`.
+#
+# This template lists every supported key set to its compiled default,
+# so loading it as-is is equivalent to not having a cfg file (`dmesg`
+# will report `loaded 30 config key(s) ... (0 rejected)`).  Copy this
+# file to /mnt/flash/drivebase.cfg on the hub and edit the values you
+# want to override; comment out (or delete) everything else.
+
+# ----------------------------------------------------------------------
+# PID gains — distance axis (state_distance = (sL + sR) / 2 motor mdeg)
+# ----------------------------------------------------------------------
+# kp_pos        : (0, 10000]   .01%-duty per mdeg of position error
+# ki_pos        : [0, 10000]   .01%-duty per (mdeg * s); SPIKE static
+#                              friction needs >= 15 until FF (Phase 6).
+#                              See project memory
+#                              `drivebase_ki_floor_static_friction` for
+#                              the Step B (#142) sweep evidence.
+# kd_pos        : [0, 10000]   .01%-duty per (mdeg/s); 0 by default
+# kp_speed      : [0, 10000]   .01%-duty per (mdeg/s of velocity error)
+# ki_speed      : [0, 10000]   .01%-duty per (mdeg/s * s)
+# deadband_mdeg : [0, 100000]  I-term freeze window around zero error
+# out_max       : (0, 10000]   duty rail (.01%); out_min mirrors
+
+pid_dist_kp_pos        = 50
+pid_dist_ki_pos        = 15
+pid_dist_kd_pos        = 0
+pid_dist_kp_speed      = 5
+pid_dist_ki_speed      = 0
+pid_dist_deadband_mdeg = 3000
+pid_dist_out_max       = 10000
+
+# ----------------------------------------------------------------------
+# PID gains — heading axis (state_heading = (sR - sL) / 2 motor mdeg)
+# heading out_max is 0.8x distance so L/R compose (L=D-H, R=D+H) leaves
+# combined headroom to avoid saturating both motors at once.
+# ----------------------------------------------------------------------
+
+pid_head_kp_pos        = 50
+pid_head_ki_pos        = 15
+pid_head_kd_pos        = 0
+pid_head_kp_speed      = 5
+pid_head_ki_speed      = 0
+pid_head_deadband_mdeg = 3000
+pid_head_out_max       = 8000
+
+# ----------------------------------------------------------------------
+# Completion gate — distance axis
+# pos_tol_mdeg = -1 keeps the kp_pos-derived tolerance (Issue #140):
+#     pos_tolerance_mdeg = max(1000, 400 * 1000 / kp_pos) = 8000 @ kp=50
+# An explicit positive value (in [1000, 60000]) bypasses derivation.
+# smart_continue_mdeg = -1 uses the built-in 6000 mdeg window.
+# ----------------------------------------------------------------------
+
+comp_dist_pos_tol_mdeg          = -1
+comp_dist_speed_tol_mdegps      = 30000
+comp_dist_smart_continue_mdeg   = -1
+comp_dist_done_window_ms        = 50
+comp_dist_smart_passive_hold_ms = 100
+
+# ----------------------------------------------------------------------
+# Completion gate — heading axis (mirrors distance)
+# ----------------------------------------------------------------------
+
+comp_head_pos_tol_mdeg          = -1
+comp_head_speed_tol_mdegps      = 30000
+comp_head_smart_continue_mdeg   = -1
+comp_head_done_window_ms        = 50
+comp_head_smart_passive_hold_ms = 100
+
+# ----------------------------------------------------------------------
+# Stall detection (global; speed-and-duty co-condition over a window)
+# stall_speed_mdegps : speed below which we may stall (30 deg/s)
+# stall_duty_min     : |duty| above which we may stall (60% = 6000)
+# stall_window_ms    : both true continuously for this long
+# ----------------------------------------------------------------------
+
+stall_speed_mdegps = 30000
+stall_duty_min     = 6000
+stall_window_ms    = 200
+
+# ----------------------------------------------------------------------
+# `drivebase start` defaults
+# Used ONLY when the matching CLI positional arg is omitted; explicit
+# CLI args (`drivebase start <wheel_mm> <axle_mm> <tick_ms>`) win.
+# ----------------------------------------------------------------------
+
+wheel_d_um = 56000    # SPIKE Medium Motor wheel = 56 mm
+axle_t_um  = 112000   # SPIKE drivebase axle    = 112 mm
+tick_us    = 2000     # RT tick = 2 ms (range 1000..20000)

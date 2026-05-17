@@ -294,6 +294,15 @@ struct drivebase_status_s
   uint32_t attach_generation;  /* bumps on every ATTACH/DETACH/cleanup    */
 
   uint32_t encoder_drop_count; /* observed lump_sample_s.seq gaps         */
+
+  /* Daemon's live geometry / tick, resolved by the
+   * CLI > /mnt/flash/drivebase.cfg > compiled default precedence (Issue
+   * #143).  All zero when daemon_attached == 0.
+   */
+
+  uint32_t wheel_d_um;
+  uint32_t axle_t_um;
+  uint32_t tick_us;
 };
 
 #define DRIVEBASE_JITTER_BUCKETS 8
@@ -369,7 +378,7 @@ _Static_assert(sizeof(struct drivebase_drive_settings_s) == 24, "drivebase_drive
 _Static_assert(sizeof(struct drivebase_set_use_gyro_s)   ==  8, "drivebase_set_use_gyro_s ABI");
 _Static_assert(sizeof(struct drivebase_state_s)          == 24, "drivebase_state_s ABI");
 _Static_assert(sizeof(struct drivebase_heading_s)        ==  8, "drivebase_heading_s ABI");
-_Static_assert(sizeof(struct drivebase_status_s)         == 48, "drivebase_status_s ABI");
+_Static_assert(sizeof(struct drivebase_status_s)         == 60, "drivebase_status_s ABI");
 _Static_assert(sizeof(struct drivebase_jitter_dump_s)    == 44, "drivebase_jitter_dump_s ABI");
 _Static_assert(sizeof(struct drivebase_attach_s)         ==  8, "drivebase_attach_s ABI");
 _Static_assert(sizeof(struct drivebase_cmd_envelope_s)   == 40, "drivebase_cmd_envelope_s ABI");

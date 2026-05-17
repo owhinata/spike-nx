@@ -32,5 +32,6 @@ CSRCS  += drivebase_rt.c
 CSRCS  += drivebase_chardev_handler.c
 CSRCS  += drivebase_imu.c
 CSRCS  += drivebase_daemon.c
+CSRCS  += drivebase_config.c
 
 include $(APPDIR)/Application.mk

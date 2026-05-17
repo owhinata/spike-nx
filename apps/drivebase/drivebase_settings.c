@@ -41,6 +41,11 @@
 
 #include <nuttx/config.h>
 
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <syslog.h>
+
 #include "drivebase_settings.h"
 #include "drivebase_angle.h"
 
@@ -146,7 +151,13 @@ _Static_assert(DB_KP_POS_DEFAULT > 0,
  * regularly saturate both motors at once.
  */
 
-static const struct db_servo_gains_s g_pid_gains_distance =
+/* Non-const since Issue #143: the daemon may override these from
+ * /mnt/flash/drivebase.cfg before the RT thread starts, then
+ * db_settings_freeze() makes the structs effectively read-only for the
+ * remainder of the daemon's lifetime.
+ */
+
+static struct db_servo_gains_s g_pid_gains_distance =
 {
   .kp_pos        = DB_KP_POS_DEFAULT,
   .ki_pos        = 15,          /* ki for static-friction break (#141  */
@@ -168,7 +179,7 @@ static const struct db_servo_gains_s g_pid_gains_distance =
   .out_max       =  10000,
 };
 
-static const struct db_servo_gains_s g_pid_gains_heading =
+static struct db_servo_gains_s g_pid_gains_heading =
 {
   .kp_pos        = DB_KP_POS_DEFAULT,
   .ki_pos        = 15,          /* same breakaway rationale as dist;    */
@@ -182,6 +193,21 @@ static const struct db_servo_gains_s g_pid_gains_heading =
   .out_min       = -8000,       /* 0.8x distance — combine headroom    */
   .out_max       =  8000,
 };
+
+/* Bounds used by the per-key setters.  Kept here so config_load and the
+ * defaults stay in sync.  out_max is bounded by the duty rail (10000 =
+ * 100%) — heading axis defaults to 8000 but config may push it back up
+ * to 10000 if the operator wants to give heading equal authority.
+ */
+
+#define DB_OUT_MAX_LIMIT             10000
+#define DB_KI_LIMIT                  10000   /* sanity cap */
+#define DB_KP_LIMIT                  10000   /* sanity cap */
+#define DB_DEADBAND_LIMIT           100000   /* 100 deg = generous */
+#define DB_POS_TOL_LIMIT_MDEG        60000   /* 60 deg = generous */
+#define DB_SPEED_TOL_LIMIT_MDEGPS  1000000   /* 1000 dps = generous */
+#define DB_DONE_WINDOW_LIMIT_MS      10000
+#define DB_STALL_WINDOW_LIMIT_MS     10000
 
 /****************************************************************************
  * Distance / heading trajectory limits
@@ -265,36 +291,49 @@ db_settings_heading_limits(uint32_t wheel_d_um, uint32_t axle_t_um)
  * Stall + completion
  ****************************************************************************/
 
-static const struct db_stall_settings_s g_stall =
+/* Non-const since Issue #143 (runtime override).  See note on
+ * g_pid_gains_distance above.
+ */
+
+static struct db_stall_settings_s g_stall =
 {
   .stall_speed_mdegps  = 30000,    /* 30 deg/s                          */
   .stall_duty_min      =  6000,    /* 60 % duty                         */
   .stall_window_ms     =   200,
 };
 
-/* pos_tolerance_mdeg and smart_continue_window_mdeg are filled in at
- * each query by db_settings_completion_axis() so the values track the
- * current per-axis gain.  Two instances (distance, heading); other
- * fields are bench-tuned constants shared across axes.
+/* Storage for completion settings.  pos_tolerance_mdeg == -1 means
+ * "derive from kp_pos on query" (the default, #140 behaviour).  An
+ * explicit positive value bypasses derivation and is returned as-is.
+ * smart_continue_window_mdeg follows the same convention.
  */
 
 static struct db_completion_settings_s g_completion_distance =
 {
-  .pos_tolerance_mdeg         = 0,            /* derived (#140)        */
+  .pos_tolerance_mdeg         =    -1,        /* -1 = derive (#140)   */
   .speed_tolerance_mdegps     = 30000,        /* 30 deg/s              */
-  .smart_continue_window_mdeg = 0,            /* derived (#140)        */
+  .smart_continue_window_mdeg =    -1,        /* -1 = use default     */
   .done_window_ms             =    50,
   .smart_passive_hold_ms      =   100,        /* pybricks default      */
 };
 
 static struct db_completion_settings_s g_completion_heading =
 {
-  .pos_tolerance_mdeg         = 0,            /* derived               */
+  .pos_tolerance_mdeg         =    -1,
   .speed_tolerance_mdegps     = 30000,
-  .smart_continue_window_mdeg = 0,            /* derived               */
+  .smart_continue_window_mdeg =    -1,
   .done_window_ms             =    50,
   .smart_passive_hold_ms      =   100,
 };
+
+/* Scratch buffer returned by db_settings_completion_axis().  Filled in
+ * on every call so derivations stay in sync with the latest kp_pos.
+ * Per-axis to avoid concurrent calls (distance + heading from the same
+ * tick) clobbering each other.
+ */
+
+static struct db_completion_settings_s g_completion_scratch_distance;
+static struct db_completion_settings_s g_completion_scratch_heading;
 
 const struct db_stall_settings_s *db_settings_stall(void)
 {
@@ -311,16 +350,269 @@ const struct db_completion_settings_s *
 db_settings_completion_axis(enum db_axis_e axis)
 {
   const struct db_servo_gains_s *gains = db_settings_pid_gains(axis);
-  struct db_completion_settings_s *out =
+  const struct db_completion_settings_s *src =
       (axis == DB_AXIS_HEADING) ? &g_completion_heading
                                 : &g_completion_distance;
+  struct db_completion_settings_s *out =
+      (axis == DB_AXIS_HEADING) ? &g_completion_scratch_heading
+                                : &g_completion_scratch_distance;
 
-  out->pos_tolerance_mdeg         = derive_pos_tolerance_mdeg(gains->kp_pos);
-  out->smart_continue_window_mdeg = DB_SMART_CONTINUE_WINDOW_MDEG;
+  *out = *src;
+  if (out->pos_tolerance_mdeg < 0)
+    {
+      out->pos_tolerance_mdeg = derive_pos_tolerance_mdeg(gains->kp_pos);
+    }
+  if (out->smart_continue_window_mdeg < 0)
+    {
+      out->smart_continue_window_mdeg = DB_SMART_CONTINUE_WINDOW_MDEG;
+    }
   return out;
 }
 
 const struct db_completion_settings_s *db_settings_completion(void)
 {
   return db_settings_completion_axis(DB_AXIS_DISTANCE);
+}
+
+/****************************************************************************
+ * Runtime override API (Issue #143)
+ ****************************************************************************/
+
+static bool g_settings_frozen = false;
+
+static struct db_servo_gains_s *pid_gains_mut(enum db_axis_e axis)
+{
+  return (axis == DB_AXIS_HEADING) ? &g_pid_gains_heading
+                                   : &g_pid_gains_distance;
+}
+
+static struct db_completion_settings_s *comp_mut(enum db_axis_e axis)
+{
+  return (axis == DB_AXIS_HEADING) ? &g_completion_heading
+                                   : &g_completion_distance;
+}
+
+static int check_writable(void)
+{
+  if (g_settings_frozen)
+    {
+      syslog(LOG_WARNING,
+             "drivebase: settings frozen; runtime setter ignored\n");
+      return -EBUSY;
+    }
+  return 0;
+}
+
+static int set_in_range_i32(int32_t *dst, int32_t value,
+                            int32_t lo, int32_t hi)
+{
+  int rc = check_writable();
+  if (rc < 0) return rc;
+  if (value < lo || value > hi) return -EINVAL;
+  *dst = value;
+  return 0;
+}
+
+static int set_in_range_u32(uint32_t *dst, uint32_t value, uint32_t hi)
+{
+  int rc = check_writable();
+  if (rc < 0) return rc;
+  if (value > hi) return -EINVAL;
+  *dst = value;
+  return 0;
+}
+
+int db_settings_set_pid_kp_pos(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  /* kp_pos must be strictly positive: completion tolerance derivation
+   * divides by it and a zero-tolerance window is meaningless.
+   */
+  return set_in_range_i32(&pid_gains_mut(axis)->kp_pos, value,
+                          1, DB_KP_LIMIT);
+}
+
+int db_settings_set_pid_ki_pos(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  return set_in_range_i32(&pid_gains_mut(axis)->ki_pos, value,
+                          0, DB_KI_LIMIT);
+}
+
+int db_settings_set_pid_kd_pos(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  return set_in_range_i32(&pid_gains_mut(axis)->kd_pos, value,
+                          0, DB_KP_LIMIT);
+}
+
+int db_settings_set_pid_kp_speed(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  return set_in_range_i32(&pid_gains_mut(axis)->kp_speed, value,
+                          0, DB_KP_LIMIT);
+}
+
+int db_settings_set_pid_ki_speed(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  return set_in_range_i32(&pid_gains_mut(axis)->ki_speed, value,
+                          0, DB_KI_LIMIT);
+}
+
+int db_settings_set_pid_deadband_mdeg(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  return set_in_range_i32(&pid_gains_mut(axis)->deadband_mdeg, value,
+                          0, DB_DEADBAND_LIMIT);
+}
+
+int db_settings_set_pid_out_max(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  int rc = check_writable();
+  if (rc < 0) return rc;
+  if (value <= 0 || value > DB_OUT_MAX_LIMIT) return -EINVAL;
+  /* Keep out_min as the symmetric negative — pybricks/PID assumes
+   * symmetric clamp for anti-windup invariants.
+   */
+  struct db_servo_gains_s *g = pid_gains_mut(axis);
+  g->out_max = value;
+  g->out_min = -value;
+  return 0;
+}
+
+int db_settings_set_comp_pos_tol_mdeg(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  int rc = check_writable();
+  if (rc < 0) return rc;
+  /* -1 sentinel keeps the derive-from-kp_pos path active.  An explicit
+   * value must be in [encoder floor, generous upper limit] so the
+   * completion gate is reachable and meaningful.
+   */
+  if (value == -1)
+    {
+      comp_mut(axis)->pos_tolerance_mdeg = -1;
+      return 0;
+    }
+  if (value < DB_ENCODER_FLOOR_MDEG || value > DB_POS_TOL_LIMIT_MDEG)
+    {
+      return -EINVAL;
+    }
+  comp_mut(axis)->pos_tolerance_mdeg = value;
+  return 0;
+}
+
+int db_settings_set_comp_speed_tol_mdegps(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  return set_in_range_i32(&comp_mut(axis)->speed_tolerance_mdegps, value,
+                          0, DB_SPEED_TOL_LIMIT_MDEGPS);
+}
+
+int db_settings_set_comp_smart_continue_mdeg(enum db_axis_e axis,
+                                             int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  int rc = check_writable();
+  if (rc < 0) return rc;
+  if (value == -1)
+    {
+      comp_mut(axis)->smart_continue_window_mdeg = -1;
+      return 0;
+    }
+  if (value < 0 || value > DB_POS_TOL_LIMIT_MDEG) return -EINVAL;
+  comp_mut(axis)->smart_continue_window_mdeg = value;
+  return 0;
+}
+
+int db_settings_set_comp_done_window_ms(enum db_axis_e axis, uint32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  return set_in_range_u32(&comp_mut(axis)->done_window_ms, value,
+                          DB_DONE_WINDOW_LIMIT_MS);
+}
+
+int db_settings_set_comp_smart_passive_hold_ms(enum db_axis_e axis,
+                                               uint32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  return set_in_range_u32(&comp_mut(axis)->smart_passive_hold_ms, value,
+                          DB_DONE_WINDOW_LIMIT_MS);
+}
+
+int db_settings_set_stall_speed_mdegps(int32_t value)
+{
+  return set_in_range_i32(&g_stall.stall_speed_mdegps, value,
+                          0, DB_SPEED_TOL_LIMIT_MDEGPS);
+}
+
+int db_settings_set_stall_duty_min(int32_t value)
+{
+  return set_in_range_i32(&g_stall.stall_duty_min, value,
+                          0, DB_OUT_MAX_LIMIT);
+}
+
+int db_settings_set_stall_window_ms(uint32_t value)
+{
+  return set_in_range_u32(&g_stall.stall_window_ms, value,
+                          DB_STALL_WINDOW_LIMIT_MS);
+}
+
+void db_settings_freeze(void)
+{
+  g_settings_frozen = true;
+}
+
+bool db_settings_is_frozen(void)
+{
+  return g_settings_frozen;
+}
+
+void db_settings_thaw(void)
+{
+  g_settings_frozen = false;
+}
+
+void db_settings_reset_to_defaults(void)
+{
+  /* Snapshot the compiled-in defaults the first time we are called
+   * (which is before any setter has had a chance to mutate them),
+   * then restore from that snapshot on every subsequent call.  This
+   * keeps the daemon's stop/start cycle behaving as if each start
+   * had a fresh process: any key not mentioned in the new cfg reverts
+   * to its built-in default rather than sticking from the previous
+   * load.
+   */
+
+  if (g_settings_frozen)
+    {
+      syslog(LOG_WARNING,
+             "drivebase: settings frozen; reset_to_defaults ignored\n");
+      return;
+    }
+
+  static bool captured = false;
+  static struct db_servo_gains_s          d0, h0;
+  static struct db_stall_settings_s       s0;
+  static struct db_completion_settings_s  cd0, ch0;
+
+  if (!captured)
+    {
+      d0       = g_pid_gains_distance;
+      h0       = g_pid_gains_heading;
+      s0       = g_stall;
+      cd0      = g_completion_distance;
+      ch0      = g_completion_heading;
+      captured = true;
+    }
+  else
+    {
+      g_pid_gains_distance  = d0;
+      g_pid_gains_heading   = h0;
+      g_stall               = s0;
+      g_completion_distance = cd0;
+      g_completion_heading  = ch0;
+    }
 }

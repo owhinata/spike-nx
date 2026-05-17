@@ -270,6 +270,9 @@ int db_chardev_handler_publish_status(struct db_chardev_handler_s *h)
   s.tick_count       = 0;          /* RT task tracks this    */
   s.tick_overrun_count = 0;
   s.tick_max_lag_us  = 0;
+  s.wheel_d_um       = h->wheel_d_um;
+  s.axle_t_um        = h->axle_t_um;
+  s.tick_us          = h->tick_ms * 1000u;
 
   int rc = ioctl(h->fd, DRIVEBASE_DAEMON_PUBLISH_STATUS,
                  (unsigned long)&s);

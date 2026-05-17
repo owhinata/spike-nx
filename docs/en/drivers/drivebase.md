@@ -425,6 +425,76 @@ Defaults targeted at SPIKE Medium Motor (per-axis, aggregated since Issue #141 P
 
 drive_speed defaults are derived from `wheel_diameter` (`v_max_mdegps`, `accel = v_max × 4 / 1` = reach max speed in 1/4 s).  `drivebase _alg settings` dumps the live values.
 
+### 8.6 Runtime config override (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
+
+At `drivebase start` the daemon reads a text file on the external W25Q256 NOR (LittleFS at `/mnt/flash`) and applies any recognised key=value pairs to PID gains / completion / stall / wheel/axle/tick before launching the RT thread.  This shortens bench-tuning iteration: no rebuild required.
+
+**Format**: properties (key=value).  A `#` starts a comment, either at the beginning of a line or trailing on a value line (everything from the first `#` on the right-hand side of `=` is dropped before integer parsing).  Blank lines and leading/trailing whitespace are stripped.  Accepts both LF and CRLF line endings and an optional leading UTF-8 BOM.  Line length cap 256 bytes (overlong lines warn and skip).  Unknown keys / parse errors log `LOG_WARNING` and **skip that one line**; remaining keys apply.
+
+**Reliability**:
+- File missing (`ENOENT`) → silent fallback (no dmesg entry)
+- Mount failure / other I/O error → `LOG_WARNING`
+- At least one key applied → `LOG_INFO`: `drivebase: loaded N config key(s) from /mnt/flash/drivebase.cfg`
+- File present but zero keys applied → `LOG_WARNING` (surfaces typos)
+
+**Race protection**: `db_settings_freeze()` is called right before `db_chardev_handler_attach()`, so any write attempt after the RT thread starts returns `-EBUSY`.  Reads from the RT tick are race-free by construction.
+
+**Supported keys** (compiled defaults shown in parentheses):
+
+| Group | Key | Type | Range / meaning |
+|---|---|---|---|
+| PID dist | `pid_dist_kp_pos` (50) | int32 | (0, 10000] |
+| | `pid_dist_ki_pos` (15) | int32 | [0, 10000] |
+| | `pid_dist_kd_pos` (0) | int32 | [0, 10000] |
+| | `pid_dist_kp_speed` (5) | int32 | [0, 10000] |
+| | `pid_dist_ki_speed` (0) | int32 | [0, 10000] |
+| | `pid_dist_deadband_mdeg` (3000) | int32 | [0, 100000] mdeg |
+| | `pid_dist_out_max` (10000) | int32 | (0, 10000]; out_min mirrors |
+| PID head | `pid_head_*` | as above, `out_max` default 8000 |
+| Completion | `comp_dist_pos_tol_mdeg` (-1) | int32 | -1 = derive from kp_pos (#140), else [1000, 60000] |
+| | `comp_dist_speed_tol_mdegps` (30000) | int32 | [0, 1000000] |
+| | `comp_dist_smart_continue_mdeg` (-1) | int32 | -1 = default 6000, else [0, 60000] |
+| | `comp_dist_done_window_ms` (50) | uint32 | [0, 10000] |
+| | `comp_dist_smart_passive_hold_ms` (100) | uint32 | [0, 10000] |
+| | `comp_head_*` | mirrors |
+| Stall | `stall_speed_mdegps` (30000) | int32 | [0, 1000000] |
+| | `stall_duty_min` (6000) | int32 | [0, 10000] |
+| | `stall_window_ms` (200) | uint32 | [0, 10000] |
+| Start | `wheel_d_um` (56000) | uint32 | > 0, used only when CLI omits wheel |
+| | `axle_t_um` (112000) | uint32 | > 0, used only when CLI omits axle |
+| | `tick_us` (DB_RT_TICK_US_DEFAULT) | uint32 | > 0, used only when CLI omits tick |
+
+**Wheel / axle / tick precedence**: `drivebase start [wheel_mm] [axle_mm] [tick_ms]` decides "explicit vs omitted" by `argc`.  Explicit CLI > config > compiled default.
+
+**On-device editing**: defconfig enables `CONFIG_SYSTEM_VI=y` + `CONFIG_SYSTEM_TERMCURSES=y`, so:
+
+```
+nsh> vi /mnt/flash/drivebase.cfg
+```
+
+For one-off appends, `echo` + redirect also works:
+
+```
+nsh> echo "pid_dist_ki_pos = 12" >> /mnt/flash/drivebase.cfg
+nsh> drivebase stop
+nsh> drivebase start
+nsh> drivebase _alg settings    # confirm the applied values
+```
+
+**Example** (`/mnt/flash/drivebase.cfg`):
+
+```
+# Phase 5 Step B re-sweep: temporarily lower the integrator gain
+pid_dist_ki_pos = 10
+pid_head_ki_pos = 10
+
+# Non-default chassis geometry
+wheel_d_um = 62000
+axle_t_um = 145000
+```
+
+**Full template**: a fully annotated cfg listing every supported key at its compiled default is checked in at `apps/drivebase/drivebase.cfg.sample`.  Either zmodem it onto the hub or paste its contents into `vi /mnt/flash/drivebase.cfg`.  When iterating, keep only the keys you are tuning and comment out the rest — that keeps `dmesg` informative about what changed.
+
 ## 9. Linux portability (FUSE)
 
 The kernel-chardev + IPC design carries over cleanly to a Linux port using FUSE (`/dev/fuse` + libfuse):

@@ -1154,8 +1154,44 @@ static int do_alg_traj(int argc, FAR char *argv[])
 
 static int do_alg_settings(int argc, FAR char *argv[])
 {
-  double wheel_mm = (argc >= 1) ? strtod(argv[0], NULL) : 56.0;
-  double axle_mm  = (argc >= 2) ? strtod(argv[1], NULL) : 112.0;
+  /* Default to the live daemon's geometry when the caller did not pass
+   * explicit wheel / axle on the CLI (Issue #143).  Falls back to the
+   * compiled SPIKE defaults if the daemon is not running or the ioctl
+   * fails — that path keeps the verb usable for offline maths.
+   */
+
+  double wheel_mm = 56.0;
+  double axle_mm  = 112.0;
+
+  if (argc >= 1)
+    {
+      wheel_mm = strtod(argv[0], NULL);
+    }
+  if (argc >= 2)
+    {
+      axle_mm  = strtod(argv[1], NULL);
+    }
+
+  if (argc < 2)
+    {
+      int fd = open(DRIVEBASE_DEVPATH, O_RDONLY);
+      if (fd >= 0)
+        {
+          struct drivebase_status_s st;
+          memset(&st, 0, sizeof(st));
+          if (ioctl(fd, DRIVEBASE_GET_STATUS, (unsigned long)&st) == 0 &&
+              st.daemon_attached && st.wheel_d_um > 0 && st.axle_t_um > 0)
+            {
+              if (argc < 1)
+                {
+                  wheel_mm = (double)st.wheel_d_um / 1000.0;
+                }
+              axle_mm = (double)st.axle_t_um / 1000.0;
+            }
+          close(fd);
+        }
+    }
+
   uint32_t wheel_d_um = (uint32_t)(wheel_mm * 1000.0 + 0.5);
   uint32_t axle_t_um  = (uint32_t)(axle_mm  * 1000.0 + 0.5);
 
@@ -1291,6 +1327,9 @@ static int do_status(void)
   printf("motor_r_bound    = %u\n", st.motor_r_bound);
   printf("imu_present      = %u\n", st.imu_present);
   printf("use_gyro         = %u\n", st.use_gyro);
+  printf("wheel_d_um       = %lu\n", (unsigned long)st.wheel_d_um);
+  printf("axle_t_um        = %lu\n", (unsigned long)st.axle_t_um);
+  printf("tick_us          = %lu\n", (unsigned long)st.tick_us);
   printf("tick_count       = %lu\n", (unsigned long)st.tick_count);
   printf("tick_overrun     = %lu\n", (unsigned long)st.tick_overrun_count);
   printf("tick_max_lag_us  = %lu\n", (unsigned long)st.tick_max_lag_us);
@@ -1396,33 +1435,121 @@ int main(int argc, FAR char *argv[])
 
   if (strcmp(verb, "start") == 0)
     {
-      double   wheel_mm = (argc >= 3) ? strtod(argv[2], NULL) : 56.0;
-      double   axle_mm  = (argc >= 4) ? strtod(argv[3], NULL) : 112.0;
-      int      tick_ms  = (argc >= 5) ? atoi(argv[4])
-                                      : DB_RT_TICK_MS_DEFAULT;
-      uint32_t wheel_d_um = (uint32_t)(wheel_mm * 1000.0 + 0.5);
-      uint32_t axle_t_um  = (uint32_t)(axle_mm  * 1000.0 + 0.5);
+      /* Three-tier precedence (Issue #143): CLI explicit (argc) > config
+       * (loaded inside the daemon task from /mnt/flash/drivebase.cfg) >
+       * compiled-in default.  Pass 0 to the daemon for any positional
+       * the caller omitted so the daemon-side merge picks up the config
+       * value.  CLI 0 is rejected as invalid input.
+       */
 
-      if (tick_ms < (int)(DB_RT_TICK_US_MIN / 1000) ||
-          tick_ms > (int)(DB_RT_TICK_US_MAX / 1000))
+      uint32_t wheel_d_um = 0;
+      uint32_t axle_t_um  = 0;
+      uint32_t tick_us    = 0;
+
+      if (argc >= 3)
         {
-          fprintf(stderr,
-                  "drivebase start: tick_ms must be in [%d, %d]\n",
-                  DB_RT_TICK_US_MIN / 1000,
-                  DB_RT_TICK_US_MAX / 1000);
-          return 1;
+          double wheel_mm = strtod(argv[2], NULL);
+          if (wheel_mm <= 0.0)
+            {
+              fprintf(stderr,
+                      "drivebase start: wheel_mm must be positive\n");
+              return 1;
+            }
+          wheel_d_um = (uint32_t)(wheel_mm * 1000.0 + 0.5);
         }
 
-      uint32_t tick_us = (uint32_t)tick_ms * 1000u;
+      if (argc >= 4)
+        {
+          double axle_mm = strtod(argv[3], NULL);
+          if (axle_mm <= 0.0)
+            {
+              fprintf(stderr,
+                      "drivebase start: axle_mm must be positive\n");
+              return 1;
+            }
+          axle_t_um = (uint32_t)(axle_mm * 1000.0 + 0.5);
+        }
+
+      if (argc >= 5)
+        {
+          int tick_ms = atoi(argv[4]);
+          if (tick_ms < (int)(DB_RT_TICK_US_MIN / 1000) ||
+              tick_ms > (int)(DB_RT_TICK_US_MAX / 1000))
+            {
+              fprintf(stderr,
+                      "drivebase start: tick_ms must be in [%d, %d]\n",
+                      DB_RT_TICK_US_MIN / 1000,
+                      DB_RT_TICK_US_MAX / 1000);
+              return 1;
+            }
+          tick_us = (uint32_t)tick_ms * 1000u;
+        }
+
+      /* Snapshot attach_generation BEFORE daemon_start so we can
+       * distinguish the new daemon's publish from stale cache from a
+       * previous start/stop cycle (Issue #143).
+       */
+
+      uint32_t prev_gen = 0;
+      int sfd = open(DRIVEBASE_DEVPATH, O_RDONLY);
+      if (sfd >= 0)
+        {
+          struct drivebase_status_s st;
+          memset(&st, 0, sizeof(st));
+          if (ioctl(sfd, DRIVEBASE_GET_STATUS,
+                    (unsigned long)&st) == 0)
+            {
+              prev_gen = st.attach_generation;
+            }
+          close(sfd);
+        }
+
       int rc = drivebase_daemon_start(wheel_d_um, axle_t_um, tick_us);
       if (rc < 0)
         {
           fprintf(stderr, "drivebase start: %s\n", strerror(-rc));
           return 1;
         }
-      printf("drivebase: started (pid=%d wheel=%g mm axle=%g mm "
-             "tick=%d ms)\n",
-             rc, wheel_mm, axle_mm, tick_ms);
+
+      /* Daemon resolves wheel/axle/tick inside its own task using the
+       * CLI > /mnt/flash/drivebase.cfg > compiled-default precedence
+       * (Issue #143).  Wait for attach_generation to bump (the new
+       * daemon has fully attached and published its status) so the
+       * geometry we show isn't a stale value from a previous start.
+       */
+
+      uint32_t shown_wheel = wheel_d_um;
+      uint32_t shown_axle  = axle_t_um;
+      uint32_t shown_tick  = tick_us;
+      sfd = open(DRIVEBASE_DEVPATH, O_RDONLY);
+      if (sfd >= 0)
+        {
+          for (int i = 0; i < 20; i++)
+            {
+              struct drivebase_status_s st;
+              memset(&st, 0, sizeof(st));
+              if (ioctl(sfd, DRIVEBASE_GET_STATUS,
+                        (unsigned long)&st) == 0 &&
+                  st.daemon_attached &&
+                  st.attach_generation != prev_gen &&
+                  st.wheel_d_um > 0)
+                {
+                  shown_wheel = st.wheel_d_um;
+                  shown_axle  = st.axle_t_um;
+                  shown_tick  = st.tick_us;
+                  break;
+                }
+              usleep(50000);   /* 50 ms × up to 20 = 1 s ceiling */
+            }
+          close(sfd);
+        }
+
+      printf("drivebase: started (pid=%d wheel=%.3f mm axle=%.3f mm "
+             "tick=%lu us)\n",
+             rc,
+             (double)shown_wheel / 1000.0,
+             (double)shown_axle  / 1000.0,
+             (unsigned long)shown_tick);
       return 0;
     }
 

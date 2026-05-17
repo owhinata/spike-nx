@@ -454,6 +454,9 @@ static int db_publish_status(FAR struct db_chardev_s *dev,
   dev->status.tick_overrun_count = src_kern.tick_overrun_count;
   dev->status.tick_max_lag_us    = src_kern.tick_max_lag_us;
   dev->status.encoder_drop_count = src_kern.encoder_drop_count;
+  dev->status.wheel_d_um         = src_kern.wheel_d_um;
+  dev->status.axle_t_um          = src_kern.axle_t_um;
+  dev->status.tick_us            = src_kern.tick_us;
 
   atomic_fetch_add(&dev->status_seq, 1);                          /* even */
   return OK;
@@ -545,6 +548,9 @@ static void db_detach_locked(FAR struct db_chardev_s *dev,
   dev->status.encoder_drop_count = 0;
   dev->status.last_publish_us    = 0;
   dev->status.last_pickup_us     = 0;
+  dev->status.wheel_d_um         = 0;
+  dev->status.axle_t_um          = 0;
+  dev->status.tick_us            = 0;
   dev->status.attach_generation++;
   (void)atomic_fetch_add(&dev->status_seq, 1);             /* even */
 

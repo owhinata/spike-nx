@@ -138,6 +138,69 @@ const struct db_completion_settings_s *
 
 const struct db_completion_settings_s *db_settings_completion(void);
 
+/****************************************************************************
+ * Runtime override API (Issue #143)
+ *
+ * Per-key setters that callers (db_config_load() from /mnt/flash/drivebase.cfg)
+ * use to mutate the live tunables.  Each setter performs range validation
+ * and returns 0 on success, -EINVAL on out-of-range, or -EBUSY if the
+ * settings module has been frozen.
+ *
+ * Invariant: settings may only be mutated before db_settings_freeze().
+ * The drivebase daemon calls freeze() after config load and immediately
+ * before launching the RT thread, so the RT-tick reader (which dereferences
+ * the const pointer returned by db_settings_pid_gains() on every tick)
+ * never races with a writer.
+ ****************************************************************************/
+
+int db_settings_set_pid_kp_pos(enum db_axis_e axis, int32_t value);
+int db_settings_set_pid_ki_pos(enum db_axis_e axis, int32_t value);
+int db_settings_set_pid_kd_pos(enum db_axis_e axis, int32_t value);
+int db_settings_set_pid_kp_speed(enum db_axis_e axis, int32_t value);
+int db_settings_set_pid_ki_speed(enum db_axis_e axis, int32_t value);
+int db_settings_set_pid_deadband_mdeg(enum db_axis_e axis, int32_t value);
+int db_settings_set_pid_out_max(enum db_axis_e axis, int32_t value);
+
+/* For pos_tolerance_mdeg: -1 means "derive from kp_pos at query time"
+ * (default).  Any value in [DB_ENCODER_FLOOR_MDEG, 60000] is an explicit
+ * override that bypasses derivation.
+ */
+
+int db_settings_set_comp_pos_tol_mdeg(enum db_axis_e axis, int32_t value);
+int db_settings_set_comp_speed_tol_mdegps(enum db_axis_e axis, int32_t value);
+int db_settings_set_comp_smart_continue_mdeg(enum db_axis_e axis,
+                                             int32_t value);
+int db_settings_set_comp_done_window_ms(enum db_axis_e axis, uint32_t value);
+int db_settings_set_comp_smart_passive_hold_ms(enum db_axis_e axis,
+                                               uint32_t value);
+
+int db_settings_set_stall_speed_mdegps(int32_t value);
+int db_settings_set_stall_duty_min(int32_t value);
+int db_settings_set_stall_window_ms(uint32_t value);
+
+/* Mark settings immutable.  Subsequent setter calls return -EBUSY.
+ * Called by the drivebase daemon between config load and RT-thread start.
+ */
+
+void db_settings_freeze(void);
+bool db_settings_is_frozen(void);
+
+/* Reset freeze state.  Used by the daemon on each start so a fresh
+ * config load can apply.
+ */
+
+void db_settings_thaw(void);
+
+/* Restore all tunables to the values they had at first init.  Called
+ * by the daemon before db_config_load() so each `drivebase start`
+ * begins from the compiled-in defaults; previously-loaded keys that
+ * are absent from the new cfg revert to their built-in value rather
+ * than sticking from the last load.  Idempotent.  Must be called
+ * before db_settings_freeze().
+ */
+
+void db_settings_reset_to_defaults(void);
+
 #ifdef __cplusplus
 }
 #endif

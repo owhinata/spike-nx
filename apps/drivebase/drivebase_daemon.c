@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -48,6 +49,8 @@
 #include "drivebase_chardev_handler.h"
 #include "drivebase_imu.h"
 #include "drivebase_rt.h"
+#include "drivebase_config.h"
+#include "drivebase_settings.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -200,15 +203,48 @@ static int daemon_task_main(int argc, char *argv[])
 {
   struct daemon_global_s *d = g_daemon;
 
+  /* CLI arguments (argv) may carry a 0 sentinel meaning "the CLI didn't
+   * supply this positional arg, fall back to config or the compiled-in
+   * default" (Issue #143).  Reset the live settings to their compiled
+   * defaults first so each `drivebase start` begins from a clean slate
+   * (without this step, keys present in the previous load but absent
+   * from the current cfg would stick at the previously-loaded value).
+   * Then load the cfg so any keys it specifies override the defaults.
+   * Finally freeze() below locks the result in before the RT thread
+   * starts, so the per-tick reader never races a writer.
+   */
+
+  db_settings_thaw();
+  db_settings_reset_to_defaults();
+  db_config_load(DB_CONFIG_DEFAULT_PATH);
+  const struct db_config_start_defaults_s *cfg = db_config_get_start_defaults();
+
+  uint32_t cli_wheel = (argc >= 2) ? (uint32_t)strtoul(argv[1], NULL, 10) : 0;
+  uint32_t cli_axle  = (argc >= 3) ? (uint32_t)strtoul(argv[2], NULL, 10) : 0;
+  uint32_t cli_tick  = (argc >= 4) ? (uint32_t)strtoul(argv[3], NULL, 10) : 0;
+
   uint32_t wheel_d_um =
-      (argc >= 2) ? (uint32_t)strtoul(argv[1], NULL, 10) : 56000;
+      cli_wheel != 0 ? cli_wheel :
+      cfg->wheel_d_um != 0 ? cfg->wheel_d_um : 56000;
   uint32_t axle_t_um  =
-      (argc >= 3) ? (uint32_t)strtoul(argv[2], NULL, 10) : 112000;
+      cli_axle  != 0 ? cli_axle :
+      cfg->axle_t_um  != 0 ? cfg->axle_t_um  : 112000;
   uint32_t tick_us    =
-      (argc >= 4) ? (uint32_t)strtoul(argv[3], NULL, 10)
-                  : DB_RT_TICK_US_DEFAULT;
+      cli_tick  != 0 ? cli_tick :
+      cfg->tick_us    != 0 ? cfg->tick_us    : DB_RT_TICK_US_DEFAULT;
   uint32_t tick_ms    = tick_us / 1000;
   if (tick_ms == 0) tick_ms = 1;
+
+  /* Surface the resolved geometry/tick so dmesg makes the cli/cfg/default
+   * merge inspectable from outside (`drivebase _alg settings` only shows
+   * its own CLI defaults, not the daemon's live geometry).
+   */
+
+  syslog(LOG_INFO,
+         "drivebase: start wheel_d=%lu um axle_t=%lu um tick=%lu us\n",
+         (unsigned long)wheel_d_um,
+         (unsigned long)axle_t_um,
+         (unsigned long)tick_us);
 
   d->wheel_d_um = wheel_d_um;
   d->axle_t_um  = axle_t_um;
@@ -238,6 +274,15 @@ static int daemon_task_main(int argc, char *argv[])
 
   int port_l = drivebase_motor_port_idx(DB_SIDE_LEFT);
   int port_r = drivebase_motor_port_idx(DB_SIDE_RIGHT);
+
+  /* Lock settings before the RT thread starts.  After this point, the
+   * RT tick (which dereferences the pointer returned by
+   * db_settings_pid_gains() on every iteration) is the only consumer,
+   * and db_settings_set_* will reject writes with -EBUSY.  This
+   * structurally prevents writer/reader races without a runtime lock.
+   */
+
+  db_settings_freeze();
 
   rc = db_chardev_handler_attach(&d->handler, &d->db, port_l, port_r,
                                  DRIVEBASE_ON_COMPLETION_COAST);

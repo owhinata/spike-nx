@@ -424,6 +424,76 @@ ki_pos=15 は SPIKE duty 直駆動 + feed-forward なし環境で静摩擦 (~12-
 
 drive_speed default は wheel_diameter から算出 (`v_max_mdegps`、`accel = v_max × 4 / 1` = 1/4 sec で max speed)。`drivebase _alg settings` でダンプ可能。
 
+### 8.6 ランタイム設定上書き (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
+
+`drivebase start` 時に外部 W25Q256 NOR (LittleFS `/mnt/flash`) 上の text file から PID gain / completion / stall / wheel/axle/tick を読み込み、ビルド済みバイナリの default を rebuild なしで上書きできる。bench tuning iteration 短縮が目的。
+
+**形式**: properties (key=value)、`#` でコメント (行頭または value 中の `=` の右側、最初の `#` 以降を value から削除)、空行と前後 whitespace は無視。LF / CRLF 両対応、先頭 BOM 許容。行長上限 256 bytes (超過は warn して skip)。未知 key / parse error は LOG_WARNING の上で **その行だけ skip**、他 key は適用。
+
+**精度ガード**:
+- ファイル無し (`ENOENT`) → silent fallback (dmesg 無し)
+- mount 失敗 / 他 IO エラー → `LOG_WARNING`
+- 1 key 以上適用 → `LOG_INFO`: `drivebase: loaded N config key(s) from /mnt/flash/drivebase.cfg`
+- ファイルあり + 0 key 適用 → `LOG_WARNING` (typo 検出を可視化)
+
+**Race 防止**: `db_settings_freeze()` を `db_chardev_handler_attach()` 直前で呼び、RT thread 起動後の write は `-EBUSY` で構造的に拒否。read race は発生しない。
+
+**サポート key 一覧** (規定 default を括弧内に併記):
+
+| グループ | key | 型 | 範囲 / 意味 |
+|---|---|---|---|
+| PID dist | `pid_dist_kp_pos` (50) | int32 | (0, 10000] |
+| | `pid_dist_ki_pos` (15) | int32 | [0, 10000] |
+| | `pid_dist_kd_pos` (0) | int32 | [0, 10000] |
+| | `pid_dist_kp_speed` (5) | int32 | [0, 10000] |
+| | `pid_dist_ki_speed` (0) | int32 | [0, 10000] |
+| | `pid_dist_deadband_mdeg` (3000) | int32 | [0, 100000] mdeg |
+| | `pid_dist_out_max` (10000) | int32 | (0, 10000]、out_min は対称 |
+| PID head | `pid_head_*` | 同上、`out_max` default 8000 |
+| Completion | `comp_dist_pos_tol_mdeg` (-1) | int32 | -1 で kp_pos 由来導出 (#140)、または [1000, 60000] |
+| | `comp_dist_speed_tol_mdegps` (30000) | int32 | [0, 1000000] |
+| | `comp_dist_smart_continue_mdeg` (-1) | int32 | -1 で default 6000、または [0, 60000] |
+| | `comp_dist_done_window_ms` (50) | uint32 | [0, 10000] |
+| | `comp_dist_smart_passive_hold_ms` (100) | uint32 | [0, 10000] |
+| | `comp_head_*` | 同上 |
+| Stall | `stall_speed_mdegps` (30000) | int32 | [0, 1000000] |
+| | `stall_duty_min` (6000) | int32 | [0, 10000] |
+| | `stall_window_ms` (200) | uint32 | [0, 10000] |
+| Start | `wheel_d_um` (56000) | uint32 | > 0、`drivebase start` CLI で wheel 省略時のみ採用 |
+| | `axle_t_um` (112000) | uint32 | > 0、CLI で axle 省略時のみ採用 |
+| | `tick_us` (DB_RT_TICK_US_DEFAULT) | uint32 | > 0、CLI で tick 省略時のみ採用 |
+
+**Wheel / axle / tick の precedence**: `drivebase start [wheel_mm] [axle_mm] [tick_ms]` で argc により明示判定。明示時は CLI 優先、省略時は config を採用、両方無しでコード default。
+
+**編集手段** (on-device): defconfig で `CONFIG_SYSTEM_VI=y` + `CONFIG_SYSTEM_TERMCURSES=y` 有効化済み。NSH 上で:
+
+```
+nsh> vi /mnt/flash/drivebase.cfg
+```
+
+最小書き換えなら `cat` + redirect でも可:
+
+```
+nsh> echo "pid_dist_ki_pos = 12" >> /mnt/flash/drivebase.cfg
+nsh> drivebase stop
+nsh> drivebase start
+nsh> drivebase _alg settings   # 適用値の確認
+```
+
+**サンプル** (`/mnt/flash/drivebase.cfg`):
+
+```
+# Phase 5 Step B 再 sweep 用に ki を一時的に下げる
+pid_dist_ki_pos = 10
+pid_head_ki_pos = 10
+
+# 物理車両が SPIKE デフォルトと違う場合
+wheel_d_um = 62000
+axle_t_um = 145000
+```
+
+**完全テンプレート**: 全 30 key + コメントを `apps/drivebase/drivebase.cfg.sample` にコミットしてある。リポジトリから zmodem 等で `/mnt/flash/` にコピーするか、内容を `vi` で貼り付ければ「全 key を明示指定」の状態から start できる。tuning 中は使う key だけ残して他を `#` でコメントアウトする運用が見通しが良い。
+
 ## 9. Linux への移植性 (FUSE)
 
 本 daemon は kernel chardev + IPC 設計のため、将来の Linux ポートで FUSE (`/dev/fuse` + libfuse) に置き換え可能:
