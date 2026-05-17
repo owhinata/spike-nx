@@ -1175,10 +1175,11 @@ static int do_alg_settings(int argc, FAR char *argv[])
   printf("stall: low_speed=%ld min_duty=%ld window=%lu ms\n",
          (long)st->stall_speed_mdegps, (long)st->stall_duty_min,
          (unsigned long)st->stall_window_ms);
-  printf("completion: pos_tol=%ld speed_tol=%ld done_window=%lu ms "
-         "smart_hold=%lu ms\n",
+  printf("completion: pos_tol=%ld speed_tol=%ld smart_continue=%ld "
+         "done_window=%lu ms smart_hold=%lu ms\n",
          (long)cm->pos_tolerance_mdeg,
          (long)cm->speed_tolerance_mdegps,
+         (long)cm->smart_continue_window_mdeg,
          (unsigned long)cm->done_window_ms,
          (unsigned long)cm->smart_passive_hold_ms);
   return 0;

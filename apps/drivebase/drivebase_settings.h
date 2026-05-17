@@ -71,6 +71,9 @@ struct db_completion_settings_s
 {
   int32_t pos_tolerance_mdeg;
   int32_t speed_tolerance_mdegps;
+  int32_t smart_continue_window_mdeg;
+                              /* SMART continue-from-endpoint window;    */
+                              /* decoupled from pos_tolerance (#140)      */
   uint32_t done_window_ms;
   uint32_t smart_passive_hold_ms;  /* COAST_SMART / BRAKE_SMART hold    */
 };

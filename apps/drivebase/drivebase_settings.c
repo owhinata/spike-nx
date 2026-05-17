@@ -6,12 +6,72 @@
  * `lib/pbio/src/control_settings.c spike_medium_*` tables and refined
  * on the bench during Issue #77 commits #6 (per-motor servo) and #7
  * (drivebase aggregation).
+ *
+ * Completion tolerance is derived from physical motor characteristics
+ * rather than a hard-coded angle (Issue #140):
+ *
+ *   pos_tolerance_mdeg = max(DB_ENCODER_FLOOR_MDEG,
+ *                            DB_COMPLETION_P_DUTY_FLOOR_PCT01 * 1000 /
+ *                            kp_pos)
+ *
+ * The duty floor expresses the smallest P-term duty considered
+ * mechanically meaningful (conservative estimate of the SPIKE Medium
+ * Motor's static-friction threshold).  Below the resulting angle the P
+ * term alone cannot push the motor, so further closed-loop correction
+ * is not productive and the move is declared complete.  The encoder
+ * floor (1 LSB of LUMP mode 2) keeps the tolerance above the
+ * observation quantum even at high kp_pos.
+ *
+ * Note that DB_COMPLETION_P_DUTY_FLOOR_PCT01 is a *separate* concept
+ * from stall_duty_min: stall_duty_min (60 %) is "duty at which stall
+ * detection becomes meaningful" and reflects 60 % of the motor's stall
+ * current, not the static-friction threshold.
  ****************************************************************************/
 
 #include <nuttx/config.h>
 
 #include "drivebase_settings.h"
 #include "drivebase_angle.h"
+
+/****************************************************************************
+ * Pre-processor Definitions — completion derivation (#140)
+ ****************************************************************************/
+
+/* "P-term duty floor" used to derive pos_tolerance.  Units are .01 %
+ * duty (matching out_min/out_max).  400 = 4 % duty is below the
+ * measured static-friction floor of the SPIKE Medium Motor (~6–8 %)
+ * and is a conservative starting point: the tolerance ends up slightly
+ * tighter than "just enough to overcome static friction", which is the
+ * right side to err on.  Re-tune on the bench from pidstat 95/99
+ * percentile pos_err.
+ */
+
+#define DB_COMPLETION_P_DUTY_FLOOR_PCT01   400
+
+/* Floor on pos_tolerance to keep it above the encoder quantum.  LUMP
+ * mode 2 reports 1° per LSB, so 1000 mdeg is the smallest difference
+ * the observer can distinguish.
+ */
+
+#define DB_ENCODER_FLOOR_MDEG             1000
+
+/* SMART continue-from-endpoint window (drivebase_servo.c uses this for
+ * "previous endpoint reusable" arbitration).  Kept at 6000 mdeg so the
+ * SMART behaviour is unchanged from the pre-#140 baseline where it was
+ * `2 * pos_tolerance_mdeg` with pos_tolerance = 3000.
+ */
+
+#define DB_SMART_CONTINUE_WINDOW_MDEG     6000
+
+/* Per-motor PID gain used both in g_servo_gains and in the completion
+ * derivation.  Hoisted to a macro so the divide-by-zero guard can be
+ * enforced at build time.
+ */
+
+#define DB_KP_POS_DEFAULT                   50
+
+_Static_assert(DB_KP_POS_DEFAULT > 0,
+               "kp_pos must be positive for tolerance derivation");
 
 /****************************************************************************
  * Per-motor servo gains
@@ -43,14 +103,15 @@
  *     direct D on position would re-introduce the high-frequency
  *     jitter the observer is filtering out.
  *
- * deadband_mdeg matches the completion pos_tolerance so the
- * integrator stops accumulating exactly where the motion is
- * declared "done".
+ * deadband_mdeg is the I-term freeze threshold and is independent
+ * from the completion pos_tolerance (#140 decoupled the two).  The
+ * historical 3000 mdeg value is retained until the bench data from
+ * Phase 1 F suggests otherwise.
  */
 
 static const struct db_servo_gains_s g_servo_gains =
 {
-  .kp_pos        = 50,
+  .kp_pos        = DB_KP_POS_DEFAULT,
   .ki_pos        = 20,
   .kd_pos        = 0,
   .kp_speed      = 5,
@@ -143,12 +204,18 @@ static const struct db_stall_settings_s g_stall =
   .stall_window_ms     =   200,
 };
 
-static const struct db_completion_settings_s g_completion =
+/* pos_tolerance_mdeg and smart_continue_window_mdeg are filled in at
+ * first query by db_settings_completion() so the values track the
+ * current servo gain.  The remaining fields are bench-tuned constants.
+ */
+
+static struct db_completion_settings_s g_completion =
 {
-  .pos_tolerance_mdeg     = 3000,  /* 3 deg                             */
-  .speed_tolerance_mdegps = 30000, /* 30 deg/s                          */
-  .done_window_ms         =    50,
-  .smart_passive_hold_ms  =   100, /* pybricks default                  */
+  .pos_tolerance_mdeg         = 0,            /* derived (#140)        */
+  .speed_tolerance_mdegps     = 30000,        /* 30 deg/s              */
+  .smart_continue_window_mdeg = 0,            /* derived (#140)        */
+  .done_window_ms             =    50,
+  .smart_passive_hold_ms      =   100,        /* pybricks default      */
 };
 
 const struct db_stall_settings_s *db_settings_stall(void)
@@ -156,7 +223,16 @@ const struct db_stall_settings_s *db_settings_stall(void)
   return &g_stall;
 }
 
+static int32_t derive_pos_tolerance_mdeg(int32_t kp_pos)
+{
+  int32_t derived = (DB_COMPLETION_P_DUTY_FLOOR_PCT01 * 1000) / kp_pos;
+  return derived > DB_ENCODER_FLOOR_MDEG ? derived : DB_ENCODER_FLOOR_MDEG;
+}
+
 const struct db_completion_settings_s *db_settings_completion(void)
 {
+  g_completion.pos_tolerance_mdeg =
+      derive_pos_tolerance_mdeg(g_servo_gains.kp_pos);
+  g_completion.smart_continue_window_mdeg = DB_SMART_CONTINUE_WINDOW_MDEG;
   return &g_completion;
 }

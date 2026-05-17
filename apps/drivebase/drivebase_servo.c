@@ -108,17 +108,20 @@ int db_servo_position_relative(struct db_servo_s *s,
                                uint8_t on_completion)
 {
   /* Decide the trajectory origin: continue-from-endpoint applies when
-   * the previous endpoint is still within `pos_tolerance × 2` of the
-   * current encoder reading.  This is the SMART continuation behaviour
-   * the plan describes — applies after any completion that was hit
-   * cleanly, regardless of on_completion (matching pybricks).
+   * the previous endpoint is still within `smart_continue_window_mdeg`
+   * of the current encoder reading.  This is the SMART continuation
+   * behaviour the plan describes — applies after any completion that
+   * was hit cleanly, regardless of on_completion (matching pybricks).
+   * The window was historically `2 * pos_tolerance` but Issue #140
+   * split them so the completion tolerance can be retuned without
+   * widening this window.
    */
 
   int64_t origin = s->x_actual_mdeg;
   if (s->prev_endpoint_valid)
     {
       int64_t err = abs64(s->prev_endpoint_mdeg - s->x_actual_mdeg);
-      if (err <= 2 * (int64_t)s->completion->pos_tolerance_mdeg)
+      if (err <= (int64_t)s->completion->smart_continue_window_mdeg)
         {
           origin = s->prev_endpoint_mdeg;
         }
