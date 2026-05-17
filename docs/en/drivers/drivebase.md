@@ -373,7 +373,7 @@ Sliding-window slope estimator (better SNR than per-sample IIR):
 
 ### 8.2 Trajectory (`drivebase_trajectory.c`)
 
-Trapezoidal profile (accel / cruise / decel).  Short moves degenerate to a triangular fallback (cruise=0) with `v_peak` recomputed via integer sqrt.
+Trapezoidal profile (accel / cruise / decel).  Short moves degenerate to a triangular fallback (cruise=0) with `v_peak` recomputed via integer sqrt.  `triangle_peak()` factorises `k = 2·a·d/(a+d)` before multiplying by `d_total` to keep the intermediate product inside `uint64` at realistic upper bounds (Issue [#144](https://github.com/owhinata/spike-nx/issues/144) Step 0).
 
 `db_trajectory_init_position(t0, x0, x1, v_peak, accel, decel)` plans the move; `db_trajectory_get_reference(tr, t)` returns `(x_mdeg, v_mdegps, a_mdegps2, done)`.
 

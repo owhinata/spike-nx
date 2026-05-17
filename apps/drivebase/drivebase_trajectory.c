@@ -75,19 +75,46 @@ static inline uint64_t dt_to_reach_v(int32_t v_mdegps, int32_t a_mdegps2)
 /* Triangular-profile peak speed when ramp_dist_total > available
  * distance.  Solves v² = 2 * d_total * (a*d) / (a+d) by integer math.
  * Returns the magnitude of the peak speed in mdeg/s.
+ *
+ * Overflow note (Issue #144 Step 0): the naive `2 * d_total * a * d`
+ * factor reaches ~1.7e22 at realistic upper bounds (d_total ~2.6e8 mdeg
+ * for a 10 m straight, a=d ~5.76e6 mdeg/s² with default 4× ramp), which
+ * exceeds UINT64_MAX (~1.8e19).  We compute the smaller factor
+ * `k = 2*a*d/(a+d)` first, then `v² = d_total * k`.  The triangular
+ * branch invariant in db_trajectory_init_position guarantees
+ *   d_total <= v_max² / k     (i.e. v² <= v_max²)
+ * so d_total*k fits in int64 (≤ INT32_MAX² ≈ 4.6e18).  k_num itself
+ * (2*a*d) is bounded by 2*INT32_MAX² (≈ 9.2e18), which fits uint64.
+ * A defensive runtime guard catches caller invariant violations.
  */
 
 static int32_t triangle_peak(uint64_t d_total_mdeg,
                              int32_t a, int32_t d)
 {
-  /* v² = 2 * d * a * d / (a+d).  Compute under int64 then sqrt.       */
-  uint64_t num = 2u * d_total_mdeg * (uint64_t)a * (uint64_t)d;
+  if (a <= 0 || d <= 0)
+    {
+      return 0;
+    }
   uint64_t den = (uint64_t)a + (uint64_t)d;
   if (den == 0)
     {
       return 0;
     }
-  uint64_t v2 = num / den;
+  uint64_t k_num = 2ULL * (uint64_t)a * (uint64_t)d;
+  uint64_t k     = k_num / den;
+  if (k == 0)
+    {
+      return 0;
+    }
+  if (d_total_mdeg > UINT64_MAX / k)
+    {
+      /* Defensive: caller violated the triangular-branch invariant.
+       * Returning the int32 ceiling lets callers recover (saturates).
+       */
+
+      return INT32_MAX;
+    }
+  uint64_t v2 = d_total_mdeg * k;
 
   /* Integer sqrt (Newton-Raphson, monotonic).  v fits in 32-bit since
    * v² < 2^32 for any realistic SPIKE drive.

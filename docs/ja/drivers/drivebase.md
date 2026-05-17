@@ -373,7 +373,7 @@ sliding-window slope estimator (per-sample IIR LP より高 SNR):
 
 ### 8.2 軌道 (`drivebase_trajectory.c`)
 
-台形プロファイル (accel / cruise / decel)。短い move では triangular fallback (cruise=0) で v_peak を再計算 (整数 sqrt 使用)。
+台形プロファイル (accel / cruise / decel)。短い move では triangular fallback (cruise=0) で v_peak を再計算 (整数 sqrt 使用)。`triangle_peak()` は `k = 2·a·d/(a+d)` を先に圧縮してから `v² = d_total · k` を計算する形で uint64 overflow を回避している (Issue [#144](https://github.com/owhinata/spike-nx/issues/144) Step 0)。
 
 `db_trajectory_init_position(t0, x0, x1, v_peak, accel, decel)` で plan、`db_trajectory_get_reference(tr, t)` で `(x_mdeg, v_mdegps, a_mdegps2, done)` を引く。
 
