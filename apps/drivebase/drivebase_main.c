@@ -901,13 +901,12 @@ static int do_drive_subcmd(int argc, FAR char *argv[])
 }
 
 /****************************************************************************
- * Private Functions: hidden _servo test verb (Issue #77 development only)
+ * Private Functions: now_us helper (used by remaining test verbs)
  *
- * Run a single side's closed loop standalone for a few seconds while
- * the daemon FSM (commit #11) is being built up.  Each invocation
- * does init+loop+deinit in one task; the loop drives the servo's
- * 5 ms tick from a clock_nanosleep absolute-deadline ladder so we
- * can observe steady-state behaviour without the full daemon yet.
+ * The `_servo` dev verb that used to live here was deleted in #141
+ * (Phase 2 removed per-motor closed loop).  Single-motor smoke tests
+ * are now done via `_drive` (whole drivebase) or by reading encoder
+ * via `_motor read` directly.
  ****************************************************************************/
 
 static uint64_t now_us(void)
@@ -917,6 +916,11 @@ static uint64_t now_us(void)
   return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
 
+#if 0  /* _servo verb removed in #141 — kept here as a code island for
+        * reference until the next cleanup pass.  Calls into the
+        * pre-#141 db_servo_position_relative / db_servo_forever /
+        * db_servo_stop APIs which no longer exist.
+        */
 static int do_servo_run(enum db_side_e side, const char *target_kind,
                         int32_t target, uint32_t duration_ms,
                         uint8_t on_completion)
@@ -1083,6 +1087,7 @@ static int do_servo_subcmd(int argc, FAR char *argv[])
 
   return do_servo_run(side, argv[0], value, duration, on_completion);
 }
+#endif /* _servo verb removed in #141 */
 
 /****************************************************************************
  * Private Functions: hidden _alg test verbs (Issue #77 development only)
@@ -1154,18 +1159,29 @@ static int do_alg_settings(int argc, FAR char *argv[])
   uint32_t wheel_d_um = (uint32_t)(wheel_mm * 1000.0 + 0.5);
   uint32_t axle_t_um  = (uint32_t)(axle_mm  * 1000.0 + 0.5);
 
-  const struct db_servo_gains_s        *g = db_settings_servo_gains();
+  const struct db_servo_gains_s        *gd =
+      db_settings_pid_gains(DB_AXIS_DISTANCE);
+  const struct db_servo_gains_s        *gh =
+      db_settings_pid_gains(DB_AXIS_HEADING);
   const struct db_traj_limits_s        *dl = db_settings_distance_limits(wheel_d_um);
   const struct db_traj_limits_s        *hl = db_settings_heading_limits(wheel_d_um, axle_t_um);
   const struct db_stall_settings_s     *st = db_settings_stall();
-  const struct db_completion_settings_s *cm = db_settings_completion();
+  const struct db_completion_settings_s *cd =
+      db_settings_completion_axis(DB_AXIS_DISTANCE);
+  const struct db_completion_settings_s *ch =
+      db_settings_completion_axis(DB_AXIS_HEADING);
 
   printf("wheel_d=%g mm  axle_t=%g mm\n", wheel_mm, axle_mm);
-  printf("servo: kp_pos=%ld ki_pos=%ld kd_pos=%ld "
+  printf("dist gains : kp_pos=%ld ki_pos=%ld kd_pos=%ld "
          "kp_speed=%ld ki_speed=%ld deadband=%ld out=[%ld,%ld]\n",
-         (long)g->kp_pos, (long)g->ki_pos, (long)g->kd_pos,
-         (long)g->kp_speed, (long)g->ki_speed,
-         (long)g->deadband_mdeg, (long)g->out_min, (long)g->out_max);
+         (long)gd->kp_pos, (long)gd->ki_pos, (long)gd->kd_pos,
+         (long)gd->kp_speed, (long)gd->ki_speed,
+         (long)gd->deadband_mdeg, (long)gd->out_min, (long)gd->out_max);
+  printf("hdg  gains : kp_pos=%ld ki_pos=%ld kd_pos=%ld "
+         "kp_speed=%ld ki_speed=%ld deadband=%ld out=[%ld,%ld]\n",
+         (long)gh->kp_pos, (long)gh->ki_pos, (long)gh->kd_pos,
+         (long)gh->kp_speed, (long)gh->ki_speed,
+         (long)gh->deadband_mdeg, (long)gh->out_min, (long)gh->out_max);
   printf("distance limits: v=%ld accel=%ld decel=%ld mdeg/s,/s/s\n",
          (long)dl->v_max_mdegps, (long)dl->accel_mdegps2,
          (long)dl->decel_mdegps2);
@@ -1175,13 +1191,20 @@ static int do_alg_settings(int argc, FAR char *argv[])
   printf("stall: low_speed=%ld min_duty=%ld window=%lu ms\n",
          (long)st->stall_speed_mdegps, (long)st->stall_duty_min,
          (unsigned long)st->stall_window_ms);
-  printf("completion: pos_tol=%ld speed_tol=%ld smart_continue=%ld "
+  printf("dist completion: pos_tol=%ld speed_tol=%ld smart_continue=%ld "
          "done_window=%lu ms smart_hold=%lu ms\n",
-         (long)cm->pos_tolerance_mdeg,
-         (long)cm->speed_tolerance_mdegps,
-         (long)cm->smart_continue_window_mdeg,
-         (unsigned long)cm->done_window_ms,
-         (unsigned long)cm->smart_passive_hold_ms);
+         (long)cd->pos_tolerance_mdeg,
+         (long)cd->speed_tolerance_mdegps,
+         (long)cd->smart_continue_window_mdeg,
+         (unsigned long)cd->done_window_ms,
+         (unsigned long)cd->smart_passive_hold_ms);
+  printf("hdg  completion: pos_tol=%ld speed_tol=%ld smart_continue=%ld "
+         "done_window=%lu ms smart_hold=%lu ms\n",
+         (long)ch->pos_tolerance_mdeg,
+         (long)ch->speed_tolerance_mdegps,
+         (long)ch->smart_continue_window_mdeg,
+         (unsigned long)ch->done_window_ms,
+         (unsigned long)ch->smart_passive_hold_ms);
   return 0;
 }
 
@@ -1333,10 +1356,10 @@ int main(int argc, FAR char *argv[])
       return do_alg_subcmd(argc - 2, &argv[2]);
     }
 
-  if (strcmp(verb, "_servo") == 0)
-    {
-      return do_servo_subcmd(argc - 2, &argv[2]);
-    }
+  /* `_servo` dev verb removed in #141 — per-motor closed loop no
+   * longer exists.  Use `_drive` or the production daemon verbs for
+   * end-to-end testing.
+   */
 
   if (strcmp(verb, "_drive") == 0)
     {

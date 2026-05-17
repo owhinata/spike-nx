@@ -1,22 +1,28 @@
 /****************************************************************************
  * apps/drivebase/drivebase_drivebase.c
  *
- * Two-motor drivebase aggregator.  See drivebase_drivebase.h for the
- * geometry conventions and the per-commit scope notes.
+ * Two-motor drivebase aggregator.  Phase 2 (#141) refactored this from
+ * a per-side trajectory dispatcher into a 2-loop aggregate PID:
  *
- * Sign convention (matches pybricks):
- *   - Positive distance      = robot moves "forward" (the direction
- *                              wheel labels imply when both motors
- *                              receive positive duty).  The sign
- *                              convention requires the L motor to be
- *                              wired so positive duty produces forward
- *                              motion as well; if wiring is reversed,
- *                              the user can negate distance externally
- *                              or we'll add a per-motor invert flag in
- *                              commit #11.
- *   - Positive heading angle = counter-clockwise rotation viewed from
- *                              above (right wheel forward, left wheel
- *                              back), pybricks convention.
+ *   1. Drain each per-motor encoder + update its observer.
+ *   2. Build state_distance = (sL.x + sR.x) / 2 and state_heading =
+ *      (sR.x - sL.x) / 2 (motor-mdeg space; positive heading = R
+ *      ahead = CCW per spike-nx public convention).
+ *   3. Run control_distance and control_heading independently — each
+ *      has its own trajectory + PID + completion state.
+ *   4. Compose per-side duty:
+ *         left_duty  = clamp(duty_distance - duty_heading, ±10000)
+ *         right_duty = clamp(duty_distance + duty_heading, ±10000)
+ *   5. Apply COAST/BRAKE propagation (pybricks-style: if EITHER axis
+ *      decides COAST or BRAKE, stop both).
+ *   6. Refresh cached aggregate state (distance_mm, angle_mdeg, etc.)
+ *      for the chardev get_state surface.
+ *
+ * User commands route to one "primary" axis (DRIVE_STRAIGHT=distance,
+ * TURN=heading, DRIVE_CURVE/ARC=both) and HOLD the other in place via
+ * a zero-length trajectory.  on_completion is honoured per-primary
+ * only; the auxiliary axis runs with on_completion=HOLD so its done
+ * judgement does not trigger early COAST/BRAKE propagation.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -43,38 +49,14 @@
  * Private Helpers — geometry conversions
  ****************************************************************************/
 
-/* Wheel travel (mm) ↔ motor angle (mdeg).  Geometry argument in
- * micrometers (see db_drivebase_s.wheel_d_um); the angle math is
- * implemented in drivebase_angle.h with two-step int64 arithmetic so
- * the same int64 head-room covers both mm- and um-resolution wheels.
- */
+/* Wheel travel (mm) → motor angle (mdeg) for a single wheel.           */
 
 static int64_t mm_to_motor_mdeg(int32_t mm, uint32_t d_um)
 {
   return db_angle_mm_to_mdeg(mm, d_um);
 }
 
-/* heading (mdeg of robot rotation) ↔ wheel-differential travel (mm).
- *   l_diff_mm = H_rad * axle_t = (H_deg * π/180) * axle_t
- *   l_diff_mm = H_mdeg * π * axle_t_um / (1000 * 180 * 1000)
- *             = H_mdeg * 355 * axle_t_um / (113 * 180,000,000)
- *
- * Single-shot multiply would overflow (worst case
- * h_mdeg=2.1e12 * 355 * a_um=5e5 ~= 3.7e20), so absorb pi first then
- * multiply by axle_t_um — same two-step pattern as
- * db_angle_mdeg_to_mm.
- */
-
-static int32_t heading_mdeg_to_diff_mm(int32_t h_mdeg, uint32_t a_um)
-{
-  int64_t pi_h = db_angle_div_round((int64_t)h_mdeg * DB_PI_NUM, DB_PI_DEN);
-  int64_t num  = pi_h * (int64_t)a_um;
-  return (int32_t)db_angle_div_round(num, 180000000LL);
-}
-
-/* Inverse: wheel-differential mm → robot heading mdeg.
- *   h_mdeg = diff_mm * 180,000,000 / (pi * axle_t_um)
- */
+/* Heading angle (robot-mdeg) ↔ wheel-differential travel (mm).         */
 
 static int32_t diff_mm_to_heading_mdeg(int32_t diff_mm, uint32_t a_um)
 {
@@ -84,61 +66,36 @@ static int32_t diff_mm_to_heading_mdeg(int32_t diff_mm, uint32_t a_um)
   return (int32_t)db_angle_div_round(pi_diff * DB_PI_DEN, DB_PI_NUM);
 }
 
-/****************************************************************************
- * Private Helpers — per-side trajectory dispatch
- ****************************************************************************/
-
-/* Translate (Δl_avg_mm, Δl_diff_mm) into per-side motor mdeg deltas
- * and feed each side's servo.position_relative.  Speed limits passed
- * through come from db_settings_distance_limits.
+/* Convert a heading rotation in robot mdeg to a state_heading delta in
+ * motor-mdeg (state-space = (sR - sL) / 2).  Derivation:
+ *   per-wheel diff travel (mm)   = h_rad * axle_t = (h_mdeg / 1000) *
+ *                                  π/180 * axle_t_mm
+ *   per-wheel diff travel (motor mdeg)
+ *                                = (per_wheel_mm × 360 × 1000) /
+ *                                  (π × wheel_d_mm)
+ *   state_heading_delta_mdeg     = per_wheel_diff_motor_mdeg / 2 ...
+ *   but actually 2 × state_heading_delta = sR - sL = full diff, so
+ *     state_heading_delta = (sR - sL) / 2
+ *                         = h_mdeg × axle_t / wheel_d
+ *
+ * (Algebraic simplification: π and 360 cancel out cleanly.)
  */
 
-static int dispatch_position(struct db_drivebase_s *db, uint64_t now_us,
-                             int32_t dl_avg_mm, int32_t dl_diff_mm,
-                             int32_t v_avg_mmps, int32_t a_avg_mmps2,
-                             int32_t d_avg_mmps2,
-                             uint8_t on_completion)
+static int64_t heading_mdeg_to_state_mdeg(int32_t heading_mdeg,
+                                          uint32_t wheel_d_um,
+                                          uint32_t axle_t_um)
 {
-  /* L = avg - diff/2,  R = avg + diff/2 */
-
-  int32_t dL_mm = dl_avg_mm - dl_diff_mm / 2;
-  int32_t dR_mm = dl_avg_mm + dl_diff_mm / 2;
-  int64_t dL_mdeg = mm_to_motor_mdeg(dL_mm, db->wheel_d_um);
-  int64_t dR_mdeg = mm_to_motor_mdeg(dR_mm, db->wheel_d_um);
-
-  int32_t v_mdegps = db_angle_mmps_to_mdegps(v_avg_mmps,
-                                             db->wheel_d_um);
-  int32_t a_mdegps2 = db_angle_mmps_to_mdegps(a_avg_mmps2,
-                                              db->wheel_d_um);
-  int32_t d_mdegps2 = db_angle_mmps_to_mdegps(d_avg_mmps2,
-                                              db->wheel_d_um);
-
-  int rc = db_servo_position_relative(&db->servo[DB_SIDE_LEFT], now_us,
-                                      dL_mdeg, v_mdegps,
-                                      a_mdegps2, d_mdegps2,
-                                      on_completion);
-  if (rc < 0) return rc;
-  return db_servo_position_relative(&db->servo[DB_SIDE_RIGHT], now_us,
-                                    dR_mdeg, v_mdegps,
-                                    a_mdegps2, d_mdegps2,
-                                    on_completion);
+  if (wheel_d_um == 0) return 0;
+  return (int64_t)heading_mdeg * (int64_t)axle_t_um / (int64_t)wheel_d_um;
 }
 
-static int dispatch_forever(struct db_drivebase_s *db, uint64_t now_us,
-                            int32_t v_avg_mmps, int32_t v_diff_mmps,
-                            int32_t a_mmps2)
-{
-  int32_t vL_mmps = v_avg_mmps - v_diff_mmps / 2;
-  int32_t vR_mmps = v_avg_mmps + v_diff_mmps / 2;
-  int32_t vL_mdegps = db_angle_mmps_to_mdegps(vL_mmps, db->wheel_d_um);
-  int32_t vR_mdegps = db_angle_mmps_to_mdegps(vR_mmps, db->wheel_d_um);
-  int32_t a_mdegps2 = db_angle_mmps_to_mdegps(a_mmps2, db->wheel_d_um);
+/* Clamp helper for the L/R compose. */
 
-  int rc = db_servo_forever(&db->servo[DB_SIDE_LEFT], now_us,
-                            vL_mdegps, a_mdegps2);
-  if (rc < 0) return rc;
-  return db_servo_forever(&db->servo[DB_SIDE_RIGHT], now_us,
-                          vR_mdegps, a_mdegps2);
+static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
+{
+  if (v > hi) return hi;
+  if (v < lo) return lo;
+  return v;
 }
 
 /****************************************************************************
@@ -160,13 +117,18 @@ int db_drivebase_init(struct db_drivebase_s *db,
     }
 
   memset(db, 0, sizeof(*db));
-  db->wheel_d_um = wheel_d_um;
-  db->axle_t_um  = axle_t_um;
-  db->tick_ms    = tick_ms;
+  db->wheel_d_um     = wheel_d_um;
+  db->axle_t_um      = axle_t_um;
+  db->tick_ms        = tick_ms;
   db->active_command = DRIVEBASE_ACTIVE_NONE;
 
   db_servo_init(&db->servo[DB_SIDE_LEFT],  DB_SIDE_LEFT,  tick_ms);
   db_servo_init(&db->servo[DB_SIDE_RIGHT], DB_SIDE_RIGHT, tick_ms);
+
+  db_aggregate_control_init(&db->control[DB_AXIS_DISTANCE],
+                            DB_AXIS_DISTANCE, tick_ms);
+  db_aggregate_control_init(&db->control[DB_AXIS_HEADING],
+                            DB_AXIS_HEADING,  tick_ms);
   return 0;
 }
 
@@ -198,14 +160,13 @@ int db_drivebase_reset(struct db_drivebase_s *db, uint64_t now_us)
   rc = db_servo_reset(&db->servo[DB_SIDE_RIGHT], now_us);
   if (rc < 0) return rc;
 
+  /* Stop both axes passively and reset PID/trajectory state. */
+
+  db_aggregate_control_reset(&db->control[DB_AXIS_DISTANCE]);
+  db_aggregate_control_reset(&db->control[DB_AXIS_HEADING]);
+
   /* Capture the raw encoder-derived avg/heading as the new origin so
-   * the next get_state returns 0/0 (Issue #113).  The daemon's start
-   * sequence sleeps 30 ms after select_mode(2) before reaching here,
-   * which is plenty of time at LUMP's ~1 kHz publish rate for the
-   * servos to seed real act_x_mdeg values.  If a sample never made
-   * it through (rare — see db_servo_reset's EAGAIN branch), the
-   * raw values default to 0 so the origin is also 0; the worst case
-   * is the same one Issue #113 fixed: a non-zero starting offset.
+   * the next get_state returns 0/0 (Issue #113).
    */
 
   db_drivebase_raw_state(db, &db->distance_origin_mm,
@@ -218,19 +179,13 @@ int db_drivebase_reset(struct db_drivebase_s *db, uint64_t now_us)
   db->active_command   = DRIVEBASE_ACTIVE_NONE;
   db->done             = true;
   db->stalled          = false;
+  db->last_tick_us     = now_us;
   return 0;
 }
 
 void db_drivebase_set_origin(struct db_drivebase_s *db,
                              int32_t distance_mm, int32_t angle_mdeg)
 {
-  /* Re-anchor the origin so the next get_state reports
-   * (distance_mm, angle_mdeg) — i.e., raw - origin == requested.
-   * Computing origin against the *raw* encoder values (not the
-   * already-offset cache) lets the user RESET to any baseline,
-   * including non-zero, repeatedly during a session.
-   */
-
   int32_t raw_dist;
   int32_t raw_heading;
   db_drivebase_raw_state(db, &raw_dist, &raw_heading);
@@ -243,8 +198,102 @@ void db_drivebase_set_origin(struct db_drivebase_s *db,
 }
 
 /****************************************************************************
+ * Private Helpers — collect state from per-side servos
+ ****************************************************************************/
+
+struct db_agg_state_s
+{
+  int64_t  distance_x_mdeg;       /* (sL + sR) / 2  in motor mdeg       */
+  int32_t  distance_v_mdegps;     /* (vL + vR) / 2                       */
+  int64_t  heading_x_mdeg;        /* (sR - sL) / 2  in motor mdeg       */
+  int32_t  heading_v_mdegps;
+};
+
+static void collect_aggregate_state(const struct db_drivebase_s *db,
+                                    struct db_agg_state_s *out)
+{
+  struct db_servo_status_s sL, sR;
+  db_servo_get_status(&db->servo[DB_SIDE_LEFT],  &sL);
+  db_servo_get_status(&db->servo[DB_SIDE_RIGHT], &sR);
+
+  out->distance_x_mdeg   = (sL.act_x_mdeg + sR.act_x_mdeg) / 2;
+  out->distance_v_mdegps = (sL.act_v_mdegps + sR.act_v_mdegps) / 2;
+  out->heading_x_mdeg    = (sR.act_x_mdeg - sL.act_x_mdeg) / 2;
+  out->heading_v_mdegps  = (sR.act_v_mdegps - sL.act_v_mdegps) / 2;
+}
+
+/****************************************************************************
  * Public Functions — drive primitives
  ****************************************************************************/
+
+/* Common helper: configure both axes for a position-mode move.  The
+ * caller specifies the *primary* axis's delta + on_completion; the
+ * auxiliary axis is set to HOLD at its current state.  Velocity
+ * limits come from the per-axis trajectory limit tables; the primary
+ * axis can override v_max via the speed argument (#137).
+ */
+
+static int setup_position_move(struct db_drivebase_s *db,
+                               uint64_t now_us,
+                               int64_t distance_delta_mdeg,
+                               int64_t heading_delta_mdeg,
+                               int32_t v_distance_override_mdegps,
+                               int32_t v_heading_override_mdegps,
+                               enum db_axis_e primary,
+                               uint8_t on_completion)
+{
+  struct db_agg_state_s s;
+  collect_aggregate_state(db, &s);
+
+  const struct db_traj_limits_s *dl =
+      db_settings_distance_limits(db->wheel_d_um);
+  const struct db_traj_limits_s *hl =
+      db_settings_heading_limits(db->wheel_d_um, db->axle_t_um);
+
+  int32_t v_d = v_distance_override_mdegps ? v_distance_override_mdegps
+                                            : dl->v_max_mdegps;
+  int32_t v_h = v_heading_override_mdegps  ? v_heading_override_mdegps
+                                            : hl->v_max_mdegps;
+
+  uint8_t comp_d = (primary == DB_AXIS_DISTANCE) ?
+                   on_completion : DRIVEBASE_ON_COMPLETION_HOLD;
+  uint8_t comp_h = (primary == DB_AXIS_HEADING)  ?
+                   on_completion : DRIVEBASE_ON_COMPLETION_HOLD;
+
+  if (distance_delta_mdeg == 0 && primary != DB_AXIS_DISTANCE)
+    {
+      /* Pure turn (no distance change requested): HOLD distance at the
+       * current encoder-derived state, do not drive it through a
+       * zero-length trajectory (which would still latch SMART_continue
+       * etc. unnecessarily).
+       */
+
+      db_aggregate_control_drive_hold(&db->control[DB_AXIS_DISTANCE],
+                                      now_us, s.distance_x_mdeg);
+    }
+  else
+    {
+      db_aggregate_control_drive_position(
+        &db->control[DB_AXIS_DISTANCE], now_us,
+        s.distance_x_mdeg, distance_delta_mdeg,
+        v_d, dl->accel_mdegps2, dl->decel_mdegps2, comp_d);
+    }
+
+  if (heading_delta_mdeg == 0 && primary != DB_AXIS_HEADING)
+    {
+      db_aggregate_control_drive_hold(&db->control[DB_AXIS_HEADING],
+                                      now_us, s.heading_x_mdeg);
+    }
+  else
+    {
+      db_aggregate_control_drive_position(
+        &db->control[DB_AXIS_HEADING], now_us,
+        s.heading_x_mdeg, heading_delta_mdeg,
+        v_h, hl->accel_mdegps2, hl->decel_mdegps2, comp_h);
+    }
+
+  return 0;
+}
 
 int db_drivebase_drive_straight(struct db_drivebase_s *db,
                                 uint64_t now_us,
@@ -252,30 +301,20 @@ int db_drivebase_drive_straight(struct db_drivebase_s *db,
                                 int32_t speed_mmps,
                                 uint8_t on_completion)
 {
-  const struct db_traj_limits_s *dl =
-    db_settings_distance_limits(db->wheel_d_um);
+  int64_t dist_delta_mdeg = mm_to_motor_mdeg(distance_mm, db->wheel_d_um);
 
-  /* Convert the trajectory limits (in motor mdeg/s) back to wheel
-   * mm/s for dispatch_position's sake.  speed_mmps overrides v_max
-   * when non-zero (Issue #137).  Negative is treated as |speed_mmps|
-   * since v_max is a magnitude; sign of motion comes from distance_mm.
-   * accel/decel stay at the default — per-call override deferred.
-   */
-
-  int32_t v_mmps    = db_angle_mdegps_to_mmps(dl->v_max_mdegps,
-                                              db->wheel_d_um);
+  int32_t v_override = 0;
   if (speed_mmps != 0)
     {
-      v_mmps = (speed_mmps < 0) ? -speed_mmps : speed_mmps;
+      int32_t v_abs = (speed_mmps < 0) ? -speed_mmps : speed_mmps;
+      v_override = db_angle_mmps_to_mdegps(v_abs, db->wheel_d_um);
     }
-  int32_t a_mmps2   = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
-                                              db->wheel_d_um);
-  int32_t d_mmps2   = db_angle_mdegps_to_mmps(dl->decel_mdegps2,
-                                              db->wheel_d_um);
 
   db->active_command = DRIVEBASE_ACTIVE_STRAIGHT;
-  return dispatch_position(db, now_us, distance_mm, 0,
-                           v_mmps, a_mmps2, d_mmps2, on_completion);
+  return setup_position_move(db, now_us,
+                             dist_delta_mdeg, 0,
+                             v_override, 0,
+                             DB_AXIS_DISTANCE, on_completion);
 }
 
 int db_drivebase_turn(struct db_drivebase_s *db,
@@ -284,48 +323,29 @@ int db_drivebase_turn(struct db_drivebase_s *db,
                       int32_t turn_rate_dps,
                       uint8_t on_completion)
 {
-  /* l_diff = H_rad * axle_t = angle_deg * π/180 * axle_t */
+  int64_t heading_delta_mdeg =
+      heading_mdeg_to_state_mdeg(angle_deg * 1000,
+                                 db->wheel_d_um, db->axle_t_um);
 
-  int32_t dl_diff_mm = heading_mdeg_to_diff_mm(angle_deg * 1000,
-                                               db->axle_t_um);
-  const struct db_traj_limits_s *hl =
-    db_settings_heading_limits(db->wheel_d_um, db->axle_t_um);
-  /* Convert heading angular speed → wheel mm/s for dispatch.  At
-   * each motor, the speed magnitude is (v_heading * axle_t / 2 / π)
-   * but we already scaled in db_settings_heading_limits's mdeg/s of
-   * MOTOR rotation when computing the limits.  Re-derive a wheel
-   * mm/s figure for dispatch_position (since it converts mm/s →
-   * mdeg/s using wheel_d, an additional axle/wheel factor would
-   * cancel).  Easiest: just lift the same numbers as the distance
-   * limits, since at top speed both move equally fast in mm/s.
-   *
-   * turn_rate_dps overrides v_max when non-zero (Issue #137).  Convert
-   * to per-wheel mm/s magnitude:
-   *   v_diff_mmps  = turn_rate_dps · π/180 · axle_t  (R-L differential)
-   *   v_wheel_mmps = v_diff_mmps / 2                 (each wheel)
-   */
-
-  const struct db_traj_limits_s *dl =
-    db_settings_distance_limits(db->wheel_d_um);
-  int32_t v_mmps  = db_angle_mdegps_to_mmps(dl->v_max_mdegps,
-                                            db->wheel_d_um);
+  int32_t v_override = 0;
   if (turn_rate_dps != 0)
     {
-      int32_t tr_abs   = (turn_rate_dps < 0) ? -turn_rate_dps
-                                             :  turn_rate_dps;
-      int32_t v_diff_mmps = heading_mdeg_to_diff_mm(tr_abs * 1000,
-                                                    db->axle_t_um);
-      v_mmps = v_diff_mmps / 2;
+      int32_t r_abs = (turn_rate_dps < 0) ? -turn_rate_dps : turn_rate_dps;
+      /* turn_rate_dps is heading angular rate (deg/s).  Convert to
+       * state-space velocity (motor-mdeg/s) via the same axle/wheel
+       * ratio as the position delta: v_state = r_dps × axle_t / wheel_d
+       * × 1000 (the 1000 reconciles deg/s vs mdeg/s).
+       */
+
+      v_override = (int32_t)((int64_t)r_abs * 1000 *
+                              (int64_t)db->axle_t_um / db->wheel_d_um);
     }
-  int32_t a_mmps2 = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
-                                            db->wheel_d_um);
-  int32_t d_mmps2 = db_angle_mdegps_to_mmps(dl->decel_mdegps2,
-                                            db->wheel_d_um);
-  (void)hl;
 
   db->active_command = DRIVEBASE_ACTIVE_TURN;
-  return dispatch_position(db, now_us, 0, dl_diff_mm,
-                           v_mmps, a_mmps2, d_mmps2, on_completion);
+  return setup_position_move(db, now_us,
+                             0, heading_delta_mdeg,
+                             0, v_override,
+                             DB_AXIS_HEADING, on_completion);
 }
 
 int db_drivebase_drive_curve(struct db_drivebase_s *db,
@@ -335,30 +355,45 @@ int db_drivebase_drive_curve(struct db_drivebase_s *db,
                              uint8_t on_completion)
 {
   /* Curve: travel arc of `angle_deg` along a circle of `radius_mm`.
-   *   centre travel  (mm)         = R · |angle_rad|       sign = sgn(angle)
+   *   centre travel  (mm)         = R · |angle_rad|   sign = sgn(angle)
    *   heading change (deg)        = angle_deg
-   * Sign convention: positive radius makes the centre of the circle
-   * lie to the left, so positive angle moves forward and turns left
-   * (heading positive).
    */
 
-  int32_t dl_avg_mm  = (int32_t)((int64_t)radius_mm * angle_deg *
-                                  DB_PI_NUM / DB_PI_DEN / 180);
-  int32_t dl_diff_mm = heading_mdeg_to_diff_mm(angle_deg * 1000,
-                                               db->axle_t_um);
+  int32_t dl_avg_mm = (int32_t)((int64_t)radius_mm * angle_deg *
+                                 DB_PI_NUM / DB_PI_DEN / 180);
+  int64_t dist_delta_mdeg = mm_to_motor_mdeg(dl_avg_mm, db->wheel_d_um);
 
-  const struct db_traj_limits_s *dl =
-    db_settings_distance_limits(db->wheel_d_um);
-  int32_t v_mmps  = db_angle_mdegps_to_mmps(dl->v_max_mdegps,
-                                            db->wheel_d_um);
-  int32_t a_mmps2 = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
-                                            db->wheel_d_um);
-  int32_t d_mmps2 = db_angle_mdegps_to_mmps(dl->decel_mdegps2,
-                                            db->wheel_d_um);
+  int64_t heading_delta_mdeg =
+      heading_mdeg_to_state_mdeg(angle_deg * 1000,
+                                 db->wheel_d_um, db->axle_t_um);
 
   db->active_command = DRIVEBASE_ACTIVE_CURVE;
-  return dispatch_position(db, now_us, dl_avg_mm, dl_diff_mm,
-                           v_mmps, a_mmps2, d_mmps2, on_completion);
+
+  /* For curves both axes are "primary" in the sense that both move on
+   * a finite trajectory.  Apply the user's on_completion to the
+   * distance axis (the dominant travel) and use the same on the
+   * heading axis so SMART continuation works on both.
+   */
+
+  struct db_agg_state_s s;
+  collect_aggregate_state(db, &s);
+
+  const struct db_traj_limits_s *dl =
+      db_settings_distance_limits(db->wheel_d_um);
+  const struct db_traj_limits_s *hl =
+      db_settings_heading_limits(db->wheel_d_um, db->axle_t_um);
+
+  db_aggregate_control_drive_position(
+      &db->control[DB_AXIS_DISTANCE], now_us,
+      s.distance_x_mdeg, dist_delta_mdeg,
+      dl->v_max_mdegps, dl->accel_mdegps2, dl->decel_mdegps2,
+      on_completion);
+  db_aggregate_control_drive_position(
+      &db->control[DB_AXIS_HEADING], now_us,
+      s.heading_x_mdeg, heading_delta_mdeg,
+      hl->v_max_mdegps, hl->accel_mdegps2, hl->decel_mdegps2,
+      on_completion);
+  return 0;
 }
 
 int db_drivebase_drive_arc_distance(struct db_drivebase_s *db,
@@ -367,39 +402,18 @@ int db_drivebase_drive_arc_distance(struct db_drivebase_s *db,
                                     int32_t distance_mm,
                                     uint8_t on_completion)
 {
-  /* Arc by distance: travel `distance_mm` of centre-line along a
-   * circle of `radius_mm`.  Implied angle = distance / R rad.
-   * Same dispatch as drive_curve but compute differential from
-   * the implied angle.
-   */
-
   if (radius_mm == 0)
     {
       return db_drivebase_drive_straight(db, now_us, distance_mm,
-                                         0 /* default speed */,
-                                         on_completion);
+                                         0, on_completion);
     }
 
-  /* angle_mdeg = distance_mm / radius_mm * (180 * 1000 / π)         */
   int32_t angle_mdeg = (int32_t)((int64_t)distance_mm * 1000 * 180 *
                                   DB_PI_DEN /
                                   ((int64_t)radius_mm * DB_PI_NUM));
-  int32_t dl_avg_mm  = distance_mm;
-  int32_t dl_diff_mm = heading_mdeg_to_diff_mm(angle_mdeg,
-                                               db->axle_t_um);
 
-  const struct db_traj_limits_s *dl =
-    db_settings_distance_limits(db->wheel_d_um);
-  int32_t v_mmps  = db_angle_mdegps_to_mmps(dl->v_max_mdegps,
-                                            db->wheel_d_um);
-  int32_t a_mmps2 = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
-                                            db->wheel_d_um);
-  int32_t d_mmps2 = db_angle_mdegps_to_mmps(dl->decel_mdegps2,
-                                            db->wheel_d_um);
-
-  db->active_command = DRIVEBASE_ACTIVE_ARC;
-  return dispatch_position(db, now_us, dl_avg_mm, dl_diff_mm,
-                           v_mmps, a_mmps2, d_mmps2, on_completion);
+  return db_drivebase_drive_curve(db, now_us, radius_mm,
+                                  angle_mdeg / 1000, on_completion);
 }
 
 int db_drivebase_drive_forever(struct db_drivebase_s *db,
@@ -407,30 +421,77 @@ int db_drivebase_drive_forever(struct db_drivebase_s *db,
                                int32_t speed_mmps,
                                int32_t turn_rate_dps)
 {
-  /* turn_rate_dps mm-equivalent differential = (turn_rate_dps *
-   *  π/180 * axle_t) mm of L/R differential per second.
-   */
+  struct db_agg_state_s s;
+  collect_aggregate_state(db, &s);
 
-  int32_t v_diff_mmps = heading_mdeg_to_diff_mm(turn_rate_dps * 1000,
-                                                db->axle_t_um);
+  int32_t v_dist_mdegps = db_angle_mmps_to_mdegps(speed_mmps,
+                                                  db->wheel_d_um);
+  int32_t v_hdg_mdegps  = (int32_t)((int64_t)turn_rate_dps * 1000 *
+                                    (int64_t)db->axle_t_um /
+                                    db->wheel_d_um);
 
   const struct db_traj_limits_s *dl =
-    db_settings_distance_limits(db->wheel_d_um);
-  int32_t a_mmps2 = db_angle_mdegps_to_mmps(dl->accel_mdegps2,
-                                            db->wheel_d_um);
+      db_settings_distance_limits(db->wheel_d_um);
+  const struct db_traj_limits_s *hl =
+      db_settings_heading_limits(db->wheel_d_um, db->axle_t_um);
+
+  db_aggregate_control_drive_forever(&db->control[DB_AXIS_DISTANCE],
+                                     now_us,
+                                     s.distance_x_mdeg,
+                                     v_dist_mdegps,
+                                     dl->accel_mdegps2);
+  db_aggregate_control_drive_forever(&db->control[DB_AXIS_HEADING],
+                                     now_us,
+                                     s.heading_x_mdeg,
+                                     v_hdg_mdegps,
+                                     hl->accel_mdegps2);
 
   db->active_command = DRIVEBASE_ACTIVE_FOREVER;
-  return dispatch_forever(db, now_us, speed_mmps, v_diff_mmps,
-                          a_mmps2);
+  return 0;
 }
 
 int db_drivebase_stop(struct db_drivebase_s *db,
                       uint64_t now_us, uint8_t on_completion)
 {
+  struct db_agg_state_s s;
+  collect_aggregate_state(db, &s);
+
   db->active_command = DRIVEBASE_ACTIVE_STOP;
-  int rc = db_servo_stop(&db->servo[DB_SIDE_LEFT],  now_us, on_completion);
-  if (rc < 0) return rc;
-  return db_servo_stop(&db->servo[DB_SIDE_RIGHT], now_us, on_completion);
+
+  db_aggregate_control_stop(&db->control[DB_AXIS_DISTANCE], now_us,
+                            s.distance_x_mdeg, on_completion);
+  db_aggregate_control_stop(&db->control[DB_AXIS_HEADING],  now_us,
+                            s.heading_x_mdeg, on_completion);
+
+  /* Apply the immediate actuation to the motors so the user-visible
+   * effect is instantaneous; subsequent ticks confirm via the
+   * compose path (which will see latched_passive_done for COAST/BRAKE
+   * or zero-length HOLD trajectory active).
+   */
+
+  switch (on_completion)
+    {
+      case DRIVEBASE_ON_COMPLETION_COAST:
+      case DRIVEBASE_ON_COMPLETION_COAST_SMART:
+        db_servo_apply(&db->servo[DB_SIDE_LEFT],  0,
+                       DRIVEBASE_ON_COMPLETION_COAST);
+        db_servo_apply(&db->servo[DB_SIDE_RIGHT], 0,
+                       DRIVEBASE_ON_COMPLETION_COAST);
+        break;
+      case DRIVEBASE_ON_COMPLETION_BRAKE:
+      case DRIVEBASE_ON_COMPLETION_BRAKE_SMART:
+        db_servo_apply(&db->servo[DB_SIDE_LEFT],  0,
+                       DRIVEBASE_ON_COMPLETION_BRAKE);
+        db_servo_apply(&db->servo[DB_SIDE_RIGHT], 0,
+                       DRIVEBASE_ON_COMPLETION_BRAKE);
+        break;
+      default:
+        /* HOLD: don't touch motors here — the next tick will compose
+         * the zero-length HOLD trajectory output normally.
+         */
+        break;
+    }
+  return 0;
 }
 
 /****************************************************************************
@@ -439,13 +500,98 @@ int db_drivebase_stop(struct db_drivebase_s *db,
 
 int db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us)
 {
+  /* 1. Per-servo encoder + observer update. */
+
   int rc = db_servo_update(&db->servo[DB_SIDE_LEFT],  now_us);
   if (rc < 0) return rc;
   rc = db_servo_update(&db->servo[DB_SIDE_RIGHT], now_us);
   if (rc < 0) return rc;
 
-  /* Refresh aggregate state.  Travel = (l_L + l_R)/2; heading is the
-   * differential scaled by axle_t/wheel_d.
+  /* 2. Collect aggregate state from per-servo cached x/v. */
+
+  struct db_agg_state_s state;
+  collect_aggregate_state(db, &state);
+
+  /* 3. Compute dt_ms.  Like pre-#141 servo, prefer the nominal tick
+   * (Issue #120) so PID gains stay tick-proportional under jitter.
+   */
+
+  uint32_t dt_ms = db->tick_ms;
+  if (db->last_tick_us != 0 && now_us > db->last_tick_us)
+    {
+      uint32_t measured = (uint32_t)((now_us - db->last_tick_us) / 1000);
+      if (measured > 0 && measured < (db->tick_ms * 4))
+        {
+          /* keep the nominal tick — measured is just a sanity gate. */
+        }
+    }
+  db->last_tick_us = now_us;
+
+  /* 4. Run both aggregate PIDs. */
+
+  struct db_aggregate_output_s out_d;
+  struct db_aggregate_output_s out_h;
+  db_aggregate_control_update(&db->control[DB_AXIS_DISTANCE], now_us,
+                              state.distance_x_mdeg,
+                              state.distance_v_mdegps,
+                              dt_ms, &out_d);
+  db_aggregate_control_update(&db->control[DB_AXIS_HEADING],  now_us,
+                              state.heading_x_mdeg,
+                              state.heading_v_mdegps,
+                              dt_ms, &out_h);
+
+  /* 5. COAST/BRAKE propagation (pybricks-style): if EITHER axis
+   * decides COAST or BRAKE this tick, stop both axes and apply the
+   * matching passive actuation to both motors.  HOLD does not
+   * propagate (auxiliary axes always run HOLD).
+   */
+
+  uint8_t propagate = 0;
+  if (out_d.actuation == DRIVEBASE_ON_COMPLETION_COAST ||
+      out_h.actuation == DRIVEBASE_ON_COMPLETION_COAST)
+    {
+      propagate = DRIVEBASE_ON_COMPLETION_COAST;
+    }
+  else if (out_d.actuation == DRIVEBASE_ON_COMPLETION_BRAKE ||
+           out_h.actuation == DRIVEBASE_ON_COMPLETION_BRAKE)
+    {
+      propagate = DRIVEBASE_ON_COMPLETION_BRAKE;
+    }
+
+  if (propagate != 0)
+    {
+      /* Latch the non-firing axis too so it stays passive on the next
+       * tick (otherwise its HOLD trajectory would continue driving
+       * duty against the freshly-applied COAST/BRAKE).
+       */
+
+      db_aggregate_control_stop(&db->control[DB_AXIS_DISTANCE], now_us,
+                                state.distance_x_mdeg, propagate);
+      db_aggregate_control_stop(&db->control[DB_AXIS_HEADING],  now_us,
+                                state.heading_x_mdeg, propagate);
+
+      db_servo_apply(&db->servo[DB_SIDE_LEFT],  0, propagate);
+      db_servo_apply(&db->servo[DB_SIDE_RIGHT], 0, propagate);
+    }
+  else
+    {
+      /* 6. Compose per-side duty (spike-nx convention: state_heading
+       *    = (sR - sL) / 2, so heading-positive → R faster → CCW yaw).
+       */
+
+      int32_t left_duty  = clamp_i32(out_d.duty - out_h.duty,
+                                     -10000, 10000);
+      int32_t right_duty = clamp_i32(out_d.duty + out_h.duty,
+                                     -10000, 10000);
+
+      db_servo_apply(&db->servo[DB_SIDE_LEFT],  left_duty,
+                     DRIVEBASE_ON_COMPLETION_HOLD);
+      db_servo_apply(&db->servo[DB_SIDE_RIGHT], right_duty,
+                     DRIVEBASE_ON_COMPLETION_HOLD);
+    }
+
+  /* 7. Refresh cached aggregate state from the freshly-updated per-
+   *    servo positions (computed once more to capture this tick).
    */
 
   struct db_servo_status_s sL, sR;
@@ -467,13 +613,16 @@ int db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us)
   int32_t vR_mmps = db_angle_mdegps_to_mmps(sR.act_v_mdegps,
                                             db->wheel_d_um);
   db->drive_speed_mmps = (vL_mmps + vR_mmps) / 2;
-  /* Heading rate (deg/s) = (vR - vL) / axle_t * 180/π                */
   int32_t v_diff = vR_mmps - vL_mmps;
   int32_t v_diff_mdegps = diff_mm_to_heading_mdeg(v_diff,
                                                   db->axle_t_um);
   db->turn_rate_dps    = v_diff_mdegps / 1000;
 
-  db->done    = sL.done && sR.done;
+  /* Aggregate done: both axes' PIDs report done.  This naturally
+   * never fires for DRIVE_FOREVER (trajectory.done stays false).
+   */
+
+  db->done    = out_d.done && out_h.done;
   db->stalled = sL.stalled || sR.stalled;
 
   if (db->done)
@@ -490,7 +639,7 @@ void db_drivebase_get_state(const struct db_drivebase_s *db,
   out->drive_speed_mmps  = db->drive_speed_mmps;
   out->angle_mdeg        = db->angle_mdeg;
   out->turn_rate_dps     = db->turn_rate_dps;
-  out->tick_seq          = 0;     /* daemon FSM (commit #11) sets this  */
+  out->tick_seq          = 0;     /* daemon FSM sets this               */
   out->is_done           = db->done;
   out->is_stalled        = db->stalled;
   out->active_command    = db->active_command;

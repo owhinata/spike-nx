@@ -26,6 +26,7 @@ CSRCS  += drivebase_trajectory.c
 CSRCS  += drivebase_observer.c
 CSRCS  += drivebase_control.c
 CSRCS  += drivebase_servo.c
+CSRCS  += drivebase_aggregate.c
 CSRCS  += drivebase_drivebase.c
 CSRCS  += drivebase_rt.c
 CSRCS  += drivebase_chardev_handler.c

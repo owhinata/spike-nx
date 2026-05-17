@@ -24,14 +24,35 @@ extern "C"
  * Types
  ****************************************************************************/
 
-/* Per-side servo gains.  All gains are integer scaled to keep the
- * per-tick PID body branch-free / FPU-free.  Position errors are in
- * milli-deg, speeds are in deg/s, output is signed PWM duty (.01 %,
- * range -10000..10000 i.e. the LEGOSENSOR_SET_PWM ABI unit).
+/* Axis selector for aggregate distance/heading PID (#141 Phase 2).  Used
+ * by db_settings_pid_gains / db_settings_completion to fetch per-axis
+ * tunables.  Each axis runs an independent PID + trajectory inside the
+ * aggregate controller (apps/drivebase/drivebase_aggregate.c); the
+ * per-side servo no longer carries PID/trajectory state.
+ */
+
+enum db_axis_e
+{
+  DB_AXIS_DISTANCE = 0,
+  DB_AXIS_HEADING  = 1,
+  DB_AXIS_NUM      = 2,
+};
+
+/* PID gain set for one aggregate control axis.  All gains are integer
+ * scaled to keep the per-tick PID body branch-free / FPU-free.  Position
+ * errors are in milli-deg of the corresponding state space:
+ *   distance state = (sL_pos + sR_pos) / 2 (motor mdeg)
+ *   heading  state = (sR_pos - sL_pos) / 2 (motor mdeg, spike-nx
+ *                                           convention: positive = CCW)
+ * Output is signed PWM duty (.01 %, range out_min..out_max).
  *
  * `deadband_mdeg` defines the +/- band around zero error where the
  * integrator stops accumulating (Codex's anti-windup recommendation
  * derived from pybricks `integrator.c`).
+ *
+ * pybricks-style drivebase uses ki = 0 because there is no constant
+ * external force a P-only loop can't overcome (no gravity bias on a
+ * differential drivebase).  Phase 2 (#141) adopted this.
  */
 
 struct db_servo_gains_s
@@ -82,11 +103,39 @@ struct db_completion_settings_s
  * Public Function Prototypes
  ****************************************************************************/
 
+/* Per-axis PID gain.  axis ∈ {DB_AXIS_DISTANCE, DB_AXIS_HEADING}.  As of
+ * #141 (Phase 2) both axes share the same kp_pos/ki_pos/kd_pos/kp_speed/
+ * deadband, but heading uses a tighter out_max (8000 vs 10000) so the
+ * L/R duty compose (`left = D + H`, `right = D - H`) is less prone to
+ * saturating both motors at once.
+ */
+
+const struct db_servo_gains_s *db_settings_pid_gains(enum db_axis_e axis);
+
+/* Backwards-compat alias for any caller that still wants "the" servo
+ * gains.  Returns the distance-axis gains.  New code should use
+ * db_settings_pid_gains(axis) directly.
+ */
+
 const struct db_servo_gains_s        *db_settings_servo_gains(void);
 const struct db_traj_limits_s        *db_settings_distance_limits(uint32_t wheel_d_um);
 const struct db_traj_limits_s        *db_settings_heading_limits(uint32_t wheel_d_um,
                                                                  uint32_t axle_t_um);
 const struct db_stall_settings_s     *db_settings_stall(void);
+
+/* Per-axis completion settings (#141 Phase 2).  Each axis derives its
+ * `pos_tolerance_mdeg` from its own kp_pos via the helper in
+ * drivebase_settings.c.  Other fields (done_window_ms, smart_passive_
+ * hold_ms, smart_continue_window_mdeg) are shared.
+ */
+
+const struct db_completion_settings_s *
+    db_settings_completion_axis(enum db_axis_e axis);
+
+/* Backwards-compat: returns the distance-axis completion settings.  New
+ * code should use db_settings_completion_axis(axis).
+ */
+
 const struct db_completion_settings_s *db_settings_completion(void);
 
 #ifdef __cplusplus

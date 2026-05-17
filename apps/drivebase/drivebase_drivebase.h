@@ -1,11 +1,13 @@
 /****************************************************************************
  * apps/drivebase/drivebase_drivebase.h
  *
- * Two-motor drivebase aggregator (Issue #77 commit #7).  Wraps two
- * `db_servo_s` instances (DB_SIDE_LEFT and DB_SIDE_RIGHT) and exposes
- * the user-level drive primitives (drive_straight, drive_curve,
+ * Two-motor drivebase aggregator (Issue #77 commit #7; #141 Phase 2 A
+ * refactor to aggregate distance/heading PID).  Wraps two slim
+ * `db_servo_s` instances (DB_SIDE_LEFT and DB_SIDE_RIGHT) and two
+ * aggregate controllers (control_distance + control_heading) and
+ * exposes the user-level drive primitives (drive_straight, drive_curve,
  * drive_arc_*, drive_forever, turn, stop) the public chardev ABI
- * eventually serves.
+ * serves.
  *
  * Geometry (assuming a tank-style drivebase: parallel wheels, no
  * castor, no steering linkage):
@@ -14,20 +16,25 @@
  *   Robot center distance:   D      = (l_L + l_R) / 2
  *   Robot heading (radians): H_rad  = (l_R - l_L) / axle_t
  *
- * Inverse — to advance the robot by ΔD mm and ΔH deg of heading
- * (positive = counter-clockwise viewed from above):
+ *   spike-nx public convention (matches pybricks public docs):
+ *     positive heading angle = counter-clockwise viewed from above
+ *     (right wheel ahead, left wheel back).
  *
- *   Δl_avg  = ΔD                              (mm of avg wheel travel)
- *   Δl_diff = ΔH · π/180 · axle_t             (mm of L↔R differential)
- *   l_L = l_avg - l_diff/2 ;  l_R = l_avg + l_diff/2
+ *   Internal state convention (Phase 2):
+ *     state_distance = (sL.x + sR.x) / 2 in motor-mdeg
+ *     state_heading  = (sR.x - sL.x) / 2 in motor-mdeg  (positive =
+ *                                                       R ahead = CCW)
  *
- * For the present commit each drive command turns into per-side
- * trajectories that the existing `db_servo_s` PIDs track
- * independently.  L/R coupling correction (a separate distance and
- * heading PID that overrides the per-motor tracking error) is
- * deferred until commit #7 retune work — bench measurements first
- * decide whether SPIKE Medium Motor variance is large enough to need
- * it.
+ *   Per-side compose (Phase 2):
+ *     left_duty  = clamp(duty_distance - duty_heading, ±10000)
+ *     right_duty = clamp(duty_distance + duty_heading, ±10000)
+ *
+ *   (Positive heading PID output → right wheel faster than left →
+ *   robot yaws CCW, matching the publicly exposed `angle_mdeg`
+ *   semantics with no sign flip at the API boundary.  This is the
+ *   mirror of pybricks's internal `(left - right) / 2` + L=D+H/R=D-H
+ *   convention but is functionally equivalent and easier to reason
+ *   about in spike-nx context.)
  ****************************************************************************/
 
 #ifndef __APPS_DRIVEBASE_DRIVEBASE_DRIVEBASE_H
@@ -40,6 +47,7 @@
 
 #include "drivebase_internal.h"
 #include "drivebase_servo.h"
+#include "drivebase_aggregate.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -61,15 +69,27 @@ struct db_drivebase_s
   uint32_t axle_t_um;
 
   /* RT control-loop period in ms (= db_rt_s.tick_us / 1000).  The
-   * servo PID inherits this for its dt_ms fallback so gains stay
+   * aggregate PIDs inherit this for their dt_ms fallback so gains stay
    * tick-proportional.  Issue #120.
    */
 
   uint32_t tick_ms;
 
-  /* Per-side servos — owned outright by the drivebase */
+  /* Per-side servos — encoder I/O + observer + duty apply only.  The
+   * trajectory + PID live in the aggregate controllers below (#141).
+   */
 
   struct db_servo_s servo[DB_SIDE_NUM];
+
+  /* Aggregate controllers — one per axis (distance, heading).  Each
+   * owns a trajectory + PID + completion latch (#141 Phase 2 A).
+   */
+
+  struct db_aggregate_control_s control[DB_AXIS_NUM];
+
+  /* Last tick time, used for dt_ms fallback in aggregate update. */
+
+  uint64_t last_tick_us;
 
   /* Origin offset (raw encoder-derived avg / heading at the last
    * reset).  db_drivebase_update() subtracts these from the raw
@@ -81,7 +101,9 @@ struct db_drivebase_s
   int32_t  distance_origin_mm;
   int32_t  angle_origin_mdeg;
 
-  /* Cached aggregate state (rebuilt from per-servo status on demand) */
+  /* Cached aggregate state (rebuilt from per-servo + aggregate
+   * controller status each tick).
+   */
 
   int32_t  distance_mm;
   int32_t  drive_speed_mmps;
@@ -147,8 +169,9 @@ int  db_drivebase_stop(struct db_drivebase_s *db,
                        uint64_t now_us,
                        uint8_t on_completion);
 
-/* Per-tick update.  Calls each side's db_servo_update() and refreshes
- * cached aggregate state.
+/* Per-tick update.  Drains both encoders, computes state_distance/
+ * state_heading, runs the two aggregate PIDs, composes per-side duty,
+ * applies actuation, refreshes cached aggregate state.
  */
 
 int  db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us);
