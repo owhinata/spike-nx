@@ -209,7 +209,6 @@ int imu_sampler_set_enabled(bool on)
 
       g_ring_head = g_ring_tail;       /* drop any stale samples */
       g_enabled   = true;
-      syslog(LOG_INFO, "btsensor: IMU sampling on\n");
     }
   else
     {
@@ -224,7 +223,6 @@ int imu_sampler_set_enabled(bool on)
         }
 
       g_enabled = false;
-      syslog(LOG_INFO, "btsensor: IMU sampling off\n");
     }
 
   return 0;

@@ -326,9 +326,12 @@ int sensor_sampler_set_enabled(bool on)
         }
 
       g_enabled = true;
-      syslog(LOG_INFO,
-             "btsensor: SENSOR sampling on (6 class topics%s)\n",
-             first_err == 0 ? "" : ", some open failed");
+      if (first_err != 0)
+        {
+          syslog(LOG_WARNING,
+                 "btsensor: SENSOR sampling on, some class open failed "
+                 "(first_err=%d)\n", first_err);
+        }
     }
   else
     {
@@ -338,7 +341,6 @@ int sensor_sampler_set_enabled(bool on)
         }
 
       g_enabled = false;
-      syslog(LOG_INFO, "btsensor: SENSOR sampling off\n");
     }
 
   return 0;

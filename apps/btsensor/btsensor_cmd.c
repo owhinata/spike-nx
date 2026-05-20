@@ -598,7 +598,11 @@ static void cmd_mode(char *arg)
 
 static void process_line(char *line)
 {
-  syslog(LOG_INFO, "btsensor_cmd: %s\n", line);
+  /* Per-command syslog was useful while bringing up the parser but
+   * with Issue #139's live SET / GET it floods the log on every
+   * ImuViewer Connect + ComboBox change.  Errors / warnings are
+   * still surfaced via the reply path and via syslog elsewhere.
+   */
 
   char *save;
   char *cmd = strtok_r(line, " ", &save);
