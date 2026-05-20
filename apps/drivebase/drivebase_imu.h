@@ -33,10 +33,25 @@ extern "C"
  * Pre-processor Definitions
  ****************************************************************************/
 
-/* LSM6DSL default sensitivity at FS=2000 dps:  70 mdps per LSB.       */
+/* Issue #139: gyro sensitivity now derived dynamically from the
+ * per-sample fsr_gy_idx embedded in struct sensor_imu, so the
+ * historical fixed `DB_IMU_GYRO_LSB_TO_MDPS = 70` (FS=2000 dps only)
+ * is gone.  See integrate() in drivebase_imu.c for the lookup.
+ *
+ * Default bias-idle threshold is calibrated for FS=2000 dps; when the
+ * driver reports a different FSR the integrate() path rescales the
+ * cached threshold so the physical idle window stays roughly constant.
+ */
 
-#define DB_IMU_GYRO_LSB_TO_MDPS    70
 #define DB_IMU_DRAIN_BATCH         16
+#define DB_IMU_DEFAULT_FSR_GY_DPS  2000
+
+/* Sentinel for "first sample after open" — any valid driver enum
+ * value will mismatch this on the first integrate(), forcing the
+ * fresh-start path that initialises gyro_mdps_num.
+ */
+
+#define DB_IMU_FSR_GY_IDX_UNKNOWN  0xFF
 
 /****************************************************************************
  * Types
@@ -60,6 +75,20 @@ struct db_imu_s
   uint64_t bias_window_us;
   int64_t  bias_acc_lsb;
   uint32_t bias_acc_count;
+
+  /* Issue #139: dynamic gyro sensitivity tracking.  cur_fsr_gy_idx is
+   * the enum value last seen on an incoming sample; when it changes,
+   * integrate() rescales bias_z_lsb / bias_idle_threshold_lsb to
+   * preserve their physical meaning, then recalibrates the
+   * accumulator.  gyro_mdps_num = cur_fsr_gy_dps * 35 is used in the
+   * per-sample mdeg formula (lsb * num * dt_us / 1e9 → mdeg).  Both
+   * 0 means "scale unknown, skip integration" — happens before the
+   * first sample arrives.
+   */
+
+  uint8_t  cur_fsr_gy_idx;
+  uint16_t cur_fsr_gy_dps;
+  int32_t  gyro_mdps_num;
 
   /* Heading state, mdeg, signed.  Wraps at ±2^31 mdeg = ±5.96 M deg
    * which is well past any realistic continuous run.

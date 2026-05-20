@@ -144,17 +144,24 @@ NuttX port of the btstack `port/` layer.  Written against
 - `btsensor_cmd.c` — Commit D ASCII command parser.  Bytes received
   on `RFCOMM_DATA_PACKET` accumulate in a 64-byte line buffer; on
   `'\n'`, `process_line()` runs `strtok_r` dispatch and queues the
-  reply (`OK\n` / `ERR <reason>\n`) via
-  `btsensor_tx_enqueue_response()`.  Command set is `IMU ON/OFF` and
-  `SET ODR/BATCH/ACCEL_FSR/GYRO_FSR <value>` only.
+  reply (`OK\n` / `OK <idx>\n` / `ERR <reason>\n`) via
+  `btsensor_tx_enqueue_response()`.  Command set: `IMU ON/OFF`,
+  `SENSOR ON/OFF/MODE/SEND/PWM`, `SET ODR/ACCEL_FSR/GYRO_FSR <value>`,
+  and `GET ODR/ACCEL_FSR/GYRO_FSR` (added in Issue #139; returns the
+  driver enum index).
 - `imu_sampler.c` — opens `/dev/uorb/sensor_imu0` (only while sampling
   is enabled), registers the fd as a btstack data source, copies each
-  `struct sensor_imu` (paired raw int16 accel + gyro + ISR-captured
-  timestamp) into a wire-format sample slot and hands a
-  Kconfig-tunable batch to `btsensor_tx_try_enqueue_frame()`.  Commit
-  D adds `imu_sampler_set_enabled()` plus cached SET helpers
-  (`set_odr_hz` / `set_batch` / `set_accel_fsr` / `set_gyro_fsr`),
-  each rejected with `-EBUSY` while sampling is active.
+  `struct sensor_imu` (24 B: paired raw int16 accel + gyro +
+  ISR-captured timestamp + per-sample `odr_idx`/`fsr_xl_idx`/`fsr_gy_idx`)
+  into a wire-format sample slot and hands a Kconfig-tunable batch to
+  `btsensor_tx_try_enqueue_frame()`.  Commit D adds
+  `imu_sampler_set_enabled()` plus the SET helpers (`set_odr_hz` /
+  `set_accel_fsr` / `set_gyro_fsr`).  Issue #139 **removed the local
+  cache** — SET is a thin wrapper around the driver ioctl, and the new
+  `get_*_idx` accessors return the live driver state by issuing the
+  matching GET ioctl.  The `g_enabled` guard that previously returned
+  `-EBUSY` for live SET is gone; SET reaches the driver even while
+  streaming.
 
 ## NSH commands
 
@@ -276,31 +283,47 @@ reply is `OK\n` on success or `ERR <reason>\n` on failure.
 
 | Command | Action | Constraint |
 |---|---|---|
-| `IMU ON\n` | Start sampling (open the driver fd) | — |
-| `IMU OFF\n` | Stop sampling (close the driver fd → auto-deactivate) | — |
-| `SET ODR <hz>\n` | Set ODR (13/26/52/104/208/416/833/1660/3330/6660 Hz) | only while IMU OFF |
-| `SET BATCH <n>\n` | Samples per RFCOMM frame (1..80) | only while IMU OFF |
-| `SET ACCEL_FSR <g>\n` | Accel FSR (2/4/8/16) | only while IMU OFF |
-| `SET GYRO_FSR <dps>\n` | Gyro FSR (125/250/500/1000/2000) | only while IMU OFF |
+| `IMU ON\n` | Start btsensor's sampling path (open the driver fd) | — |
+| `IMU OFF\n` | Stop btsensor's sampling path (close btsensor's fd).  The driver itself keeps sampling as long as another subscriber (e.g. drivebase) holds an fd. | — |
+| `SET ODR <hz>\n` | Set ODR (13/26/52/104/208/416/833/1660/3330/6660 Hz) | live SET allowed (including while streaming); Issue #139 dropped the IMU OFF restriction |
+| `SET ACCEL_FSR <g>\n` | Accel FSR (2/4/8/16) | live SET allowed |
+| `SET GYRO_FSR <dps>\n` | Gyro FSR (125/250/500/1000/2000) | live SET allowed |
+| `GET ODR\n` | Read current ODR as **driver enum index** | reply `OK <idx>\n` |
+| `GET ACCEL_FSR\n` | Read current accel FSR as **driver enum index** | reply `OK <idx>\n` |
+| `GET GYRO_FSR\n` | Read current gyro FSR as **driver enum index** | reply `OK <idx>\n` |
 
 Reply patterns:
-- success: `OK\n`
-- SET while IMU on: `ERR busy\n`
+- SET success: `OK\n`
+- GET success: `OK <idx>\n` (idx is the enum value)
+- ioctl failed: `ERR errno=<n>\n`
 - bad value / token: `ERR invalid <token>\n`
 - line longer than 64 B: `ERR overflow\n`
 - unknown command: `ERR unknown <cmd>\n`
 
-Implementation notes:
-- Driver fd is closed while IMU is OFF, so SET helpers open a
-  **transient O_WRONLY fd** for the ioctl.  `O_WRONLY` skips the
-  sensor upper-half's auto-activate (which only fires on `O_RDOK`),
-  so the driver's `if (active) -EBUSY` check stays satisfied.
-- Configured values live in `imu_sampler.c` cache variables
-  (`g_odr_hz` / `g_accel_fsr_g` / `g_gyro_fsr_dps` / `g_batch`).  On
-  ioctl failure the cache is **rolled back to the previous value**.
-- The driver (`lsm6dsl_uorb.c`) holds a separate `cfg_odr` field so
-  the user-configured ODR survives activate cycles; `activate(true)`
-  applies `cfg_odr` to the chip via `set_odr()`.
+Implementation notes (Issue #139):
+- SET / GET helpers open a **transient O_WRONLY fd** for the ioctl
+  (`imu_open_ctrl_fd()`).  `O_WRONLY` skips the sensor upper-half's
+  auto-activate (which only fires on `O_RDOK`), so btsensor never
+  increments the subscriber count just to drive the chip.
+- The driver's `if (active) -EBUSY` guard was removed.  SET handlers
+  run under the same `devlock` that serialises `push_data()`, so the
+  register R-M-W cannot race the publish path; a 1-sample transient
+  remains at the idx-change boundary and is absorbed by the consumer
+  recalibration paths.
+- The historical `imu_sampler.c` cache is gone.  GET reads the live
+  driver state every call via the GET ioctls; the per-sample idx
+  fields embedded in `struct sensor_imu` use the same enum encoding
+  as the GET reply.
+- `bundle_emitter` splits a BUNDLE frame when drained samples disagree
+  on idx so each frame stays internally consistent.  BUNDLE header
+  rate/fsr fields are sourced from `samples[0]` via the
+  `g_odr_hz_table[]` / `g_fsr_xl_g_table[]` / `g_fsr_gy_dps_table[]`
+  lookups; a 0-sample tick falls back to a last-known idx cache.
+- The driver (`lsm6dsl_uorb.c`) still keeps `cfg_odr` so the
+  user-configured ODR survives activate cycles.  A SET issued while
+  active writes the chip immediately *and* updates `cfg_odr`; on HW
+  write failure `cfg_odr` is rolled back to the previous value so a
+  subsequent GET reflects the live HW state.
 
 The PC-side code lives outside this repo; an example client is
 documented in `docs/{ja,en}/development/pc-receive-spp.md` (Commit

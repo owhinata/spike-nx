@@ -13,9 +13,12 @@
  *   SENSOR ON | OFF          toggle LEGO sensor streaming (Issue B fills
  *                            in TLV publish tracking; Issue A just
  *                            records the flag)
- *   SET ODR <hz>             ODR (only while IMU OFF, must be <=833)
- *   SET ACCEL_FSR <g>        accel FSR (only while IMU OFF)
- *   SET GYRO_FSR <dps>       gyro FSR (only while IMU OFF)
+ *   SET ODR <hz>             ODR (live SET allowed; <=833)
+ *   SET ACCEL_FSR <g>        accel FSR (live SET allowed)
+ *   SET GYRO_FSR <dps>       gyro FSR (live SET allowed)
+ *   GET ODR                  reply "OK <enum_idx>" (lsm6dsl_odr_e)
+ *   GET ACCEL_FSR            reply "OK <enum_idx>" (lsm6dsl_fsr_xl_e)
+ *   GET GYRO_FSR             reply "OK <enum_idx>" (lsm6dsl_fsr_gy_e)
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -415,6 +418,57 @@ static void cmd_set(char *what, char *value_str)
   reply(buf);
 }
 
+/* Issue #139: GET ODR / ACCEL_FSR / GYRO_FSR.  Reply format
+ * `OK <idx>\n` where idx is the driver-internal enum value
+ * (lsm6dsl_odr_e / lsm6dsl_fsr_xl_e / lsm6dsl_fsr_gy_e).  The host
+ * converts via a private lookup table matched to the driver enum;
+ * this keeps the wire format compact and symmetric with the
+ * per-sample idx fields embedded in struct sensor_imu.
+ */
+
+static void cmd_get(char *what)
+{
+  if (what == NULL)
+    {
+      reply("ERR invalid GET\n");
+      return;
+    }
+
+  uint32_t idx = 0;
+  int rc;
+
+  if (strcmp(what, "ODR") == 0)
+    {
+      rc = imu_sampler_get_odr_idx(&idx);
+    }
+  else if (strcmp(what, "ACCEL_FSR") == 0)
+    {
+      rc = imu_sampler_get_accel_fsr_idx(&idx);
+    }
+  else if (strcmp(what, "GYRO_FSR") == 0)
+    {
+      rc = imu_sampler_get_gyro_fsr_idx(&idx);
+    }
+  else
+    {
+      char buf[BTSENSOR_CMD_MAX_LINE];
+      snprintf(buf, sizeof(buf), "ERR invalid %s\n", what);
+      reply(buf);
+      return;
+    }
+
+  char buf[BTSENSOR_CMD_MAX_LINE];
+  if (rc < 0)
+    {
+      snprintf(buf, sizeof(buf), "ERR errno=%d\n", -rc);
+    }
+  else
+    {
+      snprintf(buf, sizeof(buf), "OK %u\n", (unsigned)idx);
+    }
+  reply(buf);
+}
+
 #ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
 static void cmd_mode(char *arg)
 {
@@ -570,6 +624,12 @@ static void process_line(char *line)
       char *what  = strtok_r(NULL, " ", &save);
       char *value = strtok_r(NULL, " ", &save);
       cmd_set(what, value);
+      return;
+    }
+
+  if (strcmp(cmd, "GET") == 0)
+    {
+      cmd_get(strtok_r(NULL, " ", &save));
       return;
     }
 

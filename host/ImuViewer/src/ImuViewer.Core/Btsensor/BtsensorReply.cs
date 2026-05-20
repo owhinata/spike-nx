@@ -2,9 +2,10 @@ namespace ImuViewer.Core.Btsensor;
 
 public abstract record BtsensorReply
 {
-    public sealed record Ok : BtsensorReply
+    public sealed record Ok(string? Payload = null) : BtsensorReply
     {
-        public override string ToString() => "OK";
+        public override string ToString() =>
+            Payload is null ? "OK" : $"OK {Payload}";
     }
 
     public sealed record Err(string Reason) : BtsensorReply
@@ -24,6 +25,13 @@ public abstract record BtsensorReply
         if (trimmed == "OK")
         {
             return new Ok();
+        }
+        // Issue #139: "OK <payload>" form added for GET ODR/ACCEL_FSR/GYRO_FSR.
+        // The payload is left as a string so callers can int.Parse with
+        // their own range / format checks.
+        if (trimmed.StartsWith("OK ", StringComparison.Ordinal))
+        {
+            return new Ok(trimmed[3..].Trim());
         }
         if (trimmed.StartsWith("ERR ", StringComparison.Ordinal))
         {

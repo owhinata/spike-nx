@@ -60,15 +60,11 @@ static int                   g_imu_fd = -1;
 static bool                  g_initialized;
 static bool                  g_enabled;
 
-/* Cached configuration.  Mirrors the LSM6DSL driver's startup state so
- * the first PC-side `SET *` while disabled lines up with the actual
- * hardware.  Kept in sync via ioctl in imu_sampler_set_*; on ioctl
- * failure we roll back the cache.
+/* Issue #139: no local cache of ODR/FSR.  Drives state via the driver
+ * GET ioctls and per-sample idx fields in struct sensor_imu, so any
+ * client (host SET, drivebase, imu daemon) sees a single source of
+ * truth and live reconfig propagates correctly.
  */
-
-static uint32_t g_odr_hz       = 833;
-static uint32_t g_accel_fsr_g  = 8;
-static uint32_t g_gyro_fsr_dps = 2000;
 
 /* Drain ring (single producer = btstack data source callback,
  * single consumer = bundle_emitter tick callback; both run on the
@@ -213,9 +209,7 @@ int imu_sampler_set_enabled(bool on)
 
       g_ring_head = g_ring_tail;       /* drop any stale samples */
       g_enabled   = true;
-      syslog(LOG_INFO, "btsensor: IMU sampling on (%u Hz / %ug / %udps)\n",
-             (unsigned)g_odr_hz, (unsigned)g_accel_fsr_g,
-             (unsigned)g_gyro_fsr_dps);
+      syslog(LOG_INFO, "btsensor: IMU sampling on\n");
     }
   else
     {
@@ -236,19 +230,17 @@ int imu_sampler_set_enabled(bool on)
   return 0;
 }
 
+/* Issue #139: thin ioctl wrappers — no local cache.  Live SET while
+ * streaming is enabled is now allowed (the driver no longer rejects
+ * with -EBUSY; per-sample idx in struct sensor_imu lets consumers
+ * follow the change).  The 833 Hz ODR cap stays because it is a
+ * btsensor-level constraint (100 Hz tick, 8 samples / frame budget).
+ */
+
 int imu_sampler_set_odr_hz(uint32_t hz)
 {
-  if (g_enabled)
-    {
-      return -EBUSY;
-    }
-
   if (hz == 0 || hz > IMU_ODR_MAX_HZ)
     {
-      /* >833 Hz is rejected to keep the BUNDLE 100 Hz tick within its
-       * 8 samples / frame budget (Issue #88).
-       */
-
       return -EINVAL;
     }
 
@@ -258,50 +250,48 @@ int imu_sampler_set_odr_hz(uint32_t hz)
       return fd;
     }
 
-  uint32_t prev = g_odr_hz;
-  g_odr_hz = hz;
   int rc = ioctl(fd, SNIOC_SETSAMPLERATE, hz);
   close(fd);
-  if (rc < 0)
-    {
-      g_odr_hz = prev;
-      return -errno;
-    }
-
-  return 0;
+  return (rc < 0) ? -errno : 0;
 }
 
 int imu_sampler_set_accel_fsr(uint32_t g)
 {
-  if (g_enabled)
-    {
-      return -EBUSY;
-    }
-
   int fd = imu_open_ctrl_fd();
   if (fd < 0)
     {
       return fd;
     }
 
-  uint32_t prev = g_accel_fsr_g;
-  g_accel_fsr_g = g;
   int rc = ioctl(fd, LSM6DSL_IOC_SETACCELFSR, g);
   close(fd);
-  if (rc < 0)
-    {
-      g_accel_fsr_g = prev;
-      return -errno;
-    }
-
-  return 0;
+  return (rc < 0) ? -errno : 0;
 }
 
 int imu_sampler_set_gyro_fsr(uint32_t dps)
 {
-  if (g_enabled)
+  int fd = imu_open_ctrl_fd();
+  if (fd < 0)
     {
-      return -EBUSY;
+      return fd;
+    }
+
+  int rc = ioctl(fd, LSM6DSL_IOC_SETGYROFSR, dps);
+  close(fd);
+  return (rc < 0) ? -errno : 0;
+}
+
+/* Issue #139: GET helpers — open ctrl fd, ioctl, return idx as uint32_t.
+ * The idx is the driver-internal enum value (lsm6dsl_odr_e etc.);
+ * callers convert to physical units via the corresponding lookup
+ * table.  This matches the per-sample idx fields in struct sensor_imu.
+ */
+
+static int imu_sampler_get_idx(int cmd, uint32_t *out)
+{
+  if (out == NULL)
+    {
+      return -EINVAL;
     }
 
   int fd = imu_open_ctrl_fd();
@@ -310,32 +300,31 @@ int imu_sampler_set_gyro_fsr(uint32_t dps)
       return fd;
     }
 
-  uint32_t prev = g_gyro_fsr_dps;
-  g_gyro_fsr_dps = dps;
-  int rc = ioctl(fd, LSM6DSL_IOC_SETGYROFSR, dps);
+  uint32_t value = 0;
+  int rc = ioctl(fd, cmd, (unsigned long)&value);
   close(fd);
   if (rc < 0)
     {
-      g_gyro_fsr_dps = prev;
       return -errno;
     }
 
+  *out = value;
   return 0;
 }
 
-uint32_t imu_sampler_get_odr_hz(void)
+int imu_sampler_get_odr_idx(uint32_t *out)
 {
-  return g_odr_hz;
+  return imu_sampler_get_idx(SNIOC_GETSAMPLERATE, out);
 }
 
-uint32_t imu_sampler_get_accel_fsr_g(void)
+int imu_sampler_get_accel_fsr_idx(uint32_t *out)
 {
-  return g_accel_fsr_g;
+  return imu_sampler_get_idx(LSM6DSL_IOC_GETACCELFSR, out);
 }
 
-uint32_t imu_sampler_get_gyro_fsr_dps(void)
+int imu_sampler_get_gyro_fsr_idx(uint32_t *out)
 {
-  return g_gyro_fsr_dps;
+  return imu_sampler_get_idx(LSM6DSL_IOC_GETGYROFSR, out);
 }
 
 size_t imu_sampler_drain(struct sensor_imu *out, size_t max)

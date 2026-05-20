@@ -2,6 +2,8 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Threading;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ImuViewer.App.Services;
@@ -43,6 +45,44 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     private uint _previousSampleTsUs;
     private bool _hasPreviousSampleTs;
 
+    // Issue #139: BundleReceived runs on the reader thread (not the UI
+    // thread).  Latch the three header fields (ODR, accel-FSR, gyro-FSR)
+    // as one immutable record reference so a Tick that reads them sees
+    // a consistent trio — three independent volatile writes would let a
+    // racing reader observe an ODR from frame N+1 alongside an FSR
+    // still at frame N (Codex 5th review).  Volatile.Write/Read on the
+    // single reference is atomic per the .NET memory model.
+    //
+    // _liveSnapshot is null until the first BUNDLE arrives; Connect's
+    // GET path sets the bound properties before streaming starts, so
+    // the UI shows a valid value while we wait.
+    private sealed record ImuLiveSnapshot(uint OdrHz, byte AccelFsrG,
+                                          ushort GyroFsrDps);
+    private ImuLiveSnapshot? _liveSnapshot;
+
+    // Issue #139: set by BundleReceived, cleared by Tick().  We only
+    // push the latched values onto the ObservableProperties when a
+    // fresh BUNDLE has arrived since the last UI tick; without this
+    // flag the stale snapshot would clobber any user edit made while
+    // IMU streaming is OFF (no BUNDLE frames flowing → snapshot stays
+    // pinned to the last good value and Tick would overwrite the
+    // user's ComboBox selection on every 16 ms wakeup).
+    //
+    // Set after _liveSnapshot is published (release ordering) and read
+    // before _liveSnapshot is consumed (acquire ordering) so a Tick
+    // that sees _liveDirty=true is guaranteed to see the matching
+    // snapshot.
+    private volatile bool _liveDirty;
+
+    // Set while ConnectAsync / ImuOnAsync push GET-derived values into
+    // the [ObservableProperty]s so the OnXxxChanged partials skip the
+    // round-trip SET that would otherwise fire on the same value the
+    // firmware just told us about.
+    private bool _suppressConfigSet;
+
+    private readonly object _setLock = new();
+    private CancellationTokenSource _setCts = new();
+
     public MainViewModel(
         IBluetoothPortEnumerator portEnumerator,
         SessionOrchestrator orchestrator,
@@ -57,7 +97,20 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _legoAggregator = legoAggregator;
         _filter = filter;
         _biasTracker = biasTracker;
-        _orchestrator.BundleReceived += _ => _fps.Mark();
+        _orchestrator.BundleReceived += frame =>
+        {
+            _fps.Mark();
+            // Issue #139: publish the snapshot reference atomically,
+            // then raise _liveDirty.  Tick consumes dirty first, then
+            // reads the snapshot — so a true reading of _liveDirty
+            // guarantees the matching snapshot is already visible
+            // (release/acquire ordering via volatile bool + Volatile.*).
+            Volatile.Write(ref _liveSnapshot, new ImuLiveSnapshot(
+                frame.Header.ImuSampleRateHz,
+                frame.Header.ImuAccelFsrG,
+                frame.Header.ImuGyroFsrDps));
+            _liveDirty = true;
+        };
 
         // Pre-populate the six sensor panels in fixed enum order so the
         // UI is stable across attach/detach.  Panels are read-only —
@@ -123,11 +176,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     [NotifyPropertyChangedFor(nameof(CanDisconnect))]
     [NotifyPropertyChangedFor(nameof(CanToggleImu))]
     [NotifyPropertyChangedFor(nameof(CanToggleSensor))]
+    [NotifyPropertyChangedFor(nameof(CanEditImuConfig))]
     private bool _isConnected;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanToggleImu))]
-    [NotifyPropertyChangedFor(nameof(CanEditImuConfig))]
     private bool _isImuOn;
 
     [ObservableProperty]
@@ -212,11 +265,12 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public bool CanToggleImu => IsConnected;
 
     /// <summary>True when the IMU configuration inputs (ODR, FSRs) are
-    /// editable. The Hub firmware only accepts SET ODR/ACCEL_FSR/GYRO_FSR
-    /// while IMU is OFF, so the inputs are locked exactly while IMU is streaming.
-    /// Edits made while connected and IMU OFF are pushed to the Hub by
-    /// <see cref="ImuOnAsync"/> just before starting the stream.</summary>
-    public bool CanEditImuConfig => !IsImuOn;
+    /// editable. Issue #139: the firmware now accepts SET while the IMU
+    /// is active, so the inputs are unlocked any time we are connected.
+    /// The partial <c>OnXxxChanged</c> handlers push edits straight to
+    /// the driver, and the BUNDLE header round-trips the result back to
+    /// the same property the next tick.</summary>
+    public bool CanEditImuConfig => IsConnected;
 
     /// <summary>
     /// Workaround for Avalonia binding paths not resolving fields on
@@ -317,6 +371,42 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(CalibrationStatusText));
         Orientation = _filter.Orientation;
         MeasuredFps = _fps.Compute();
+
+        // Issue #139: only push the latched config onto the bound
+        // properties when a fresh BUNDLE arrived since the last tick.
+        // Without the _liveDirty gate, the stored snapshot would
+        // overwrite the user's ComboBox change while IMU streaming is
+        // OFF (no BUNDLE flowing) — the user picks 833 Hz, the next
+        // 16 ms tick clobbers it with the stale 416 from before, and
+        // the subsequent IMU ON re-sends the old value.
+        if (_liveDirty)
+        {
+            _liveDirty = false;
+            ImuLiveSnapshot? snap = Volatile.Read(ref _liveSnapshot);
+            if (snap is not null)
+            {
+                _suppressConfigSet = true;
+                try
+                {
+                    if (snap.OdrHz != 0 && OdrHz != (int)snap.OdrHz)
+                    {
+                        OdrHz = (int)snap.OdrHz;
+                    }
+                    if (snap.AccelFsrG != 0 && AccelFsrG != snap.AccelFsrG)
+                    {
+                        AccelFsrG = snap.AccelFsrG;
+                    }
+                    if (snap.GyroFsrDps != 0 && GyroFsrDps != snap.GyroFsrDps)
+                    {
+                        GyroFsrDps = snap.GyroFsrDps;
+                    }
+                }
+                finally
+                {
+                    _suppressConfigSet = false;
+                }
+            }
+        }
     }
 
     private float ComputeDt(uint sampleTsUs)
@@ -383,12 +473,38 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         try
         {
             ResetSampleClock();
+            // Issue #139: clear any leftover live latch from a previous
+            // session before the new Connect's GET path writes the bound
+            // properties.  Without this a half-completed previous
+            // Disconnect could leave _liveDirty=true, immediately
+            // overwriting our just-fetched values on the next tick.
+            _liveDirty = false;
+            Volatile.Write(ref _liveSnapshot, null);
             StatusText = $"connecting {SelectedPort.BdAddr}...";
             await _orchestrator.ConnectAsync(SelectedPort.BdAddr, channel: 1, ct);
             await EnsureReplyAsync(_orchestrator.ImuOffAsync(ct), "IMU OFF");
-            await EnsureReplyAsync(_orchestrator.SetOdrAsync(OdrHz, ct), $"SET ODR {OdrHz}");
-            await EnsureReplyAsync(_orchestrator.SetAccelFsrAsync(AccelFsrG, ct), $"SET ACCEL_FSR {AccelFsrG}");
-            await EnsureReplyAsync(_orchestrator.SetGyroFsrAsync(GyroFsrDps, ct), $"SET GYRO_FSR {GyroFsrDps}");
+
+            // Issue #139: read the firmware's current config instead of
+            // pushing our defaults.  GET returns the driver-internal
+            // enum idx; ImuConfigTables maps it to the physical value
+            // that backs the ComboBox / UI.  The _suppressConfigSet
+            // guard stops the property setter from re-issuing the SET
+            // we would otherwise round-trip.
+            int odrIdx = await GetIdxAsync(_orchestrator.GetOdrAsync(ct), "GET ODR");
+            int xlIdx  = await GetIdxAsync(_orchestrator.GetAccelFsrAsync(ct), "GET ACCEL_FSR");
+            int gyIdx  = await GetIdxAsync(_orchestrator.GetGyroFsrAsync(ct), "GET GYRO_FSR");
+            _suppressConfigSet = true;
+            try
+            {
+                OdrHz      = ImuConfigTables.OdrHz(odrIdx);
+                AccelFsrG  = ImuConfigTables.AccelFsrG(xlIdx);
+                GyroFsrDps = ImuConfigTables.GyroFsrDps(gyIdx);
+            }
+            finally
+            {
+                _suppressConfigSet = false;
+            }
+
             IsConnected = true;
             IsImuOn = false;
             IsSensorOn = false;
@@ -414,6 +530,11 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _fps.Reset();
         _biasTracker.Detector.Reset();
         ResetSampleClock();
+        // Issue #139: drop the per-session BUNDLE config latch so the
+        // next Connect's GET-derived values are not overwritten by a
+        // stale dirty flag from the previous session (Codex 5th review).
+        _liveDirty = false;
+        Volatile.Write(ref _liveSnapshot, null);
         StatusText = "disconnected";
     }
 
@@ -533,6 +654,80 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         {
             throw new InvalidOperationException($"{desc} -> {r}");
         }
+    }
+
+    // Issue #139: GET reply parser.  Firmware returns "OK <idx>" where
+    // idx is a small uint; reject anything else so a transport glitch
+    // does not silently stash garbage in the UI properties.
+    private static async Task<int> GetIdxAsync(Task<BtsensorReply> task, string desc)
+    {
+        BtsensorReply r = await task;
+        if (r is BtsensorReply.Ok ok && ok.Payload is { } payload
+            && int.TryParse(payload, NumberStyles.Integer,
+                            CultureInfo.InvariantCulture, out int value)
+            && value >= 0)
+        {
+            return value;
+        }
+
+        throw new InvalidOperationException($"{desc} -> {r}");
+    }
+
+    // Issue #139: live SET wiring.  When the user picks a new value in
+    // a ComboBox the ObservableProperty setter fires the corresponding
+    // partial, which forwards the change to the firmware.  Suppress is
+    // toggled while ConnectAsync / Tick() write the GET-derived or
+    // BUNDLE-derived value back into the same property so the SET does
+    // not loop back to the Hub.
+    partial void OnOdrHzChanged(int value)
+    {
+        if (_suppressConfigSet || !IsConnected) return;
+        FireConfigSet(_orchestrator.SetOdrAsync(value, _setCts.Token),
+                      $"SET ODR {value}");
+    }
+
+    partial void OnAccelFsrGChanged(int value)
+    {
+        if (_suppressConfigSet || !IsConnected) return;
+        FireConfigSet(_orchestrator.SetAccelFsrAsync(value, _setCts.Token),
+                      $"SET ACCEL_FSR {value}");
+    }
+
+    partial void OnGyroFsrDpsChanged(int value)
+    {
+        if (_suppressConfigSet || !IsConnected) return;
+        FireConfigSet(_orchestrator.SetGyroFsrAsync(value, _setCts.Token),
+                      $"SET GYRO_FSR {value}");
+    }
+
+    private void FireConfigSet(Task<BtsensorReply> sendTask, string desc)
+    {
+        _ = Task.Run(async () =>
+        {
+            string? message = null;
+            try
+            {
+                BtsensorReply r = await sendTask;
+                if (!r.IsOk)
+                {
+                    message = $"{desc} -> {r}";
+                }
+            }
+            catch (Exception ex)
+            {
+                message = $"{desc} failed: {ex.Message}";
+            }
+
+            if (message is not null)
+            {
+                // Issue #139: StatusText is bound to UI; route the
+                // update through the Avalonia dispatcher so we never
+                // raise PropertyChanged from the Task.Run worker
+                // thread (Codex 5th review).
+                string captured = message;
+                Dispatcher.UIThread.Post(() => StatusText = captured);
+            }
+        });
     }
 
     private static string Fmt1(float v) => v.ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture);

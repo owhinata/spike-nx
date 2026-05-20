@@ -1188,10 +1188,24 @@ static int cmd_status(void)
              bundle_emitter_is_imu_enabled() ? "on" : "off");
       printf("sensor:     %s\n",
              bundle_emitter_is_sensor_enabled() ? "on" : "off");
-      printf("config:     odr=%uHz accel_fsr=%ug gyro_fsr=%udps\n",
-             (unsigned)imu_sampler_get_odr_hz(),
-             (unsigned)imu_sampler_get_accel_fsr_g(),
-             (unsigned)imu_sampler_get_gyro_fsr_dps());
+      /* Issue #139: print idx-based driver state via the new GET ioctl
+       * wrappers.  Falls back to "?" if the ioctl fails (sensor closed
+       * unexpectedly, EFAULT, etc.) so the rest of the status line
+       * still prints.
+       */
+      uint32_t odr_idx = 0;
+      uint32_t xl_idx  = 0;
+      uint32_t gy_idx  = 0;
+      int rc_odr = imu_sampler_get_odr_idx(&odr_idx);
+      int rc_xl  = imu_sampler_get_accel_fsr_idx(&xl_idx);
+      int rc_gy  = imu_sampler_get_gyro_fsr_idx(&gy_idx);
+      printf("config:     odr_idx=");
+      if (rc_odr < 0) printf("?"); else printf("%u", (unsigned)odr_idx);
+      printf(" accel_fsr_idx=");
+      if (rc_xl < 0)  printf("?"); else printf("%u", (unsigned)xl_idx);
+      printf(" gyro_fsr_idx=");
+      if (rc_gy < 0)  printf("?"); else printf("%u", (unsigned)gy_idx);
+      printf("\n");
     }
 
   printf("rfcomm cid: %u\n", (unsigned)cid);
@@ -1313,7 +1327,14 @@ static int cmd_dump(int argc, char **argv)
       return 1;
     }
 
-  printf("# ts_us ax ay az gx gy gz (raw int16, Hub body frame)\n");
+  /* Issue #139: include the per-sample driver-internal enum indices
+   * (odr / fsr_xl / fsr_gy) so the user can tell at a glance whether
+   * a live SET took effect.  These are the same fields embedded in
+   * struct sensor_imu and consumed by drivebase / imu daemon.
+   */
+
+  printf("# ts_us ax ay az gx gy gz odr_idx fsr_xl_idx fsr_gy_idx"
+         " (raw int16, Hub body frame)\n");
 
   struct timespec t0;
   clock_gettime(CLOCK_BOOTTIME, &t0);
@@ -1346,13 +1367,31 @@ static int cmd_dump(int argc, char **argv)
           continue;
         }
 
+      /* Issue #139: also gate the inner drain on the deadline.  Each
+       * `printf` (now 10 fields per line) takes long enough on USB CDC
+       * that incoming 833 Hz samples can outpace it; without this
+       * check the inner loop would never see a 0-byte read and the
+       * dump would not terminate at duration_ms.
+       */
+
       struct sensor_imu s;
       while (read(fd, &s, sizeof(s)) == sizeof(s))
         {
-          printf("%u %d %d %d %d %d %d\n",
+          printf("%u %d %d %d %d %d %d %u %u %u\n",
                  (unsigned)s.timestamp,
-                 s.ax, s.ay, s.az, s.gx, s.gy, s.gz);
+                 s.ax, s.ay, s.az, s.gx, s.gy, s.gz,
+                 (unsigned)s.odr_idx,
+                 (unsigned)s.fsr_xl_idx,
+                 (unsigned)s.fsr_gy_idx);
           printed++;
+
+          clock_gettime(CLOCK_BOOTTIME, &now);
+          now_us = (uint64_t)now.tv_sec * 1000000ULL +
+                   (uint64_t)now.tv_nsec / 1000ULL;
+          if (now_us >= deadline_us)
+            {
+              break;
+            }
         }
     }
 

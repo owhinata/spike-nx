@@ -403,7 +403,10 @@ static int push_data(FAR struct lsm6dsl_dev_s *dev)
   sample.ay              = -raw[4];
   sample.az              = -raw[5];
   sample.temperature_raw = dev->temperature_raw;
-  sample.reserved        = 0;
+  sample.odr_idx         = (uint8_t)dev->odr;
+  sample.fsr_xl_idx      = (uint8_t)dev->fsr_xl;
+  sample.fsr_gy_idx      = (uint8_t)dev->fsr_gy;
+  memset(sample.reserved, 0, sizeof(sample.reserved));
   publish                = dev->active;
 
 unlock:
@@ -580,22 +583,37 @@ static int lsm6dsl_set_interval(FAR struct sensor_lowerhalf_s *lower,
       return err;
     }
 
-  if (dev->active)
-    {
-      err = -EBUSY;
-      goto unlock;
-    }
-
-  /* Just remember the new ODR; the chip is in OFF state while !active,
-   * and lsm6dsl_activate() will write the configured ODR to the
-   * hardware on the next SNIOC_ACTIVATE(true).
+  /* Issue #139: allow live ODR change while sampling.  cfg_odr is the
+   * user-set value (sticky across activate cycles); when active, also
+   * push the new rate into the chip so subsequent samples publish with
+   * the new odr_idx.  Per-sample idx carriage in struct sensor_imu
+   * lets consumers (drivebase, imu daemon, host) follow the change
+   * without an additional ioctl.
+   *
+   * Rollback rule: if the HW write fails, revert dev->cfg_odr and
+   * *period_us to the previous values so a subsequent GET reflects the
+   * still-live HW state rather than the user's intended-but-failed
+   * value (Codex 5th review).
    */
 
+  enum lsm6dsl_odr_e prev_odr = dev->cfg_odr;
+  uint32_t           prev_us  = *period_us;
   dev->cfg_odr = odr;
   *period_us   = g_odr_interval[odr];
-  err = OK;
+  if (dev->active)
+    {
+      err = lsm6dsl_set_odr(dev, odr);
+      if (err < 0)
+        {
+          dev->cfg_odr = prev_odr;
+          *period_us   = prev_us;
+        }
+    }
+  else
+    {
+      err = OK;
+    }
 
-unlock:
   nxmutex_unlock(&dev->devlock);
   return err;
 }
@@ -619,7 +637,35 @@ static int set_samplerate_hz(FAR struct lsm6dsl_dev_s *dev, uint32_t hz)
     default:    return -EINVAL;
     }
 
-  /* Caller (lsm6dsl_control) already enforces -EBUSY when active. */
+  /* Issue #139: store as cfg_odr always, and when active also write the
+   * chip so the change takes effect for the next sample.  Devlock (held
+   * by the caller, lsm6dsl_control) serialises this R-M-W against
+   * push_data().
+   *
+   * Rollback rule (Codex 5th review): when active, only commit cfg_odr
+   * after the HW write succeeds; on failure restore the previous value
+   * so the driver state and the chip stay in agreement (a subsequent
+   * GET / next activate uses the still-live config rather than the
+   * partial write).  Note: lsm6dsl_set_odr() writes CTRL1_XL then
+   * CTRL2_G — if CTRL1 succeeds and CTRL2 fails the chip is left in a
+   * mixed state.  We treat that as "next successful SET reconciles"
+   * and return errno to the caller.
+   */
+
+  if (dev->active)
+    {
+      enum lsm6dsl_odr_e prev = dev->cfg_odr;
+      int rc = lsm6dsl_set_odr(dev, odr);
+      if (rc < 0)
+        {
+          dev->cfg_odr = prev;     /* defensive: lsm6dsl_set_odr()
+                                    * updates dev->odr / cfg may have
+                                    * been changed indirectly */
+          return rc;
+        }
+      dev->cfg_odr = odr;
+      return OK;
+    }
 
   dev->cfg_odr = odr;
   return OK;
@@ -667,16 +713,19 @@ static int lsm6dsl_control(FAR struct sensor_lowerhalf_s *lower,
       return err;
     }
 
-  /* All control commands except WHO_AM_I are reconfiguration; reject them
-   * while sampling is active so callers must explicitly stop the sensor
-   * first (and are not racing against the publish path).
+  /* Issue #139: the historical "reject all reconfig while active" guard
+   * was overly conservative.  All SET handlers (accel_set_fsr /
+   * gyro_set_fsr / lsm6dsl_set_odr) run under devlock, which also
+   * serialises push_data(), so the register R-M-W cannot race the
+   * publish path.  Allow live SET; per-sample odr_idx / fsr_xl_idx /
+   * fsr_gy_idx in struct sensor_imu let consumers follow the change.
+   * The one transient that remains is the ~1 sample whose raw values
+   * were latched at the old register setting but get tagged with the
+   * new idx (chip-internal pipeline, not bus-level).  Drivebase and
+   * the imu daemon absorb this via their FSR-change recalibration
+   * paths; downstream BUNDLE frames are split by bundle_emitter on
+   * idx mismatch so each frame stays internally consistent.
    */
-
-  if (cmd != SNIOC_WHO_AM_I && dev->active)
-    {
-      err = -EBUSY;
-      goto unlock;
-    }
 
   switch (cmd)
     {
@@ -726,12 +775,74 @@ static int lsm6dsl_control(FAR struct sensor_lowerhalf_s *lower,
         }
       break;
 
+    /* Issue #139: GET ioctls return the driver-internal enum index
+     * (uint32_t) instead of the physical value.  This is symmetric with
+     * the per-sample idx fields in struct sensor_imu and lets consumers
+     * share a single idx -> physical lookup table.  We return cfg_odr
+     * (the user-configured value) rather than the live HW odr so the
+     * read-back matches what the user last SET, even if the chip is
+     * currently powered down.
+     */
+
+    case SNIOC_GETSAMPLERATE:
+      {
+        FAR uint32_t *p = (FAR uint32_t *)arg;
+        if (p == NULL)
+          {
+            err = -EINVAL;
+            break;
+          }
+        if (!board_user_out_ok(p, sizeof(*p)))
+          {
+            err = -EFAULT;
+            break;
+          }
+        *p = (uint32_t)dev->cfg_odr;
+        err = OK;
+      }
+      break;
+
+    case LSM6DSL_IOC_GETACCELFSR:
+      {
+        FAR uint32_t *p = (FAR uint32_t *)arg;
+        if (p == NULL)
+          {
+            err = -EINVAL;
+            break;
+          }
+        if (!board_user_out_ok(p, sizeof(*p)))
+          {
+            err = -EFAULT;
+            break;
+          }
+        *p = (uint32_t)dev->fsr_xl;
+        err = OK;
+      }
+      break;
+
+    case LSM6DSL_IOC_GETGYROFSR:
+      {
+        FAR uint32_t *p = (FAR uint32_t *)arg;
+        if (p == NULL)
+          {
+            err = -EINVAL;
+            break;
+          }
+        if (!board_user_out_ok(p, sizeof(*p)))
+          {
+            err = -EFAULT;
+            break;
+          }
+        *p = (uint32_t)dev->fsr_gy;
+        err = OK;
+      }
+      break;
+
     default:
       err = -EINVAL;
       break;
     }
 
-unlock:
   nxmutex_unlock(&dev->devlock);
   return err;
 }

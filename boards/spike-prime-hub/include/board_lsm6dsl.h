@@ -27,6 +27,7 @@
  * Included Files
  ****************************************************************************/
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <nuttx/sensors/ioctl.h>
@@ -42,12 +43,21 @@
  *
  *   LSM6DSL_IOC_SETACCELFSR  arg uint32: 2 | 4 | 8 | 16          (g)
  *   LSM6DSL_IOC_SETGYROFSR   arg uint32: 125 | 250 | 500 | 1000 | 2000 (dps)
+ *   SNIOC_GETSAMPLERATE      arg uint32 out: enum lsm6dsl_odr_e value
+ *   LSM6DSL_IOC_GETACCELFSR  arg uint32 out: enum lsm6dsl_fsr_xl_e value
+ *   LSM6DSL_IOC_GETGYROFSR   arg uint32 out: enum lsm6dsl_fsr_gy_e value
  *
- * Both ioctls return -EBUSY while the sensor is active (sampling).
+ * SET ioctls take physical values and convert to driver-internal enum
+ * indices.  GET ioctls return the enum index directly (consumers reverse
+ * it via their own lookup table); this is symmetric with the per-sample
+ * idx fields embedded in struct sensor_imu below.
  */
 
 #define LSM6DSL_IOC_SETACCELFSR  _SNIOC(0x00e0)
 #define LSM6DSL_IOC_SETGYROFSR   _SNIOC(0x00e1)
+#define SNIOC_GETSAMPLERATE      _SNIOC(0x00e2)
+#define LSM6DSL_IOC_GETACCELFSR  _SNIOC(0x00e3)
+#define LSM6DSL_IOC_GETGYROFSR   _SNIOC(0x00e4)
 
 /****************************************************************************
  * Public Types
@@ -62,20 +72,53 @@
 
 struct sensor_imu
 {
-  uint32_t timestamp;       /* Low 32 bits of CLOCK_BOOTTIME us
+  uint32_t timestamp;       /* +0  Low 32 bits of CLOCK_BOOTTIME us
                              * (mod 2^32, ~71m35s wrap).  ARMv7-M 4-byte
                              * aligned word load/store is single-copy
                              * atomic, so ISR/worker handoff is tearing-
                              * free without a critical section. */
-  int16_t  ax;              /* Accel X raw LSB, Hub body frame */
-  int16_t  ay;              /* Accel Y raw LSB, Hub body frame */
-  int16_t  az;              /* Accel Z raw LSB, Hub body frame */
-  int16_t  gx;              /* Gyro X raw LSB, Hub body frame */
-  int16_t  gy;              /* Gyro Y raw LSB, Hub body frame */
-  int16_t  gz;              /* Gyro Z raw LSB, Hub body frame */
-  int16_t  temperature_raw; /* OUT_TEMP raw, stale (refreshed every
+  int16_t  ax;              /* +4  Accel X raw LSB, Hub body frame */
+  int16_t  ay;              /* +6  Accel Y raw LSB, Hub body frame */
+  int16_t  az;              /* +8  Accel Z raw LSB, Hub body frame */
+  int16_t  gx;              /* +10 Gyro X raw LSB, Hub body frame */
+  int16_t  gy;              /* +12 Gyro Y raw LSB, Hub body frame */
+  int16_t  gz;              /* +14 Gyro Z raw LSB, Hub body frame */
+  int16_t  temperature_raw; /* +16 OUT_TEMP raw, stale (refreshed every
                              * N samples by the lower half) */
-  int16_t  reserved;        /* Padding, struct = 20B */
-};
+  uint8_t  odr_idx;         /* +18 enum lsm6dsl_odr_e value (0..0xA);
+                             * lets consumers integrate / unscale across
+                             * live ODR changes without an extra ioctl. */
+  uint8_t  fsr_xl_idx;      /* +19 enum lsm6dsl_fsr_xl_e value (0..3).
+                             * Sparse: 0=2g, 1=16g, 2=4g, 3=8g. */
+  uint8_t  fsr_gy_idx;      /* +20 enum lsm6dsl_fsr_gy_e value (0..6).
+                             * Sparse: 0=250, 1=125, 2=500, 4=1000,
+                             * 6=2000 dps (3/5/7 unused). */
+  uint8_t  reserved[3];     /* +21..+23 explicit padding to 24 B.  Array
+                             * (not single byte) so push_data() can
+                             * memset() all three bytes; a lone uint8_t
+                             * would leave +22/+23 as compiler-implicit
+                             * padding that the publish path cannot zero
+                             * via field assignment. */
+};                          /* sizeof = 24, alignment = 4 (u32 timestamp) */
+
+#if defined(__cplusplus)
+static_assert(sizeof(struct sensor_imu) == 24,
+              "sensor_imu wire ABI: total size must stay 24 B");
+static_assert(offsetof(struct sensor_imu, odr_idx) == 18,
+              "sensor_imu wire ABI: odr_idx offset");
+static_assert(offsetof(struct sensor_imu, fsr_xl_idx) == 19,
+              "sensor_imu wire ABI: fsr_xl_idx offset");
+static_assert(offsetof(struct sensor_imu, fsr_gy_idx) == 20,
+              "sensor_imu wire ABI: fsr_gy_idx offset");
+#else
+_Static_assert(sizeof(struct sensor_imu) == 24,
+               "sensor_imu wire ABI: total size must stay 24 B");
+_Static_assert(offsetof(struct sensor_imu, odr_idx) == 18,
+               "sensor_imu wire ABI: odr_idx offset");
+_Static_assert(offsetof(struct sensor_imu, fsr_xl_idx) == 19,
+               "sensor_imu wire ABI: fsr_xl_idx offset");
+_Static_assert(offsetof(struct sensor_imu, fsr_gy_idx) == 20,
+               "sensor_imu wire ABI: fsr_gy_idx offset");
+#endif
 
 #endif /* __BOARDS_SPIKE_PRIME_HUB_INCLUDE_BOARD_LSM6DSL_H */

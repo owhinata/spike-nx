@@ -84,15 +84,23 @@ ISR-captured timestamp record.
 
 ### struct sensor_imu
 
-Defined in `nuttx/include/nuttx/uorb.h`:
+Defined in `boards/spike-prime-hub/include/board_lsm6dsl.h` (24 B fixed,
+enforced by `_Static_assert` on size and offsets):
 
-| Field | Type | Description |
-|---|---|---|
-| timestamp | uint32_t | Low 32 bits of CLOCK_BOOTTIME us (~71m35s wraparound).  ARMv7-M 4-byte aligned word load/store is single-copy atomic, so ISR -> worker handoff is tearing-free. |
-| ax / ay / az | int16_t | Accel raw LSB, Hub body frame (chip frame Y/Z negated by the driver) |
-| gx / gy / gz | int16_t | Gyro raw LSB, Hub body frame (chip frame Y/Z negated by the driver) |
-| temperature_raw | int16_t | OUT_TEMP raw, refreshed every 16 samples (stale in between) |
-| reserved | int16_t | Alignment padding |
+| Offset | Field | Type | Description |
+|---|---|---|---|
+| +0 | timestamp | uint32_t | Low 32 bits of CLOCK_BOOTTIME us (~71m35s wraparound).  ARMv7-M 4-byte aligned word load/store is single-copy atomic, so ISR -> worker handoff is tearing-free. |
+| +4 | ax / ay / az | int16_t | Accel raw LSB, Hub body frame (chip frame Y/Z negated by the driver) |
+| +10 | gx / gy / gz | int16_t | Gyro raw LSB, Hub body frame (chip frame Y/Z negated by the driver) |
+| +16 | temperature_raw | int16_t | OUT_TEMP raw, refreshed every 16 samples (stale in between) |
+| +18 | odr_idx | uint8_t | `enum lsm6dsl_odr_e` value (0..0xA) — embeds the HW ODR active when this sample was captured |
+| +19 | fsr_xl_idx | uint8_t | `enum lsm6dsl_fsr_xl_e` value (sparse: 0=2g, 1=16g, 2=4g, 3=8g) |
+| +20 | fsr_gy_idx | uint8_t | `enum lsm6dsl_fsr_gy_e` value (sparse: 0=250, 1=125, 2=500, 4=1000, 6=2000 dps) |
+| +21..+23 | reserved[3] | uint8_t × 3 | Padding (zeroed by `push_data()` via `memset`) |
+
+Issue #139 added the per-sample `odr_idx` / `fsr_xl_idx` / `fsr_gy_idx`
+fields so consumers (drivebase / imu daemon / btsensor BUNDLE) can
+compute physical units correctly even when ODR or FSR changes mid-stream.
 
 ### ioctl
 
@@ -102,10 +110,22 @@ Defined in `nuttx/include/nuttx/uorb.h`:
 | `SNIOC_SETSAMPLERATE` | uint32 (Hz: 13/26/52/104/208/416/833/1660/3330/6660) | Set ODR by frequency |
 | `LSM6DSL_IOC_SETACCELFSR` | uint32 (g: 2/4/8/16) | Set accel full-scale range |
 | `LSM6DSL_IOC_SETGYROFSR` | uint32 (dps: 125/250/500/1000/2000) | Set gyro full-scale range |
+| `SNIOC_GETSAMPLERATE` | uint32* (out) | Read current ODR as the `enum lsm6dsl_odr_e` index |
+| `LSM6DSL_IOC_GETACCELFSR` | uint32* (out) | Read current accel FSR as the `enum lsm6dsl_fsr_xl_e` index |
+| `LSM6DSL_IOC_GETGYROFSR` | uint32* (out) | Read current gyro FSR as the `enum lsm6dsl_fsr_gy_e` index |
 
-Calling any of the configuration ioctls while the sensor is active
-(after `SNIOC_ACTIVATE`) returns `-EBUSY`.  Deactivate the sensor before
-reconfiguring.
+SET ioctls take physical values (Hz / g / dps) and convert them to the
+driver-internal enum index.  GET ioctls return the **enum index directly**
+— consumers carry their own `idx → physical value` lookup table, matching
+the per-sample idx fields embedded in `struct sensor_imu`.
+
+Issue #139 removed the historical `-EBUSY` guard that rejected SET while
+the sensor was active.  The SET handlers run under the same `devlock`
+that serialises `push_data()`, so the register R-M-W cannot race the
+publish path.  A transient ~1-sample window exists where the chip's
+internal pipeline returns a sample latched at the old register setting
+but tagged with the new idx; consumers (drivebase, imu daemon) absorb
+that via their on-idx-change recalibration paths.
 
 ### defconfig
 

@@ -33,42 +33,44 @@
 #define IMU_POLL_TIMEOUT  1000
 #define IMU_ODR           833
 
-/* Driver startup defaults; matches DEFAULT_FSR_XL / DEFAULT_FSR_GY in
- * boards/spike-prime-hub/src/lsm6dsl_uorb.c.  The imu app does not
- * reconfigure FSR, so these are sufficient.
- */
-
-#define IMU_ACCEL_FSR_G    8
-#define IMU_GYRO_FSR_DPS   2000
-
 #define IMU_GRAVITY_MS2    9.80665f
 
-/* Scale factors for FSR -> physical units.  Per-LSB values.
+#define IMU_FSR_IDX_UNKNOWN 0xFF
+
+/* Issue #139: physical-scale tables, indexed by the driver enum value
+ * the LSM6DSL driver embeds per-sample in struct sensor_imu.  Mirrors
+ * boards/spike-prime-hub/src/lsm6dsl_uorb.c:124-154 (sparse for the
+ * gyro / xl FSR enums — invalid idx slots return 0 and the daemon
+ * leaves the conversion factor at the previous good value, which
+ * preserves output continuity until a valid sample arrives).
  *
- *   accel_lsb_to_mms2(fsr_g):
- *     LSM6DSL accel sensitivity is fsr_g * 1000 / 32768 mg/LSB (the FSR
- *     label maps exactly to int16 full scale: e.g. ±8g -> 0.244 mg/LSB),
- *     converted to mm/s^2 with g = 9.80665.
- *
- *   gyro_lsb_to_dps(fsr_dps):
- *     LSM6DSL gyro sensitivity (datasheet Table 3) carries ~14.7%
- *     headroom over the nominal FSR, so the per-LSB value is *not*
- *     simply fsr/32768.  All five FSR rows scale linearly at 0.035
- *     mdps/LSB per nominal dps:
- *        ±125  -> 4.375 mdps/LSB
- *        ±250  -> 8.75  mdps/LSB
- *        ±500  -> 17.5  mdps/LSB
- *        ±1000 -> 35.0  mdps/LSB
- *        ±2000 -> 70.0  mdps/LSB
+ *   accel sensitivity: fsr_g * 1000 / 32768 mg/LSB -> mm/s^2 via 9.80665
+ *   gyro  sensitivity: fsr_dps * 0.035 / 1000 dps/LSB (Table 3 headroom)
  */
 
-static inline float accel_lsb_to_mms2(uint32_t fsr_g)
+static const uint8_t  g_fsr_xl_g_table[]    = {2, 16, 4, 8};
+static const uint16_t g_fsr_gy_dps_table[]  =
+    {250, 125, 500, 0, 1000, 0, 2000};
+
+static inline float accel_lsb_to_mms2_from_idx(uint8_t idx)
 {
+  if (idx >= (sizeof(g_fsr_xl_g_table) / sizeof(g_fsr_xl_g_table[0])))
+    {
+      return 0.0f;
+    }
+
+  uint8_t fsr_g = g_fsr_xl_g_table[idx];
   return ((float)fsr_g * IMU_GRAVITY_MS2 * 1000.0f) / 32768.0f;
 }
 
-static inline float gyro_lsb_to_dps(uint32_t fsr_dps)
+static inline float gyro_lsb_to_dps_from_idx(uint8_t idx)
 {
+  if (idx >= (sizeof(g_fsr_gy_dps_table) / sizeof(g_fsr_gy_dps_table[0])))
+    {
+      return 0.0f;
+    }
+
+  uint16_t fsr_dps = g_fsr_gy_dps_table[idx];
   return ((float)fsr_dps * 0.035f) / 1000.0f;
 }
 
@@ -84,9 +86,12 @@ static int g_daemon_pid = -1;
  * Private Functions
  ****************************************************************************/
 
-/* Cached scale factors so the stationary callback can convert the raw
- * gyro sum it receives back into deg/s without holding a per-call FSR.
- * Driver does not change FSR while the imu app is running.
+/* Issue #139: cached scale factors recomputed each time the per-sample
+ * fsr_xl_idx / fsr_gy_idx changes.  The stationary callback consumes
+ * raw int16 sums and needs `g_gyro_dps_per_lsb` to convert them back to
+ * dps, so it must match the scale that produced the sums in the
+ * current window.  Sample-loop callers reset the stationary state on
+ * idx change to keep the window homogeneous.
  */
 
 static float g_accel_mms2_per_lsb;
@@ -117,10 +122,14 @@ static int imu_daemon(int argc, char *argv[])
       return -1;
     }
 
-  /* Compute scale factors from the driver's startup FSR. */
+  /* Issue #139: scale factors are derived per-sample from idx fields,
+   * so leave them at 0 and let the sample loop initialise on the first
+   * frame.  The stationary thresholds also depend on the scale, so they
+   * get re-applied via imu_stationary_set_thresholds() when idx changes.
+   */
 
-  g_accel_mms2_per_lsb = accel_lsb_to_mms2(IMU_ACCEL_FSR_G);
-  g_gyro_dps_per_lsb   = gyro_lsb_to_dps(IMU_GYRO_FSR_DPS);
+  g_accel_mms2_per_lsb = 0.0f;
+  g_gyro_dps_per_lsb   = 0.0f;
 
   /* Initialize modules */
 
@@ -129,11 +138,10 @@ static int imu_daemon(int argc, char *argv[])
   imu_calibration_load(IMU_CAL_PATH);
   imu_fusion_init();
   imu_fusion_set_settings(settings);
-  imu_stationary_init(settings->gyro_stationary_threshold /
-                      g_gyro_dps_per_lsb,
-                      settings->accel_stationary_threshold /
-                      g_accel_mms2_per_lsb,
-                      IMU_ODR, stationary_callback);
+  imu_stationary_init(0.0f, 0.0f, IMU_ODR, stationary_callback);
+
+  uint8_t cur_fsr_xl_idx = IMU_FSR_IDX_UNKNOWN;
+  uint8_t cur_fsr_gy_idx = IMU_FSR_IDX_UNKNOWN;
 
   g_daemon_running = true;
   g_daemon_stop = false;
@@ -166,6 +174,45 @@ static int imu_daemon(int argc, char *argv[])
       while (read(imu_fd, &imu_data, sizeof(imu_data)) ==
              sizeof(imu_data))
         {
+          /* Issue #139: detect FSR change before any conversion or
+           * stationary-window accumulation.  Recompute scale factors
+           * and reset the stationary state so the new window starts
+           * fresh under the new sensitivity.
+           */
+
+          if (imu_data.fsr_xl_idx != cur_fsr_xl_idx
+              || imu_data.fsr_gy_idx != cur_fsr_gy_idx)
+            {
+              cur_fsr_xl_idx = imu_data.fsr_xl_idx;
+              cur_fsr_gy_idx = imu_data.fsr_gy_idx;
+
+              float new_accel = accel_lsb_to_mms2_from_idx(cur_fsr_xl_idx);
+              float new_gyro  = gyro_lsb_to_dps_from_idx(cur_fsr_gy_idx);
+
+              /* Skip update if either scale is invalid (unknown idx) so
+               * fusion does not see garbage units; physical conversion
+               * resumes once a valid sample arrives.
+               */
+
+              if (new_accel > 0.0f && new_gyro > 0.0f)
+                {
+                  g_accel_mms2_per_lsb = new_accel;
+                  g_gyro_dps_per_lsb   = new_gyro;
+
+                  imu_stationary_set_thresholds(
+                      settings->gyro_stationary_threshold /
+                          g_gyro_dps_per_lsb,
+                      settings->accel_stationary_threshold /
+                          g_accel_mms2_per_lsb);
+                  imu_stationary_reset();
+                }
+            }
+
+          if (g_accel_mms2_per_lsb == 0.0f || g_gyro_dps_per_lsb == 0.0f)
+            {
+              continue;       /* awaiting a sample with a valid FSR idx */
+            }
+
           int16_t raw[6];
           raw[0] = imu_data.gx;
           raw[1] = imu_data.gy;
@@ -281,20 +328,11 @@ static void cmd_dump(char which, bool raw, uint32_t duration_ms)
       return;
     }
 
-  /* Make sure scale factors reflect the driver's startup FSR; the
-   * daemon also sets these during init but a stand-alone dump from a
-   * fresh shell should still work.
+  /* Issue #139: physical scale comes from each sample's embedded
+   * fsr_*_idx, computed in the inner loop below; no fallback to a
+   * fixed startup FSR is needed because driver samples always carry
+   * a valid idx.
    */
-
-  if (g_accel_mms2_per_lsb == 0.0f)
-    {
-      g_accel_mms2_per_lsb = accel_lsb_to_mms2(IMU_ACCEL_FSR_G);
-    }
-
-  if (g_gyro_dps_per_lsb == 0.0f)
-    {
-      g_gyro_dps_per_lsb = gyro_lsb_to_dps(IMU_GYRO_FSR_DPS);
-    }
 
   if (raw)
     {
@@ -346,6 +384,16 @@ static void cmd_dump(char which, bool raw, uint32_t duration_ms)
       struct sensor_imu s;
       while (read(fd, &s, sizeof(s)) == sizeof(s))
         {
+          /* Issue #139: per-sample physical scale.  Each sample carries
+           * its own FSR idx so a live SET mid-dump is reflected
+           * immediately.  raw-mode bypasses conversion.
+           */
+
+          float a_scale =
+              raw ? 0.0f : accel_lsb_to_mms2_from_idx(s.fsr_xl_idx);
+          float g_scale =
+              raw ? 0.0f : gyro_lsb_to_dps_from_idx(s.fsr_gy_idx);
+
           if (which == 'a')
             {
               if (raw)
@@ -356,9 +404,9 @@ static void cmd_dump(char which, bool raw, uint32_t duration_ms)
               else
                 {
                   printf("%u %.3f %.3f %.3f\n", (unsigned)s.timestamp,
-                         (double)((float)s.ax * g_accel_mms2_per_lsb),
-                         (double)((float)s.ay * g_accel_mms2_per_lsb),
-                         (double)((float)s.az * g_accel_mms2_per_lsb));
+                         (double)((float)s.ax * a_scale),
+                         (double)((float)s.ay * a_scale),
+                         (double)((float)s.az * a_scale));
                 }
             }
           else
@@ -371,13 +419,26 @@ static void cmd_dump(char which, bool raw, uint32_t duration_ms)
               else
                 {
                   printf("%u %.4f %.4f %.4f\n", (unsigned)s.timestamp,
-                         (double)((float)s.gx * g_gyro_dps_per_lsb),
-                         (double)((float)s.gy * g_gyro_dps_per_lsb),
-                         (double)((float)s.gz * g_gyro_dps_per_lsb));
+                         (double)((float)s.gx * g_scale),
+                         (double)((float)s.gy * g_scale),
+                         (double)((float)s.gz * g_scale));
                 }
             }
 
           printed++;
+
+          /* Issue #139: gate the inner drain on the deadline.  Without
+           * this, USB-CDC printf throughput can fall behind the 833 Hz
+           * sample rate and the loop never sees an empty read.
+           */
+
+          clock_gettime(CLOCK_BOOTTIME, &now);
+          now_us = (uint64_t)now.tv_sec * 1000000ULL +
+                   (uint64_t)now.tv_nsec / 1000ULL;
+          if (now_us >= deadline_us)
+            {
+              break;
+            }
         }
     }
 

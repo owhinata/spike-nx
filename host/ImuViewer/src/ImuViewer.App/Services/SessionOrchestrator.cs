@@ -64,6 +64,13 @@ public sealed class SessionOrchestrator : IAsyncDisposable
     public Task<BtsensorReply> SetAccelFsrAsync(int g, CancellationToken ct) => SendAsync($"SET ACCEL_FSR {g}", ct);
     public Task<BtsensorReply> SetGyroFsrAsync(int dps, CancellationToken ct) => SendAsync($"SET GYRO_FSR {dps}", ct);
 
+    // Issue #139: GET helpers.  The firmware replies with "OK <idx>"
+    // where idx is the driver-internal enum value; callers convert via
+    // ImuViewer.Core.Wire.ImuConfigTables.
+    public Task<BtsensorReply> GetOdrAsync(CancellationToken ct) => SendAsync("GET ODR", ct);
+    public Task<BtsensorReply> GetAccelFsrAsync(CancellationToken ct) => SendAsync("GET ACCEL_FSR", ct);
+    public Task<BtsensorReply> GetGyroFsrAsync(CancellationToken ct) => SendAsync("GET GYRO_FSR", ct);
+
     public Task<BtsensorReply> SetSensorModeAsync(
         LegoClassId classId, int mode, CancellationToken ct) =>
         SendAsync($"SENSOR MODE {ClassToken(classId)} {mode}", ct);

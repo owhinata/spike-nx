@@ -47,28 +47,34 @@ int  imu_sampler_set_enabled(bool on);
 
 bool imu_sampler_is_enabled(void);
 
-/* Reconfiguration helpers — return -EBUSY while sampling is enabled.
- * On ioctl failure the local cache is rolled back to the previous value
- * so reads via get-state stay consistent with the hardware.
+/* Reconfiguration helpers.  Issue #139: live SET is allowed even while
+ * sampling is enabled — the driver no longer rejects with -EBUSY, the
+ * per-sample idx fields in struct sensor_imu let consumers follow the
+ * change, and bundle_emitter splits BUNDLE frames on idx mismatch so
+ * each frame stays internally consistent.
  *
- * imu_sampler_set_odr_hz() rejects values >833 Hz with -EINVAL: btsensor
- * runs a 100 Hz BUNDLE tick and caps imu_sample_count per frame at 8, so
- * higher ODRs would produce >8 samples per 10 ms window and we would
- * silently drop most of them.  Use the local `btsensor dump` path for
- * higher rate IMU work.
+ * imu_sampler_set_odr_hz() still rejects values >833 Hz with -EINVAL:
+ * btsensor runs a 100 Hz BUNDLE tick and caps imu_sample_count per frame
+ * at 8, so higher ODRs would produce >8 samples per 10 ms window and we
+ * would silently drop most of them.
  */
 
 int  imu_sampler_set_odr_hz(uint32_t hz);
 int  imu_sampler_set_accel_fsr(uint32_t g);
 int  imu_sampler_set_gyro_fsr(uint32_t dps);
 
-/* Read current cache (mirrors the live driver state).  Defaults are
- * 833 Hz / 8 g / 2000 dps.
+/* Read current driver state as the raw enum idx (lsm6dsl_odr_e /
+ * lsm6dsl_fsr_xl_e / lsm6dsl_fsr_gy_e).  Issue #139: cache-free — each
+ * call opens an O_WRONLY ctrl fd and issues the corresponding GET
+ * ioctl, so the value always reflects the live driver state even when
+ * another client (e.g. ImuViewer mid-stream) changed it.  Returns 0 on
+ * success and writes the idx through `out`; returns a negated errno on
+ * failure (in which case `*out` is left unchanged).
  */
 
-uint32_t imu_sampler_get_odr_hz(void);
-uint32_t imu_sampler_get_accel_fsr_g(void);
-uint32_t imu_sampler_get_gyro_fsr_dps(void);
+int imu_sampler_get_odr_idx(uint32_t *out);
+int imu_sampler_get_accel_fsr_idx(uint32_t *out);
+int imu_sampler_get_gyro_fsr_idx(uint32_t *out);
 
 /* Drain up to `max` samples from the private ring into `out` (oldest
  * first), returning the count.  Called from the BTstack run loop

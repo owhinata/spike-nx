@@ -190,3 +190,22 @@ float imu_stationary_get_sample_time(void)
 {
   return g_stat.sample_time;
 }
+
+/* Issue #139: discard all raw accumulators while keeping thresholds /
+ * ODR / callback intact.  Used by the caller when it detects an FSR
+ * change in incoming samples so the new-scale window is not mixed
+ * with already-summed old-scale data.
+ */
+
+void imu_stationary_reset(void)
+{
+  memset(g_stat.slow_sum, 0, sizeof(g_stat.slow_sum));
+  memset(g_stat.slow_avg, 0, sizeof(g_stat.slow_avg));
+  g_stat.slow_count   = 0;
+  memset(g_stat.start_data, 0, sizeof(g_stat.start_data));
+  memset(g_stat.gyro_sum,  0, sizeof(g_stat.gyro_sum));
+  memset(g_stat.accel_sum, 0, sizeof(g_stat.accel_sum));
+  g_stat.sample_count  = 0;
+  g_stat.time_start_us = get_time_us();
+  g_stat.stationary    = false;
+}

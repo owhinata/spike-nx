@@ -41,6 +41,58 @@ static bool                   g_sensor_on;
 static bool                   g_timer_armed;
 static uint16_t               g_seq;
 
+/* Issue #139: idx -> physical lookup tables for BUNDLE header source.
+ * Must match the driver-private enums (lsm6dsl_uorb.c:124-154).  The
+ * gyro/xl tables are sparse: invalid driver idx slots get 0 and the
+ * encoder simply emits 0 in that field (the host's matching table
+ * will likewise resolve to 0/unknown — fail-soft).
+ */
+
+static const uint16_t g_odr_hz_table[] =
+{
+  [0]  = 0,        /* ODR_OFF */
+  [1]  = 13,       /* ODR_12_5HZ */
+  [2]  = 26,       /* ODR_26HZ */
+  [3]  = 52,       /* ODR_52HZ */
+  [4]  = 104,      /* ODR_104HZ */
+  [5]  = 208,      /* ODR_208HZ */
+  [6]  = 416,      /* ODR_416HZ */
+  [7]  = 833,      /* ODR_833HZ */
+  [8]  = 1660,     /* ODR_1660HZ */
+  [9]  = 3330,     /* ODR_3330HZ */
+  [10] = 6660,     /* ODR_6660HZ */
+};
+
+static const uint8_t g_fsr_xl_g_table[] =
+{
+  [0] = 2,         /* FSR_XL_2G */
+  [1] = 16,        /* FSR_XL_16G */
+  [2] = 4,         /* FSR_XL_4G */
+  [3] = 8,         /* FSR_XL_8G */
+};
+
+static const uint16_t g_fsr_gy_dps_table[] =
+{
+  [0] = 250,       /* FSR_GY_250DPS */
+  [1] = 125,       /* FSR_GY_125DPS */
+  [2] = 500,       /* FSR_GY_500DPS */
+  [3] = 0,         /* unused */
+  [4] = 1000,      /* FSR_GY_1000DPS */
+  [5] = 0,         /* unused */
+  [6] = 2000,      /* FSR_GY_2000DPS */
+};
+
+/* Last-known config idx, updated on every non-empty drain.  Used as
+ * the BUNDLE header source when a tick drains 0 samples but IMU is
+ * ON (e.g. low ODR where the 10 ms tick beats the next DRDY); without
+ * this fallback the header would emit 0/0/0 and host UI would briefly
+ * latch invalid values.
+ */
+
+static uint8_t s_last_odr_idx;
+static uint8_t s_last_fsr_xl_idx;
+static uint8_t s_last_fsr_gy_idx;
+
 /* One static scratch buffer reused on every tick.  The TX arbiter
  * (btsensor_tx_try_enqueue_frame) memcpy's the contents into its
  * internal ring before returning, so re-using the same backing memory
@@ -133,19 +185,19 @@ static size_t encode_tlv(uint8_t *dst,
  * via drop-oldest).
  */
 
-static int emit_bundle(void)
+/* Encode and enqueue one BUNDLE frame.  `imu_samples` MUST be a slice
+ * whose elements share the same odr_idx / fsr_xl_idx / fsr_gy_idx (the
+ * caller, emit_bundle(), splits drained samples by idx homogeneity so
+ * each frame is internally consistent).  When `imu_count == 0` and
+ * g_imu_on, the header sources rate/fsr from the s_last_*_idx cache;
+ * when !g_imu_on, the header rate/fsr fields are 0.
+ *
+ * Returns the rc from btsensor_tx_try_enqueue_frame().
+ */
+
+static int emit_one_frame(const struct sensor_imu *imu_samples,
+                          size_t imu_count)
 {
-  /* 1. Drain IMU samples.  When IMU is off the drain returns 0 and the
-   *    IMU section becomes empty.
-   */
-
-  struct sensor_imu imu_buf[BTSENSOR_IMU_SAMPLES_MAX];
-  size_t imu_count = 0;
-  if (g_imu_on)
-    {
-      imu_count = imu_sampler_drain(imu_buf, BTSENSOR_IMU_SAMPLES_MAX);
-    }
-
   uint32_t tick_ts_us;
   if (imu_count > 0)
     {
@@ -153,32 +205,71 @@ static int emit_bundle(void)
        * non-negative (Codex review).
        */
 
-      tick_ts_us = imu_buf[0].timestamp;
+      tick_ts_us = imu_samples[0].timestamp;
     }
   else
     {
       tick_ts_us = imu_sampler_now_us();
     }
 
-  /* 2. Take a sensor snapshot.  When SENSOR is off this still produces
-   *    6 unbound entries so the wire layout is constant.
+  /* Resolve the BUNDLE header's rate/fsr from the sample idx (or the
+   * last-known cache when this frame has no samples but IMU is ON).
+   * Issue #139: replaces the previous imu_sampler_get_*() cache path.
+   */
+
+  uint8_t odr_idx = 0;
+  uint8_t xl_idx  = 0;
+  uint8_t gy_idx  = 0;
+  if (imu_count > 0)
+    {
+      odr_idx = imu_samples[0].odr_idx;
+      xl_idx  = imu_samples[0].fsr_xl_idx;
+      gy_idx  = imu_samples[0].fsr_gy_idx;
+      s_last_odr_idx    = odr_idx;
+      s_last_fsr_xl_idx = xl_idx;
+      s_last_fsr_gy_idx = gy_idx;
+    }
+  else if (g_imu_on)
+    {
+      odr_idx = s_last_odr_idx;
+      xl_idx  = s_last_fsr_xl_idx;
+      gy_idx  = s_last_fsr_gy_idx;
+    }
+
+  uint16_t hdr_odr_hz = 0;
+  uint8_t  hdr_xl_g   = 0;
+  uint16_t hdr_gy_dps = 0;
+  if (odr_idx < (sizeof(g_odr_hz_table) / sizeof(g_odr_hz_table[0])))
+    {
+      hdr_odr_hz = g_odr_hz_table[odr_idx];
+    }
+  if (xl_idx < (sizeof(g_fsr_xl_g_table) / sizeof(g_fsr_xl_g_table[0])))
+    {
+      hdr_xl_g = g_fsr_xl_g_table[xl_idx];
+    }
+  if (gy_idx < (sizeof(g_fsr_gy_dps_table) / sizeof(g_fsr_gy_dps_table[0])))
+    {
+      hdr_gy_dps = g_fsr_gy_dps_table[gy_idx];
+    }
+
+  /* Take a sensor snapshot.  Each call clears FRESH on the sampler so
+   * if we emit several frames in one tick (idx-split case), only the
+   * first frame carries fresh sensor payload — subsequent frames see
+   * FRESH=false and skip the per-sensor payload bytes.  This matches
+   * the wire format contract (TLV count is fixed at 6 every frame).
    */
 
   struct sensor_class_state_s sensor_state[BTSENSOR_TLV_COUNT];
   sensor_sampler_snapshot(sensor_state);
 
-  /* 3. Layout (envelope @ 0, header @ 5, IMU @ 21, TLVs @ ...). */
+  /* Layout (envelope @ 0, header @ 5, IMU @ 21, TLVs @ ...). */
 
   uint8_t *p   = g_bundle_buf;
   uint16_t off = 0;
 
-  /* Envelope: magic + type + frame_len placeholder. */
-
   put_u16le(p + 0, BTSENSOR_FRAME_MAGIC);
   p[2] = BTSENSOR_FRAME_TYPE_BUNDLE;
   off  = BTSENSOR_BUNDLE_ENVELOPE_SIZE;       /* 5 */
-
-  /* Bundle header. */
 
   uint8_t *hdr = p + off;
   put_u16le(hdr + 0, g_seq);
@@ -188,9 +279,9 @@ static int emit_bundle(void)
   put_u16le(hdr + 6, imu_section_len);
   hdr[8]  = (uint8_t)imu_count;
   hdr[9]  = (uint8_t)BTSENSOR_TLV_COUNT;
-  put_u16le(hdr + 10, (uint16_t)imu_sampler_get_odr_hz());
-  hdr[12] = (uint8_t)imu_sampler_get_accel_fsr_g();
-  put_u16le(hdr + 13, (uint16_t)imu_sampler_get_gyro_fsr_dps());
+  put_u16le(hdr + 10, hdr_odr_hz);
+  hdr[12] = hdr_xl_g;
+  put_u16le(hdr + 13, hdr_gy_dps);
 
   uint8_t flags = 0;
   if (g_imu_on)
@@ -210,8 +301,8 @@ static int emit_bundle(void)
 
   for (size_t i = 0; i < imu_count; i++)
     {
-      uint32_t delta = imu_buf[i].timestamp - tick_ts_us;  /* mod 2^32 */
-      encode_imu_sample(p + off, &imu_buf[i], delta);
+      uint32_t delta = imu_samples[i].timestamp - tick_ts_us;  /* mod 2^32 */
+      encode_imu_sample(p + off, &imu_samples[i], delta);
       off += BTSENSOR_IMU_SAMPLE_SIZE;
     }
 
@@ -229,6 +320,60 @@ static int emit_bundle(void)
   g_seq++;
 
   return btsensor_tx_try_enqueue_frame(g_bundle_buf, off);
+}
+
+/* Issue #139: drain a tickful of IMU samples and emit one BUNDLE frame
+ * per maximal homogeneous run (matching odr_idx / fsr_xl_idx /
+ * fsr_gy_idx).  In steady state (no live SET) this collapses to a
+ * single frame per tick, so the 100 Hz pacing is preserved; right
+ * after a SET, a tick may emit 2-3 frames back-to-back so each frame's
+ * BUNDLE header rate/fsr fields stay consistent with its sample idx.
+ * The TX arbiter ring absorbs the burst.
+ */
+
+static int emit_bundle(void)
+{
+  if (!g_imu_on)
+    {
+      return emit_one_frame(NULL, 0);
+    }
+
+  struct sensor_imu imu_buf[BTSENSOR_IMU_SAMPLES_MAX];
+  size_t imu_count = imu_sampler_drain(imu_buf, BTSENSOR_IMU_SAMPLES_MAX);
+
+  if (imu_count == 0)
+    {
+      return emit_one_frame(NULL, 0);     /* last-known idx fallback */
+    }
+
+  /* Walk the drained samples and split at every idx boundary.  Most
+   * ticks see a single homogeneous run so the outer while loop emits
+   * exactly one frame.
+   */
+
+  size_t start = 0;
+  int first_rc = 0;
+  while (start < imu_count)
+    {
+      size_t end = start + 1;
+      while (end < imu_count
+             && imu_buf[end].odr_idx    == imu_buf[start].odr_idx
+             && imu_buf[end].fsr_xl_idx == imu_buf[start].fsr_xl_idx
+             && imu_buf[end].fsr_gy_idx == imu_buf[start].fsr_gy_idx)
+        {
+          end++;
+        }
+
+      int rc = emit_one_frame(&imu_buf[start], end - start);
+      if (rc < 0 && first_rc == 0)
+        {
+          first_rc = rc;                  /* report first non-zero rc */
+        }
+
+      start = end;
+    }
+
+  return first_rc;
 }
 
 /****************************************************************************

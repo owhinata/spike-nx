@@ -80,15 +80,20 @@ boards/spike-prime-hub/include/board_lsm6dsl.h   - ボードローカル ioctl (
 
 ### struct sensor_imu
 
-`nuttx/include/nuttx/uorb.h` で定義:
+`boards/spike-prime-hub/include/board_lsm6dsl.h` で定義 (24 B 固定、`_Static_assert` で size / offset を強制):
 
-| フィールド | 型 | 内容 |
-|---|---|---|
-| timestamp | uint32_t | CLOCK_BOOTTIME us の low 32bit (~71m35s で wrap)。ARMv7-M の 4-byte aligned word は single-copy atomic ⇒ ISR と worker 間で tearing 無し |
-| ax / ay / az | int16_t | 加速度 生 LSB、Hub body frame (chip frame の Y/Z をドライバで反転) |
-| gx / gy / gz | int16_t | ジャイロ 生 LSB、Hub body frame (chip frame の Y/Z をドライバで反転) |
-| temperature_raw | int16_t | OUT_TEMP 生値（16 サンプルごとに更新、間は前回値 stale） |
-| reserved | int16_t | アラインメント用パディング |
+| オフセット | フィールド | 型 | 内容 |
+|---|---|---|---|
+| +0 | timestamp | uint32_t | CLOCK_BOOTTIME us の low 32bit (~71m35s で wrap)。ARMv7-M の 4-byte aligned word は single-copy atomic ⇒ ISR と worker 間で tearing 無し |
+| +4 | ax / ay / az | int16_t | 加速度 生 LSB、Hub body frame (chip frame の Y/Z をドライバで反転) |
+| +10 | gx / gy / gz | int16_t | ジャイロ 生 LSB、Hub body frame (chip frame の Y/Z をドライバで反転) |
+| +16 | temperature_raw | int16_t | OUT_TEMP 生値（16 サンプルごとに更新、間は前回値 stale） |
+| +18 | odr_idx | uint8_t | `enum lsm6dsl_odr_e` 値 (0..0xA) — そのサンプル取得時の HW ODR を埋め込み |
+| +19 | fsr_xl_idx | uint8_t | `enum lsm6dsl_fsr_xl_e` 値 (sparse: 0=2g, 1=16g, 2=4g, 3=8g) |
+| +20 | fsr_gy_idx | uint8_t | `enum lsm6dsl_fsr_gy_e` 値 (sparse: 0=250, 1=125, 2=500, 4=1000, 6=2000 dps) |
+| +21..+23 | reserved[3] | uint8_t × 3 | パディング (`push_data()` で `memset` ゼロ化) |
+
+Issue #139 で sensor_imu に per-sample `odr_idx` / `fsr_xl_idx` / `fsr_gy_idx` を埋め込むことで、active 中の live ODR/FSR 変更があっても consumer (drivebase / imu daemon / btsensor BUNDLE) が各サンプルの正しい物理単位を後追いで計算できるようになっている。
 
 ### ioctl
 
@@ -98,8 +103,13 @@ boards/spike-prime-hub/include/board_lsm6dsl.h   - ボードローカル ioctl (
 | `SNIOC_SETSAMPLERATE` | uint32 (Hz: 13/26/52/104/208/416/833/1660/3330/6660) | ODR を Hz で指定 |
 | `LSM6DSL_IOC_SETACCELFSR` | uint32 (g: 2/4/8/16) | 加速度 FSR を変更 |
 | `LSM6DSL_IOC_SETGYROFSR` | uint32 (dps: 125/250/500/1000/2000) | ジャイロ FSR を変更 |
+| `SNIOC_GETSAMPLERATE` | uint32* (out) | 現在の ODR を `enum lsm6dsl_odr_e` 値 (idx) で返す |
+| `LSM6DSL_IOC_GETACCELFSR` | uint32* (out) | 現在の加速度 FSR を `enum lsm6dsl_fsr_xl_e` 値 (idx) で返す |
+| `LSM6DSL_IOC_GETGYROFSR` | uint32* (out) | 現在のジャイロ FSR を `enum lsm6dsl_fsr_gy_e` 値 (idx) で返す |
 
-サンプリング有効中（`SNIOC_ACTIVATE` 後）に上記 ioctl を呼ぶと `-EBUSY` を返す。設定変更したい場合は先に deactivate してから ioctl すること。
+SET ioctl は物理値 (Hz / g / dps) を受け取って driver-internal な enum idx に変換する。GET ioctl は **driver-internal な enum idx をそのまま返す** (sample 埋め込み idx と対称、consumer 側に `idx → 物理値` lookup table を持たせる設計)。
+
+Issue #139 以前は active 中 (`SNIOC_ACTIVATE(true)` 後) の SET は `-EBUSY` で拒否していたが、現在は **active 中でも live SET を受理する**。SET ハンドラは `devlock` 配下で `push_data()` と直列化されているため、register R-M-W と publish path のレースは発生しない。SET 直後 1 サンプルだけ chip-internal pipeline の影響で「旧 register 値で取得されて新 idx でタグ付けされる」過渡があり得るが、consumer (drivebase / imu daemon) は idx 変化検出時に自動 recalibrate する仕組みで吸収される。
 
 ### defconfig
 

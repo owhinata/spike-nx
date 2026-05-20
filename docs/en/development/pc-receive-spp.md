@@ -461,14 +461,31 @@ ahead of the next telemetry frame.
 | `SENSOR MODE <class> <mode>\n` | Switch the bound device to the given LUMP mode | only while SENSOR ON |
 | `SENSOR SEND <class> <mode> <hex>\n` | Write hex bytes to a writable mode (LEDs etc.) | only while SENSOR ON |
 | `SENSOR PWM <class> <ch0> [ch1..ch3]\n` | LED brightness / motor duty (-100..100; color=3ch, ultrasonic=4ch, motor_*=1ch) | only while SENSOR ON |
-| `SET ODR <hz>\n` | Set ODR (13/26/52/104/208/416/833 Hz) | only while IMU OFF.  **`> 833` returns `ERR invalid_odr`** |
-| `SET ACCEL_FSR <g>\n` | Accel FSR (2/4/8/16) | only while IMU OFF |
-| `SET GYRO_FSR <dps>\n` | Gyro FSR (125/250/500/1000/2000) | only while IMU OFF |
+| `SET ODR <hz>\n` | Set ODR (13/26/52/104/208/416/833 Hz) | live SET allowed (including while streaming).  **`> 833` returns `ERR invalid_odr`** |
+| `SET ACCEL_FSR <g>\n` | Accel FSR (2/4/8/16) | live SET allowed |
+| `SET GYRO_FSR <dps>\n` | Gyro FSR (125/250/500/1000/2000) | live SET allowed |
+| `GET ODR\n` | Read current ODR as the **enum index** | reply `OK <idx>\n` |
+| `GET ACCEL_FSR\n` | Read current accel FSR as the **enum index** | reply `OK <idx>\n` |
+| `GET GYRO_FSR\n` | Read current gyro FSR as the **enum index** | reply `OK <idx>\n` |
+
+Issue #139 removed the "only while IMU OFF" restriction on SET.  Each
+sample carries its own `odr_idx` / `fsr_xl_idx` / `fsr_gy_idx` in
+`struct sensor_imu`, and `bundle_emitter` splits a BUNDLE frame on idx
+mismatch so live SET takes effect mid-stream without breaking wire-level
+consistency (the tick immediately after a SET may emit 2–3 frames
+back-to-back; the BTstack queue absorbs the burst).
+
+GET replies carry the driver-internal enum index
+(`lsm6dsl_odr_e` / `lsm6dsl_fsr_xl_e` / `lsm6dsl_fsr_gy_e`) as a decimal
+number.  Hosts convert back to physical units (Hz / g / dps) via their
+own lookup table — the same table that decodes the per-sample idx
+fields embedded in `struct sensor_imu`.
 
 Reply patterns:
-- `OK\n` on success
-- `ERR busy\n` if a `SET *` arrives while sampling is on
+- `OK\n` on success (SET)
+- `OK <idx>\n` on success (GET; idx is the enum value)
 - `ERR invalid_odr\n` for ODR > 833
+- `ERR errno=<n>\n` if the underlying ioctl failed
 - `ERR invalid <token>\n` for malformed values / unknown subcommands
 - `ERR overflow\n` for lines longer than 64 bytes
 - `ERR unknown <cmd>\n` for an unrecognised first token
@@ -477,15 +494,26 @@ IMU and SENSOR are both **off** at daemon start; while both are off the
 100 Hz BUNDLE timer is parked so no bytes flow.  A typical session:
 
 ```text
-PC -> Hub:  IMU OFF\n              (idempotent)
+PC -> Hub:  IMU OFF\n              (idempotent reset)
 Hub -> PC:  OK\n
-PC -> Hub:  SET ODR 416\n
+PC -> Hub:  GET ODR\n
+Hub -> PC:  OK 7\n                  (= ODR_833HZ — ImuViewer reads the live config)
+PC -> Hub:  GET ACCEL_FSR\n
+Hub -> PC:  OK 3\n                  (= FSR_XL_8G)
+PC -> Hub:  GET GYRO_FSR\n
+Hub -> PC:  OK 6\n                  (= FSR_GY_2000DPS)
+PC -> Hub:  SET ODR 416\n           (live SET, allowed even mid-stream)
 Hub -> PC:  OK\n
 PC -> Hub:  IMU ON\n
 Hub -> PC:  OK\n
 PC -> Hub:  SENSOR ON\n
 Hub -> PC:  OK\n
             ... 100 Hz BUNDLE frames flow ...
+            (the BUNDLE header rate/fsr fields are sourced from samples[0].idx)
+PC -> Hub:  SET GYRO_FSR 500\n      (live FSR change while streaming)
+Hub -> PC:  OK\n
+            ... the next tick may emit 2–3 frames so each frame
+                stays internally consistent across the idx boundary ...
 PC -> Hub:  IMU OFF\n
 PC -> Hub:  SENSOR OFF\n
 Hub -> PC:  OK\n

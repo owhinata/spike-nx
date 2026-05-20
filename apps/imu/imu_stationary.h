@@ -24,4 +24,14 @@ void imu_stationary_update(const int16_t *data);
 bool imu_stationary_is_stationary(void);
 float imu_stationary_get_sample_time(void);
 
+/* Issue #139: drop all raw accumulators (sample_count, gyro/accel sums,
+ * slow-average sums, start-data) without disturbing the configured
+ * thresholds / ODR / callback.  Call this when the driver FSR (and
+ * hence the raw-LSB scale of incoming samples) changes mid-stream, so
+ * the next stationary window starts fresh instead of mixing raw values
+ * collected at the old scale with new-scale samples.
+ */
+
+void imu_stationary_reset(void);
+
 #endif /* __APPS_IMU_STATIONARY_H */
