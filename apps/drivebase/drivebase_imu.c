@@ -11,10 +11,10 @@
  * sampler).
  *
  * Bias estimation: while |gz| stays below `bias_idle_threshold_lsb`
- * (default 28 LSB ≈ 2 dps) for `bias_window_us` (default 200 ms), we
- * accumulate the running average and update bias_z_lsb.  The
- * subtracting integrator then produces ~0 deg drift per second when
- * the chassis is still.
+ * (default 71 LSB ≈ 2.5 dps at the system default FS=1000 dps) for
+ * `bias_window_us` (default 200 ms), we accumulate the running
+ * average and update bias_z_lsb.  The subtracting integrator then
+ * produces ~0 deg drift per second when the chassis is still.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -35,11 +35,11 @@
  ****************************************************************************/
 
 #define DB_IMU_DEVPATH               "/dev/uorb/sensor_imu0"
-#define DB_IMU_DEFAULT_BIAS_THRESH    143u   /* ≈ 10 dps; tolerates raw  */
-                                             /* gyro noise floor while   */
-                                             /* still rejecting any move */
-                                             /* the robot would actually */
-                                             /* care about               */
+#define DB_IMU_DEFAULT_BIAS_THRESH    71u    /* ≈ 2.5 dps @ FS=1000 dps  */
+                                             /* (Phase 2.5: narrowed     */
+                                             /* from 143/10 dps so slow  */
+                                             /* curves are not mistaken  */
+                                             /* for idle).               */
 #define DB_IMU_DEFAULT_BIAS_WINDOW_US 200000u
 
 /****************************************************************************
@@ -71,9 +71,10 @@ static uint16_t fsr_gy_idx_to_dps(uint8_t idx)
 
 /* On FSR change, rescale the cached bias_z_lsb (raw-LSB units) to
  * preserve its physical (mdps) meaning under the new sensitivity.
- * Rescale the bias_idle_threshold_lsb too: the default 143 LSB is
- * tuned for 2000 dps (≈ 10 dps), so for 500 dps it becomes 572 LSB to
- * keep the idle window at the same physical rate.
+ * Rescale the bias_idle_threshold_lsb too: the default 71 LSB is
+ * tuned for 1000 dps (≈ 2.5 dps), so for 500 dps it becomes 142 LSB
+ * (and for 2000 dps it becomes 35 LSB) to keep the idle window at
+ * the same physical rate.
  *
  * Must run BEFORE the per-sample subtraction `gz_raw - bias_z_lsb`,
  * otherwise the new sample would be biased with the wrong-units value

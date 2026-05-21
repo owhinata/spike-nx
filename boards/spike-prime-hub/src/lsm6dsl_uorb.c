@@ -111,11 +111,16 @@
 
 #define TEMP_DECIMATE   16
 
-/* Default startup configuration (matches pybricks). */
+/* Default startup configuration (Phase 2.5: tightened for EKF / calib).
+ * Was FSR_XL_8G / FSR_GY_2000DPS (pybricks heritage); narrowed to ±2g
+ * (0.061 mg/LSB, 4x finer tilt resolution) and ±1000 dps (35 mdps/LSB,
+ * 2x finer angular resolution while still 1.8x above the drivebase
+ * worst-case rotation of ~565 dps).
+ */
 
 #define DEFAULT_ODR     ODR_833HZ
-#define DEFAULT_FSR_XL  FSR_XL_8G
-#define DEFAULT_FSR_GY  FSR_GY_2000DPS
+#define DEFAULT_FSR_XL  FSR_XL_2G
+#define DEFAULT_FSR_GY  FSR_GY_1000DPS
 
 /****************************************************************************
  * Private Types

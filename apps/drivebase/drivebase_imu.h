@@ -38,13 +38,15 @@ extern "C"
  * historical fixed `DB_IMU_GYRO_LSB_TO_MDPS = 70` (FS=2000 dps only)
  * is gone.  See integrate() in drivebase_imu.c for the lookup.
  *
- * Default bias-idle threshold is calibrated for FS=2000 dps; when the
- * driver reports a different FSR the integrate() path rescales the
- * cached threshold so the physical idle window stays roughly constant.
+ * Phase 2.5: driver default FSR is now ±1000 dps (Section A1).  The
+ * default bias-idle threshold and reference dps below are anchored at
+ * that new value; when the driver reports a different FSR the
+ * integrate() path rescales the cached threshold so the physical
+ * idle window (≈ 2.5 dps) stays roughly constant.
  */
 
 #define DB_IMU_DRAIN_BATCH         16
-#define DB_IMU_DEFAULT_FSR_GY_DPS  2000
+#define DB_IMU_DEFAULT_FSR_GY_DPS  1000
 
 /* Sentinel for "first sample after open" — any valid driver enum
  * value will mismatch this on the first integrate(), forcing the
