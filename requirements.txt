@@ -6,3 +6,7 @@ mkdocs-static-i18n>=1.2
 pexpect==4.9.0
 pyserial==3.5
 pytest==9.0.2
+
+# IMU calibration host pipeline (tools/imu_cal/imu_tk_output_to_cfg.py).
+# Only the cfg generator needs numpy; bin_to_ascii.py is stdlib-only.
+numpy>=1.24
