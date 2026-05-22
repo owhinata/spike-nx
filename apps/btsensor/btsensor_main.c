@@ -73,6 +73,8 @@
 #  include "btsensor_capture_mode.h"
 #endif
 
+#include "btsensor_imu_cap_mode.h"
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -249,6 +251,13 @@ static void teardown_sampler_off(void)
 
   btsensor_button_deinit();
   btsensor_led_deinit();
+
+  /* Tear down IMU_CAP first — it owns a private /dev/uorb/sensor_imu0
+   * fd and would otherwise leak past the sampler teardown.  Its exit
+   * path also restores ODR to 833 Hz (layer 1 of the rollback defense).
+   */
+
+  btsensor_imu_cap_mode_deinit();
 
   /* Strict order: stop the BUNDLE timer first so no tick can race the
    * sampler / CLAIM teardown that follows.  Then drop SENSOR (CLAIM
@@ -702,6 +711,12 @@ static int btsensor_daemon(int argc, char **argv)
   (void)btsensor_capture_mode_init();
 #endif
 
+  /* IMU_CAP mode handler (Issue #145).  Independent of CONFIG_APP_-
+   * CAPTURE — it talks to /dev/uorb/sensor_imu0, not /dev/btcap.
+   */
+
+  (void)btsensor_imu_cap_mode_init();
+
   if (imu_sampler_init() != 0)
     {
       syslog(LOG_ERR, "btsensor: imu sampler init failed, "
@@ -853,6 +868,8 @@ enum btsensor_action_kind
 #ifdef CONFIG_APP_CAPTURE
   ACTION_MODE_CAPTURE,
 #endif
+  ACTION_IMU_CAP_START,
+  ACTION_IMU_CAP_STOP,
 };
 
 /* Heap-allocated action struct with explicit ownership transfer
@@ -982,6 +999,35 @@ static void action_runner(void *ctx)
         a->rc = btsensor_capture_mode_enter();
         break;
 #endif
+      case ACTION_IMU_CAP_START:
+        /* Refuse if SHELL or CAPTURE is in flight.  IMU_CAP pauses
+         * BUNDLE emission for the lifetime of the session and switches
+         * the driver to 104 Hz; it must not collide with the other
+         * exclusive modes.
+         */
+
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+        if (btsensor_shell_is_active())
+          {
+            a->rc = -EBUSY;
+            break;
+          }
+#endif
+#ifdef CONFIG_APP_CAPTURE
+        if (btsensor_capture_mode_is_active())
+          {
+            a->rc = -EBUSY;
+            break;
+          }
+#endif
+
+        a->rc = btsensor_imu_cap_mode_enter(a->arg);
+        break;
+
+      case ACTION_IMU_CAP_STOP:
+        a->rc = btsensor_imu_cap_mode_exit();
+        break;
+
       default:
         a->rc = -ENOSYS;
         break;
@@ -1410,6 +1456,50 @@ static int cmd_unpair(int argc, char **argv)
   return 0;
 }
 
+/* `btsensor _imu_cap start [duration_sec]` / `btsensor _imu_cap stop`
+ * — Phase 2.5 (#145) Tedaldi calibration capture.  Leading underscore
+ * marks this as an internal / debug verb (same convention as
+ * `drivebase _imu ...`), not part of the regular user-facing API.
+ */
+
+static int cmd_imu_cap(int argc, char **argv)
+{
+  if (argc < 3)
+    {
+      printf("Usage: btsensor _imu_cap <start [duration_sec]|stop>\n");
+      return 1;
+    }
+
+  if (strcmp(argv[2], "start") == 0)
+    {
+      uint32_t duration_sec = 0;
+      if (argc >= 4)
+        {
+          long v = strtol(argv[3], NULL, 10);
+          if (v < 0 || v > 86400)
+            {
+              printf("btsensor: invalid duration_sec (allowed 0..86400)\n");
+              return 1;
+            }
+
+          duration_sec = (uint32_t)v;
+        }
+
+      print_action_result(dispatch_action(ACTION_IMU_CAP_START, duration_sec));
+      return 0;
+    }
+
+  if (strcmp(argv[2], "stop") == 0)
+    {
+      print_action_result(dispatch_action(ACTION_IMU_CAP_STOP, 0));
+      return 0;
+    }
+
+  printf("btsensor: invalid _imu_cap arg '%s' (expected start|stop)\n",
+         argv[2]);
+  return 1;
+}
+
 #ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
 static int cmd_mode_builtin(int argc, char **argv)
 {
@@ -1561,8 +1651,10 @@ static void print_usage(void)
   printf("  unpair                      forget all stored Bluetooth pairings\n");
   printf("  dump  [ms]                  dump raw IMU samples for ms (default 1000)\n");
   printf("  set   odr        <hz>       ODR  13|26|52|104|208|416|833 (default 833, capped)\n");
-  printf("  set   accel_fsr  <g>        accel FSR 2|4|8|16 (default 8)\n");
-  printf("  set   gyro_fsr   <dps>      gyro FSR  125|250|500|1000|2000 (default 2000)\n");
+  printf("  set   accel_fsr  <g>        accel FSR 2|4|8|16 (default 2, Phase 2.5)\n");
+  printf("  set   gyro_fsr   <dps>      gyro FSR  125|250|500|1000|2000 (default 1000, Phase 2.5)\n");
+  printf("  _imu_cap start [sec]        begin Tedaldi capture (104 Hz, 27 B/frame); duration 0 = until stop\n");
+  printf("  _imu_cap stop               end Tedaldi capture, restore 833 Hz\n");
 #ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
   printf("  mode  <shell|telemetry>     switch BT-side NSH shell mode (Issue #108)\n");
   printf("  diag  [reset]               dump BT-NSH diagnostic counters (#109)\n");
@@ -1628,6 +1720,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "dump") == 0)
     {
       return cmd_dump(argc, argv);
+    }
+
+  if (strcmp(argv[1], "_imu_cap") == 0)
+    {
+      return cmd_imu_cap(argc, argv);
     }
 
 #ifdef CONFIG_APP_BTSENSOR_SHELL_MODE

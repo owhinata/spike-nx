@@ -32,6 +32,16 @@ extern "C" {
 #define BTSENSOR_FRAME_MAGIC          0xB66B
 #define BTSENSOR_FRAME_TYPE_BUNDLE    0x02
 
+/* Phase 2.5 (#145): IMU capture frame type emitted by btsensor_imu_cap_-
+ * mode.c during a Tedaldi calibration session.  Mutually exclusive with
+ * BUNDLE on the BT byte stream — BUNDLE emission is paused while
+ * IMU_CAP is active.  One frame per IMU sample (no batching) so the
+ * host-side scanner can demux per-sample and the seq counter detects
+ * any drop with single-sample granularity.
+ */
+
+#define BTSENSOR_FRAME_TYPE_IMU_CAP   0x03
+
 #define BTSENSOR_BUNDLE_ENVELOPE_SIZE 5
 #define BTSENSOR_BUNDLE_HEADER_SIZE   16
 #define BTSENSOR_IMU_SAMPLE_SIZE      16
@@ -39,6 +49,27 @@ extern "C" {
 #define BTSENSOR_TLV_PAYLOAD_MAX      32
 #define BTSENSOR_TLV_COUNT            6
 #define BTSENSOR_IMU_SAMPLES_MAX      8
+
+/* IMU_CAP payload layout (22 B, frame = envelope 5 B + payload = 27 B):
+ *
+ *   +0   timestamp_us (uint32 LE, low 32 bits of CLOCK_BOOTTIME at the
+ *                      ISR-captured sample time)
+ *   +4   ax,ay,az     (int16 LE × 3, raw LSB)
+ *   +10  gx,gy,gz     (int16 LE × 3, raw LSB)
+ *   +16  temp_raw     (int16 LE, LSM6DSL OUT_TEMP_L/H — Tedaldi ambient
+ *                      temperature record for the cal session)
+ *   +18  fsr_xl_idx   (uint8, per-sample, session-invariant — host
+ *                      rejects the file if it changes mid-session)
+ *   +19  fsr_gy_idx   (uint8, per-sample, session-invariant)
+ *   +20  seq          (uint16 LE, wraps at 0xFFFF — ~10 min @ 104 Hz
+ *                      stays unique, enough for a 240 s Tedaldi run)
+ *
+ * Throughput: 104 Hz × 27 B = 2.8 KB/s, comfortably inside SPP bandwidth.
+ */
+
+#define BTSENSOR_IMU_CAP_PAYLOAD_SIZE 22
+#define BTSENSOR_IMU_CAP_FRAME_SIZE                                \
+    (BTSENSOR_BUNDLE_ENVELOPE_SIZE + BTSENSOR_IMU_CAP_PAYLOAD_SIZE)
 
 /* Worst case bundle size when every TLV is FRESH with full 32 B payload
  * and the IMU section is full (8 samples).  Used to size scratch buffers

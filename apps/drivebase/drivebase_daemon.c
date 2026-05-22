@@ -26,6 +26,7 @@
 #include <nuttx/config.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
 #include <semaphore.h>
@@ -40,6 +41,8 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <nuttx/sensors/ioctl.h>
 
 #include <arch/board/board_drivebase.h>
 
@@ -291,6 +294,40 @@ static int daemon_task_main(int argc, char *argv[])
   d->handler.wheel_d_um = d->wheel_d_um;
   d->handler.axle_t_um  = d->axle_t_um;
   d->handler.tick_ms    = tick_ms;
+
+  /* Phase 2.5 (#145) — layer 2 of the ODR rollback 3-layer defense:
+   * unconditionally force the LSM6DSL ODR back to 833 Hz before we
+   * subscribe.  btsensor IMU_CAP mode switches the driver to 104 Hz
+   * during a Tedaldi capture session; if that process crashed or was
+   * killed before its layer-1 cleanup ran, the driver state would
+   * persist into a fresh `drivebase start` and silently corrupt
+   * integration.  Issuing SET unconditionally here means a cold-start
+   * after a btsensor crash always lands at the expected 833 Hz, and
+   * a `drivebase start` racing an active IMU_CAP session wins (any
+   * already-captured frame data is rejected by the host via the
+   * per-sample fsr_*_idx change).
+   *
+   * Transient O_WRONLY fd so we don't subscribe — sensor upper-half
+   * auto-activates on O_RDOK, and we want the topic to come up only
+   * via db_imu_open() below.
+   */
+
+  int odr_fd = open("/dev/uorb/sensor_imu0", O_WRONLY);
+  if (odr_fd >= 0)
+    {
+      if (ioctl(odr_fd, SNIOC_SETSAMPLERATE, 833) < 0)
+        {
+          syslog(LOG_WARNING,
+                 "drivebase: ODR force 833 Hz failed errno %d\n", errno);
+        }
+
+      close(odr_fd);
+    }
+  else
+    {
+      syslog(LOG_WARNING,
+             "drivebase: ODR force open errno %d (continuing)\n", errno);
+    }
 
   /* IMU is best-effort — the daemon runs encoder-only if open fails. */
 

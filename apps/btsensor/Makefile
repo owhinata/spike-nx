@@ -47,6 +47,11 @@ CSRCS  += btsensor_capture_mode.c
 CFLAGS += -I$(APPDIR)/external/capture/include
 endif
 
+# IMU_CAP mode for Tedaldi calibration (Issue #145, Phase 2.5).
+# Unconditional — talks only to /dev/uorb/sensor_imu0 (already a
+# btsensor dependency via imu_sampler.c).
+CSRCS  += btsensor_imu_cap_mode.c
+
 # Pulled-in chipset init script (TI v1.4 service pack, eHCILL disabled —
 # originally from pybricks, see apps/btsensor/chipset/cc256x_init_script.c).
 CSRCS  += chipset/cc256x_init_script.c

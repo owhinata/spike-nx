@@ -19,6 +19,8 @@
  *   GET ODR                  reply "OK <enum_idx>" (lsm6dsl_odr_e)
  *   GET ACCEL_FSR            reply "OK <enum_idx>" (lsm6dsl_fsr_xl_e)
  *   GET GYRO_FSR             reply "OK <enum_idx>" (lsm6dsl_fsr_gy_e)
+ *   _IMU_CAP START [sec]     enter Tedaldi capture mode (Phase 2.5)
+ *   _IMU_CAP STOP            exit Tedaldi capture mode, restore 833 Hz
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -49,6 +51,8 @@
 #ifdef CONFIG_APP_CAPTURE
 #  include "btsensor_capture_mode.h"
 #endif
+
+#include "btsensor_imu_cap_mode.h"
 
 /****************************************************************************
  * Private Data
@@ -469,6 +473,68 @@ static void cmd_get(char *what)
   reply(buf);
 }
 
+/* `_IMU_CAP START [duration_sec]` / `_IMU_CAP STOP` — Phase 2.5 (#145)
+ * Tedaldi calibration capture entry from the BT host (ImuViewer).
+ * Mirrors the `btsensor _imu_cap ...` NSH builtin so a host can drive
+ * the same flow over either transport.  Refuses with ERR busy when
+ * the daemon is already in SHELL / CAPTURE.
+ */
+
+static void cmd_imu_cap(char *sub, char **save)
+{
+  if (sub == NULL)
+    {
+      reply("ERR invalid _IMU_CAP\n");
+      return;
+    }
+
+  if (strcasecmp(sub, "START") == 0)
+    {
+#ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
+      if (btsensor_shell_is_active())
+        {
+          reply("ERR busy\n");
+          return;
+        }
+#endif
+#ifdef CONFIG_APP_CAPTURE
+      if (btsensor_capture_mode_is_active())
+        {
+          reply("ERR busy\n");
+          return;
+        }
+#endif
+
+      uint32_t duration_sec = 0;
+      char *dur_tok = strtok_r(NULL, " ", save);
+      if (dur_tok != NULL)
+        {
+          char *end;
+          long v = strtol(dur_tok, &end, 10);
+          if (*end != '\0' || v < 0 || v > 86400)
+            {
+              reply("ERR invalid duration\n");
+              return;
+            }
+
+          duration_sec = (uint32_t)v;
+        }
+
+      reply_rc(btsensor_imu_cap_mode_enter(duration_sec), "_IMU_CAP START");
+      return;
+    }
+
+  if (strcasecmp(sub, "STOP") == 0)
+    {
+      reply_rc(btsensor_imu_cap_mode_exit(), "_IMU_CAP STOP");
+      return;
+    }
+
+  char buf[BTSENSOR_CMD_MAX_LINE];
+  snprintf(buf, sizeof(buf), "ERR invalid _IMU_CAP %s\n", sub);
+  reply(buf);
+}
+
 #ifdef CONFIG_APP_BTSENSOR_SHELL_MODE
 static void cmd_mode(char *arg)
 {
@@ -634,6 +700,12 @@ static void process_line(char *line)
   if (strcmp(cmd, "GET") == 0)
     {
       cmd_get(strtok_r(NULL, " ", &save));
+      return;
+    }
+
+  if (strcasecmp(cmd, "_IMU_CAP") == 0)
+    {
+      cmd_imu_cap(strtok_r(NULL, " ", &save), &save);
       return;
     }
 
