@@ -24,6 +24,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "drivebase_imu_cal.h"
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -65,22 +67,32 @@ struct db_imu_s
   bool     opened;
   bool     calibrated;
 
-  /* Z-axis bias.  Estimated as a running average of gz when |gyro|
-   * stays below `bias_idle_threshold_lsb` for `bias_window_us`
-   * continuously.  Stored in raw LSB so the per-sample correction is
-   * a single subtraction.
+  /* Phase 2.5: per-axis gyro bias in x1000 fractional LSB (millis-LSB).
+   *
+   * Index 2 (Z) is the only axis the runtime idle estimator updates,
+   * since the heading integrator consumes only the Z component.  X
+   * and Y stay at the cal-file initial value (or zero when no cal is
+   * loaded) plus FSR rescale — they contribute to corrected Z only
+   * through the off-diagonal entries M_x1000[2][0..1], which are
+   * typically <0.5 % of the diagonal so a few-LSB X/Y bias drift is
+   * sub-mdeg/s on Z.
+   *
+   * x1000 lets the idle EMA hold sub-LSB bias values: ±1 LSB at
+   * FSR=1000 dps equals ±35 mdps ≈ ±2 deg/min, which would dominate
+   * the static-drift budget if quantised to int LSB.  See
+   * [[project_phase_2_5_plan]] Blocker 2.
    */
 
-  int32_t  bias_z_lsb;
+  int32_t  bias_lsb_x1000[3];
   uint32_t bias_idle_threshold_lsb;
   uint64_t bias_idle_streak_us;
   uint64_t bias_window_us;
-  int64_t  bias_acc_lsb;
+  int64_t  bias_acc_lsb_x1000;    /* Z-axis raw × 1000 summed during idle */
   uint32_t bias_acc_count;
 
   /* Issue #139: dynamic gyro sensitivity tracking.  cur_fsr_gy_idx is
    * the enum value last seen on an incoming sample; when it changes,
-   * integrate() rescales bias_z_lsb / bias_idle_threshold_lsb to
+   * integrate() rescales bias_lsb_x1000 / bias_idle_threshold_lsb to
    * preserve their physical meaning, then recalibrates the
    * accumulator.  gyro_mdps_num = cur_fsr_gy_dps * 35 is used in the
    * per-sample mdeg formula (lsb * num * dt_us / 1e9 → mdeg).  Both
@@ -103,6 +115,14 @@ struct db_imu_s
 
   uint32_t sample_count;
   uint32_t drop_count;
+
+  /* Offline calibration data (M_x1000 + bias initial values).  Loaded
+   * from /mnt/flash/imu_cal.txt at open; falls back to Identity +
+   * zero on any error so the daemon runs uncalibrated (= pre-Phase
+   * 2.5 behaviour) instead of refusing to start.
+   */
+
+  struct db_imu_cal_s cal;
 };
 
 /****************************************************************************
@@ -138,9 +158,13 @@ void db_imu_push_sample(struct db_imu_s *im,
 int64_t db_imu_get_heading_mdeg(const struct db_imu_s *im);
 void    db_imu_set_heading_mdeg(struct db_imu_s *im, int64_t heading);
 
-/* Bias diagnostics */
+/* Bias diagnostics.  *_x1000 is the underlying x1000 fractional
+ * storage; the plain accessor truncates to int LSB for
+ * backward-compatible CLI / test prints.
+ */
 
 int32_t db_imu_get_bias_z_lsb(const struct db_imu_s *im);
+int32_t db_imu_get_bias_z_lsb_x1000(const struct db_imu_s *im);
 bool    db_imu_is_calibrated(const struct db_imu_s *im);
 
 /* Force-trigger calibration: hold the robot still for ~200 ms after

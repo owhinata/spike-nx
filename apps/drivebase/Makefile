@@ -31,6 +31,7 @@ CSRCS  += drivebase_drivebase.c
 CSRCS  += drivebase_rt.c
 CSRCS  += drivebase_chardev_handler.c
 CSRCS  += drivebase_imu.c
+CSRCS  += drivebase_imu_cal.c
 CSRCS  += drivebase_daemon.c
 CSRCS  += drivebase_config.c
 
