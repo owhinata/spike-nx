@@ -461,10 +461,16 @@ def test_bt_rfcomm_command_suite(p):
             assert _rfcomm_send_command(sock, "SET ACCEL_FSR 4") == "OK"
             assert _rfcomm_send_command(sock, "SET GYRO_FSR 1000") == "OK"
 
+            # Issue #139 changed `btsensor status` to print the
+            # driver-internal enum idx rather than the resolved physical
+            # value, mirroring the per-sample idx fields embedded in
+            # struct sensor_imu so consumers share one idx -> physical
+            # lookup table.  ODR_416HZ=6, FSR_XL_4G=2, FSR_GY_1000DPS=4
+            # in the lsm6dsl driver enums.
             status = p.sendCommand("btsensor status", timeout=5)
-            assert "odr=416Hz" in status, status
-            assert "accel_fsr=4g" in status, status
-            assert "gyro_fsr=1000dps" in status, status
+            assert "odr_idx=6" in status, status
+            assert "accel_fsr_idx=2" in status, status
+            assert "gyro_fsr_idx=4" in status, status
 
             # Phase 2: invalid arguments produce ERR.
             r = _rfcomm_send_command(sock, "SET ODR 1660")  # > 833 cap
@@ -561,9 +567,16 @@ def test_bt_rfcomm_command_suite(p):
             assert accel_fsr == 4, f"accel_fsr_g {accel_fsr} != 4"
             assert gyro_fsr == 1000, f"gyro_fsr_dps {gyro_fsr} != 1000"
 
-            # Phase 5: SET while IMU is on returns ERR busy.
-            r = _rfcomm_send_command(sock, "SET ODR 833")
-            assert r is not None and "busy" in r.lower(), r
+            # Phase 5 (#139): live SET is allowed while IMU is on.  The
+            # driver no longer rejects with EBUSY — per-sample
+            # odr_idx / fsr_*_idx in struct sensor_imu let consumers
+            # follow the change, and bundle_emitter splits BUNDLE
+            # frames on idx mismatch so each frame stays internally
+            # consistent.  Verify SET succeeds and the status echoes
+            # the new ODR.
+            assert _rfcomm_send_command(sock, "SET ODR 833") == "OK"
+            status = p.sendCommand("btsensor status", timeout=5)
+            assert "odr_idx=7" in status, status  # ODR_833HZ
 
             # Phase 6: IMU OFF cleanly stops the stream.
             assert _rfcomm_send_command(sock, "IMU OFF") == "OK"

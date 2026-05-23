@@ -15,8 +15,8 @@ The LSM6DS3TR-C is a single-die 6-axis IMU integrating a 3-axis accelerometer an
 | I2C Address | 0x6A (SDO/SA0 = GND) |
 | WHO_AM_I | 0x6A |
 | Startup ODR | 833 Hz (runtime-tunable via ioctl) |
-| Startup accel FSR | ±8 g (runtime-tunable to 2/4/8/16 g via ioctl) |
-| Startup gyro FSR | 2000 dps (runtime-tunable to 125/250/500/1000/2000 dps via ioctl) |
+| Startup accel FSR | ±2 g (runtime-tunable to 2/4/8/16 g via ioctl) — Phase 2.5 (#145) narrowed from ±8 g for 4× finer tilt resolution |
+| Startup gyro FSR | ±1000 dps (runtime-tunable to 125/250/500/1000/2000 dps via ioctl) — Phase 2.5 (#145) narrowed from ±2000 dps for 2× finer angular resolution while keeping 1.8× margin over the drivebase worst-case 565 dps |
 
 ## 3. Board Wiring
 
@@ -30,8 +30,8 @@ The LSM6DS3TR-C is a single-die 6-axis IMU integrating a 3-axis accelerometer an
 
 | Register | Setting | Purpose |
 |---|---|---|
-| CTRL1_XL (0x10) | ODR=833Hz, FS=±8g | Accel: ODR and full scale |
-| CTRL2_G (0x11) | ODR=833Hz, FS=2000dps | Gyro: ODR and full scale |
+| CTRL1_XL (0x10) | ODR=833Hz, FS=±2g | Accel: ODR and full scale (Phase 2.5 default) |
+| CTRL2_G (0x11) | ODR=833Hz, FS=±1000dps | Gyro: ODR and full scale (Phase 2.5 default) |
 | CTRL3_C (0x12) | BDU=1, IF_INC=1 | Block data update, address auto-increment |
 | CTRL5_C (0x14) | ROUNDING=011 | Rounding for burst reads |
 | DRDY_PULSE_CFG (0x0B) | DRDY_PULSED=1 | Pulsed mode DRDY |

@@ -251,9 +251,10 @@ struct imu_sample {                   // 16 byte
     uint32_t ts_delta_us;      // sample.ts - first_sample_ts_us
                                // (sample[0] = 0)
 };
-/* スケール係数は driver の起動時 FSR (デフォルト ±8g / ±2000 dps) で
- * 換算する: accel = raw * fsr_g * 9.80665 / 32768 [m/s^2]
- *           gyro  = raw * fsr_dps / 32768          [deg/s]
+/* スケール係数は driver の起動時 FSR (Phase 2.5 default
+ * ±2g / ±1000 dps、#145 以前は ±8g / ±2000 dps) で換算する:
+ *   accel = raw * fsr_g * 9.80665 / 32768 [m/s^2]
+ *   gyro  = raw * fsr_dps / 32768          [deg/s]
  * Issue #56 Commit E でフレームヘッダに FSR を埋め込む予定。
  */
 ```

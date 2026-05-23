@@ -429,7 +429,8 @@ struct imu_sample {                   // 16 bytes
     uint32_t ts_delta_us;      // sample.ts - first_sample_ts_us
                                // (sample[0] = 0)
 };
-/* Convert with the driver's startup FSR (default ±8 g / ±2000 dps):
+/* Convert with the driver's startup FSR (Phase 2.5 default
+ * ±2 g / ±1000 dps; was ±8 g / ±2000 dps pre-#145):
  *   accel_ms2  = raw * fsr_g  * 9.80665 / 32768
  *   gyro_dps   = raw * fsr_dps / 32768
  * Issue #56 Commit E embeds the per-frame FSR in the header so the PC

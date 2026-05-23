@@ -404,7 +404,7 @@ sudo python3 btsensor_parser.py /dev/rfcomm0
 # parse_stream に渡す
 ```
 
-Hub 本体を静置すると `accel_z ≈ ±1000 mg` (±1g、デフォルト ±8g 設定時)、振ると peak が立つ。gyro は静置 + warm-up 後 ≈ 0 dps。
+Hub 本体を静置すると `accel_z ≈ ±1000 mg` (±1g、Phase 2.5 (#145) default ±2g 設定時)、振ると peak が立つ。gyro は静置 + warm-up 後 ≈ 0 dps。
 
 ## ASCII コマンドプロトコル
 

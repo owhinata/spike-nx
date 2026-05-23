@@ -441,9 +441,10 @@ Run on Linux:
 sudo python3 btsensor_parser.py /dev/rfcomm0
 ```
 
-A motionless Hub at the default ±8 g / ±2000 dps reports
-`accel_z ≈ ±1000 mg` (±1 g) with the other axes near zero; shake it to
-see peaks.  `gyro_dps` is ≈ 0 at rest after a brief warm-up.
+A motionless Hub at the Phase 2.5 (#145) default ±2 g / ±1000 dps
+reports `accel_z ≈ ±1000 mg` (±1 g) with the other axes near zero;
+shake it to see peaks.  `gyro_dps` is ≈ 0 at rest after a brief
+warm-up.
 
 ## ASCII command protocol
 
