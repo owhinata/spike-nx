@@ -293,6 +293,71 @@ static void imu_calibrate_silent(struct db_imu_s *im, uint32_t ms)
     }
 }
 
+/* Issue #147 diagnostic.  Stream heading + quaternion state once per
+ * 1000 ms so we can observe whether Madgwick is tracking motion live or
+ * the heading is being pulled back during static phases.  Calibration
+ * + heading reset + drain loop are the same as `_imu drift`; only the
+ * per-tick print differs.
+ */
+
+static int do_imu_watch(struct db_imu_s *im, int argc, FAR char *argv[])
+{
+  if (argc < 1)
+    {
+      fprintf(stderr, "usage: drivebase _imu watch <sec>\n");
+      return 1;
+    }
+
+  uint32_t sec = (uint32_t)atoi(argv[0]);
+  if (sec == 0 || sec > 120)
+    {
+      fprintf(stderr, "_imu watch: sec must be 1..120\n");
+      return 1;
+    }
+
+  imu_calibrate_silent(im, 250);
+  db_imu_set_heading_mdeg(im, 0);
+
+  printf("# t_ms heading_mdeg q0_x1000 q1 q2 q3 tilt_mdeg "
+         "fsr_match samples\n");
+
+  uint64_t t0_us       = now_us();
+  uint64_t next_log_us = t0_us;
+  uint64_t deadline_us = t0_us + (uint64_t)sec * 1000000ULL;
+
+  while (now_us() < deadline_us)
+    {
+      usleep(10000);
+      db_imu_drain_and_update(im, now_us());
+
+      uint64_t now = now_us();
+      if (now >= next_log_us)
+        {
+          float q[4];
+          db_imu_get_quaternion(im, q);
+          int64_t heading = db_imu_get_heading_mdeg(im);
+          int32_t tilt_mdeg =
+              (int32_t)(db_imu_get_tilt_deg(im) * 1000.0f);
+
+          printf("watch t_ms=%lu heading=%lld q=%ld %ld %ld %ld "
+                 "tilt_mdeg=%ld xl=%d s=%lu\n",
+                 (unsigned long)((now - t0_us) / 1000),
+                 (long long)heading,
+                 (long)(q[0] * 1000.0f),
+                 (long)(q[1] * 1000.0f),
+                 (long)(q[2] * 1000.0f),
+                 (long)(q[3] * 1000.0f),
+                 (long)tilt_mdeg,
+                 (int)im->accel_fsr_match,
+                 (unsigned long)im->sample_count);
+
+          next_log_us += 1000000ULL;
+        }
+    }
+
+  return 0;
+}
+
 static int do_imu_drift(struct db_imu_s *im, int argc, FAR char *argv[])
 {
   if (argc < 1)
@@ -500,7 +565,8 @@ static int do_imu_subcmd(int argc, FAR char *argv[])
     {
       fprintf(stderr,
               "usage: drivebase _imu "
-              "{calibrate|heading <ms>|drift <sec>|verify <deg> [ms]|show}\n");
+              "{calibrate|heading <ms>|drift <sec>|"
+              "verify <deg> [ms]|show|watch <sec>}\n");
       return 1;
     }
 
@@ -578,6 +644,12 @@ static int do_imu_subcmd(int argc, FAR char *argv[])
   else if (strcmp(argv[0], "show") == 0)
     {
       int sub_rc = do_imu_show(&im);
+      db_imu_close(&im);
+      return sub_rc;
+    }
+  else if (strcmp(argv[0], "watch") == 0)
+    {
+      int sub_rc = do_imu_watch(&im, argc - 1, &argv[1]);
       db_imu_close(&im);
       return sub_rc;
     }
