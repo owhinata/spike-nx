@@ -34,6 +34,7 @@ public sealed class SessionOrchestrator : IAsyncDisposable
     public bool IsConnected => _client is not null;
 
     public event Action<BundleFrame>? BundleReceived;
+    public event Action<ImuCapFrame>? ImuCapFrameReceived;
 
     public async Task ConnectAsync(string bdAddr, int channel, CancellationToken ct)
     {
@@ -46,6 +47,7 @@ public sealed class SessionOrchestrator : IAsyncDisposable
         _session = new BtsensorSession(_stream);
         _client = new BtsensorCommandClient(_session);
         _session.BundleReceived += OnBundle;
+        _session.ImuCapFrameReceived += OnImuCap;
         _session.Start();
     }
 
@@ -70,6 +72,22 @@ public sealed class SessionOrchestrator : IAsyncDisposable
     public Task<BtsensorReply> GetOdrAsync(CancellationToken ct) => SendAsync("GET ODR", ct);
     public Task<BtsensorReply> GetAccelFsrAsync(CancellationToken ct) => SendAsync("GET ACCEL_FSR", ct);
     public Task<BtsensorReply> GetGyroFsrAsync(CancellationToken ct) => SendAsync("GET GYRO_FSR", ct);
+
+    /// <summary>
+    /// Phase 2.5 / Issue #145: enter IMU_CAP mode on the Hub.  When
+    /// <paramref name="durationSec"/> is 0 the session runs until
+    /// <see cref="ImuCapStopAsync"/>; otherwise the Hub auto-exits
+    /// after the requested duration.  Pauses the BUNDLE stream until
+    /// the matching STOP / timeout, so callers should drop the
+    /// `_imu_cap` window before re-enabling IMU telemetry.
+    /// </summary>
+    public Task<BtsensorReply> ImuCapStartAsync(uint durationSec, CancellationToken ct) =>
+        SendAsync(durationSec == 0
+            ? "_IMU_CAP START"
+            : $"_IMU_CAP START {durationSec}", ct);
+
+    public Task<BtsensorReply> ImuCapStopAsync(CancellationToken ct) =>
+        SendAsync("_IMU_CAP STOP", ct);
 
     public Task<BtsensorReply> SetSensorModeAsync(
         LegoClassId classId, int mode, CancellationToken ct) =>
@@ -155,6 +173,7 @@ public sealed class SessionOrchestrator : IAsyncDisposable
         if (_session is not null)
         {
             _session.BundleReceived -= OnBundle;
+            _session.ImuCapFrameReceived -= OnImuCap;
         }
         _client?.Dispose();
         _client = null;
@@ -177,6 +196,18 @@ public sealed class SessionOrchestrator : IAsyncDisposable
         try
         {
             BundleReceived?.Invoke(frame);
+        }
+        catch
+        {
+            // Ignore subscriber errors; do not break the reader.
+        }
+    }
+
+    private void OnImuCap(ImuCapFrame frame)
+    {
+        try
+        {
+            ImuCapFrameReceived?.Invoke(frame);
         }
         catch
         {

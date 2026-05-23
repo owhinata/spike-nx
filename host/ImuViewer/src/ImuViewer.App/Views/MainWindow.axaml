@@ -23,72 +23,134 @@
       <Setter Property="FontWeight" Value="SemiBold" />
       <Setter Property="Margin" Value="0,8,0,4" />
     </Style>
+    <!-- Sectioned Expander styling: heading colour matches the legacy
+         TextBlock.header so collapsible sections look consistent with
+         the Bluetooth block (which stays always-visible above). -->
+    <Style Selector="Expander.section">
+      <Setter Property="Margin" Value="0,4,0,0" />
+      <!-- Stretch every section to the sidebar width so collapsed
+           headers do not shrink to text length and produce the
+           uneven left edge the bench screenshot showed.  MaxWidth
+           caps the expanded body so a wide child (long path TextBox,
+           BluetoothPort label) cannot push one Expander past its
+           peers; 320 = sidebar (360) - padding (12*2) - vertical
+           scrollbar slack (~16). -->
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="MaxWidth" Value="320" />
+    </Style>
+    <Style Selector="Expander.section /template/ ToggleButton">
+      <Setter Property="Foreground" Value="#80B0FF" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+    </Style>
   </Window.Styles>
 
-  <Grid ColumnDefinitions="320,*">
-    <ScrollViewer Grid.Column="0" Background="#222222" Padding="12">
-      <StackPanel Spacing="8">
+  <!-- Avalonia 11 didn't honour Bounds.Height bindings or the
+       implicit DockPanel/Grid height propagation reliably for the
+       sidebar ScrollViewer — the ScrollViewer kept sizing to its
+       content's DesiredHeight, leaving the last items below the
+       window edge with no scroll range to reach them.  Code-behind
+       (MainWindow.axaml.cs) explicitly updates SidebarBorder.Height
+       on every Window SizeChanged so the wrapper is always exactly
+       the visible window height. -->
+  <DockPanel LastChildFill="True">
+    <Border x:Name="SidebarBorder"
+            DockPanel.Dock="Left" Width="360" Background="#222222">
+    <ScrollViewer Padding="12"
+                  HorizontalScrollBarVisibility="Disabled"
+                  VerticalScrollBarVisibility="Visible">
+      <!-- Bottom Margin gives the ScrollViewer guaranteed extra scroll
+           range past the last Expander.  Avalonia 11's ScrollViewer
+           was clipping the last item's lower portion regardless of
+           the height-constraint plumbing — a 60 px bottom margin is
+           wide enough that even Telemetry's "status" row stays
+           reachable on the scrollbar. -->
+      <StackPanel Spacing="8" HorizontalAlignment="Stretch"
+                  Margin="0,0,0,60">
         <TextBlock Classes="header" Text="Bluetooth" />
-        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+        <!-- 2-column layout: col 0 = ComboBox (top) + Connect (bottom,
+             left-aligned); col 1 = Refresh + Disconnect (Auto-width
+             so they share their column's width and left-align inside
+             it).  MinWidth on Connect matches the Disconnect Auto
+             width so the two action buttons visually pair.  MaxWidth
+             matches the section Expander cap above so the Bluetooth
+             header row stays the same width as every other section. -->
+        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto"
+              HorizontalAlignment="Stretch"
+              MaxWidth="320">
+          <!-- MaxWidth on the ComboBox itself (not just the inner
+               ItemTemplate TextBlock) is required: Avalonia's
+               SelectionBoxItem measure does not always honour the
+               template's MaxWidth, so the ComboBox's outer chrome
+               (toggle button + content presenter) can still report a
+               wider DesiredWidth that grows the *-column.  Capping the
+               whole ComboBox forces a stable column width whether
+               (no port) or a selected device label is showing. -->
           <ComboBox Grid.Row="0" Grid.Column="0"
+                    Margin="0,0,4,4"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Stretch"
+                    MaxWidth="240"
                     ItemsSource="{Binding Ports}"
                     SelectedItem="{Binding SelectedPort}"
-                    PlaceholderText="(no port)" />
+                    PlaceholderText="(no port)">
+            <ComboBox.ItemTemplate>
+              <DataTemplate>
+                <!-- MaxWidth caps the per-item measure so the ComboBox
+                     does not auto-grow its column to fit "SPIKE-BT-
+                     Sensor (F8:2E:0C:...)".  TextTrimming then ellipsizes
+                     anything past the cap.  240 = sidebar (360) - padding
+                     (24) - Refresh column (~85) - margin (4) - some
+                     slack so a slightly wider Refresh button doesn't
+                     push us past the edge. -->
+                <TextBlock TextTrimming="CharacterEllipsis"
+                           MaxWidth="240"
+                           Text="{Binding DisplayName}" />
+              </DataTemplate>
+            </ComboBox.ItemTemplate>
+          </ComboBox>
           <Button Grid.Row="0" Grid.Column="1"
+                  Margin="0,0,0,4"
+                  HorizontalAlignment="Stretch"
                   Content="Refresh"
                   Command="{Binding RefreshPortsCommand}" />
           <Button Grid.Row="1" Grid.Column="0"
+                  HorizontalAlignment="Left"
+                  MinWidth="92"
                   Content="Connect"
                   Command="{Binding ConnectCommand}"
                   IsEnabled="{Binding CanConnect}" />
           <Button Grid.Row="1" Grid.Column="1"
+                  HorizontalAlignment="Stretch"
                   Content="Disconnect"
                   Command="{Binding DisconnectCommand}"
                   IsEnabled="{Binding CanDisconnect}" />
         </Grid>
 
-        <TextBlock Classes="header" Text="IMU control" />
-        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto">
-          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="ODR (Hz)" VerticalAlignment="Center" />
-          <ComboBox Grid.Row="0" Grid.Column="1" HorizontalAlignment="Stretch"
-                    ItemsSource="{x:Static vm:MainViewModel.OdrOptions}"
-                    SelectedItem="{Binding OdrHz}"
-                    IsEnabled="{Binding CanEditImuConfig}" />
-          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Accel FSR (g)" VerticalAlignment="Center" />
-          <ComboBox Grid.Row="1" Grid.Column="1" HorizontalAlignment="Stretch"
-                    ItemsSource="{x:Static vm:MainViewModel.AccelFsrOptions}"
-                    SelectedItem="{Binding AccelFsrG}"
-                    IsEnabled="{Binding CanEditImuConfig}" />
-          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Gyro FSR (dps)" VerticalAlignment="Center" />
-          <ComboBox Grid.Row="2" Grid.Column="1" HorizontalAlignment="Stretch"
-                    ItemsSource="{x:Static vm:MainViewModel.GyroFsrOptions}"
-                    SelectedItem="{Binding GyroFsrDps}"
-                    IsEnabled="{Binding CanEditImuConfig}" />
-        </Grid>
+        <!-- LEGO Sensor first: user-facing controls (sensor input + write)
+             come before the lower-level IMU configuration. -->
+        <Expander Classes="section" Header="LEGO Sensor" IsExpanded="False">
+          <StackPanel Spacing="8">
+            <Grid ColumnDefinitions="*,*">
+              <Button Grid.Column="0" Margin="0,0,4,0" Content="SENSOR ON"
+                      HorizontalAlignment="Stretch"
+                      Command="{Binding SensorOnCommand}" IsEnabled="{Binding CanToggleSensor}" />
+              <Button Grid.Column="1" Content="SENSOR OFF" HorizontalAlignment="Stretch"
+                      Command="{Binding SensorOffCommand}" IsEnabled="{Binding CanToggleSensor}" />
+            </Grid>
 
-        <Grid ColumnDefinitions="*,*">
-          <Button Grid.Column="0" Content="IMU ON" HorizontalAlignment="Stretch"
-                  Command="{Binding ImuOnCommand}" IsEnabled="{Binding CanToggleImu}" />
-          <Button Grid.Column="1" Content="IMU OFF" HorizontalAlignment="Stretch"
-                  Command="{Binding ImuOffCommand}" IsEnabled="{Binding CanToggleImu}" />
-        </Grid>
-
-        <TextBlock Classes="header" Text="LEGO Sensor" />
-        <Grid ColumnDefinitions="*,*">
-          <Button Grid.Column="0" Content="SENSOR ON" HorizontalAlignment="Stretch"
-                  Command="{Binding SensorOnCommand}" IsEnabled="{Binding CanToggleSensor}" />
-          <Button Grid.Column="1" Content="SENSOR OFF" HorizontalAlignment="Stretch"
-                  Command="{Binding SensorOffCommand}" IsEnabled="{Binding CanToggleSensor}" />
-        </Grid>
-
-        <!-- Sensor write panel: pick a class and drive its mode/SEND/PWM. -->
-        <StackPanel DataContext="{Binding SensorWrite}"
-                    IsEnabled="{Binding WriteEnabled}"
-                    Spacing="4">
-          <TextBlock Classes="header" Text="{Binding WriteHeader}" />
-          <ComboBox HorizontalAlignment="Stretch"
-                    ItemsSource="{Binding AvailableClasses}"
-                    SelectedItem="{Binding SelectedClass}" />
+            <!-- Sensor write panel: pick a class and drive its mode/SEND/PWM.
+                 Nested into LEGO Sensor so the two related controls
+                 share one collapse target. -->
+            <StackPanel DataContext="{Binding SensorWrite}"
+                        IsEnabled="{Binding WriteEnabled}"
+                        Spacing="4">
+              <TextBlock Classes="label" Text="{Binding WriteHeader}" />
+              <ComboBox HorizontalAlignment="Stretch"
+                        ItemsSource="{Binding AvailableClasses}"
+                        SelectedItem="{Binding SelectedClass}" />
 
           <TextBlock Classes="label" Text="MODE" />
           <Grid ColumnDefinitions="*,Auto">
@@ -143,55 +205,164 @@
                     Command="{Binding BrakeCommand}" />
           </StackPanel>
 
+              <TextBlock Classes="label" FontSize="11"
+                         Foreground="#A0A0A0"
+                         Text="{Binding StatusText}"
+                         TextWrapping="Wrap" />
+            </StackPanel>
+          </StackPanel>
+        </Expander>
+
+        <Expander Classes="section" Header="IMU control" IsExpanded="False">
+          <StackPanel Spacing="8">
+            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto">
+              <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="ODR (Hz)" VerticalAlignment="Center" />
+              <ComboBox Grid.Row="0" Grid.Column="1" HorizontalAlignment="Stretch"
+                        ItemsSource="{x:Static vm:MainViewModel.OdrOptions}"
+                        SelectedItem="{Binding OdrHz}"
+                        IsEnabled="{Binding CanEditImuConfig}" />
+              <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Accel FSR (g)" VerticalAlignment="Center" />
+              <ComboBox Grid.Row="1" Grid.Column="1" HorizontalAlignment="Stretch"
+                        ItemsSource="{x:Static vm:MainViewModel.AccelFsrOptions}"
+                        SelectedItem="{Binding AccelFsrG}"
+                        IsEnabled="{Binding CanEditImuConfig}" />
+              <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Gyro FSR (dps)" VerticalAlignment="Center" />
+              <ComboBox Grid.Row="2" Grid.Column="1" HorizontalAlignment="Stretch"
+                        ItemsSource="{x:Static vm:MainViewModel.GyroFsrOptions}"
+                        SelectedItem="{Binding GyroFsrDps}"
+                        IsEnabled="{Binding CanEditImuConfig}" />
+            </Grid>
+
+            <Grid ColumnDefinitions="*,*">
+              <Button Grid.Column="0" Content="IMU ON" HorizontalAlignment="Stretch"
+                      Command="{Binding ImuOnCommand}" IsEnabled="{Binding CanToggleImu}" />
+              <Button Grid.Column="1" Content="IMU OFF" HorizontalAlignment="Stretch"
+                      Command="{Binding ImuOffCommand}" IsEnabled="{Binding CanToggleImu}" />
+            </Grid>
+          </StackPanel>
+        </Expander>
+
+        <!-- Phase 2.5 (#145): Tedaldi calibration capture.  Writes raw
+             27 B IMU_CAP frames to a .bin while the Hub is in
+             _IMU_CAP mode at 104 Hz; the host-side tools/imu_cal
+             pipeline turns it into imu_cal.txt for /mnt/flash. -->
+        <Expander Classes="section" Header="IMU Capture (Tedaldi)" IsExpanded="False"
+                  DataContext="{Binding Capture}">
+        <StackPanel Spacing="4">
+          <TextBlock Classes="label" Text="Output file" />
+          <Grid ColumnDefinitions="*,Auto">
+            <!-- MaxWidth caps the TextBox so a long path like
+                 "/home/ouwa/imu_cap_..." cannot push the * column
+                 (and hence the whole IMU Capture Expander) wider
+                 than the sidebar.  Same approach as the BT ComboBox
+                 ItemTemplate above. -->
+            <TextBox Grid.Column="0"
+                     Margin="0,0,4,0"
+                     MaxWidth="240"
+                     Text="{Binding OutputPath}"
+                     IsEnabled="{Binding CanEditOutputPath}" />
+            <Button Grid.Column="1"
+                    Content="Browse..."
+                    Click="OnBrowseOutputClicked"
+                    IsEnabled="{Binding CanEditOutputPath}" />
+          </Grid>
+          <Grid ColumnDefinitions="160,*">
+            <TextBlock Grid.Column="0" Classes="label"
+                       Text="Duration (s, 0=until Stop)"
+                       VerticalAlignment="Center" />
+            <NumericUpDown Grid.Column="1"
+                           Minimum="0" Maximum="3600" Increment="30"
+                           Value="{Binding DurationSec}"
+                           IsEnabled="{Binding !IsCapturing}" />
+          </Grid>
+          <Grid ColumnDefinitions="*,*">
+            <Button Grid.Column="0" Content="Start capture"
+                    HorizontalAlignment="Stretch"
+                    Command="{Binding StartCommand}"
+                    IsEnabled="{Binding CanStart}" />
+            <Button Grid.Column="1" Content="Stop capture"
+                    HorizontalAlignment="Stretch"
+                    Command="{Binding StopCommand}"
+                    IsEnabled="{Binding CanStop}" />
+          </Grid>
+          <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto">
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="frames" />
+            <TextBlock Grid.Row="0" Grid.Column="1" Classes="value"
+                       Text="{Binding FrameCount}" />
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="drops" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Classes="value"
+                       Text="{Binding DropCount}" />
+            <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="elapsed (s)" />
+            <TextBlock Grid.Row="2" Grid.Column="1" Classes="value"
+                       Text="{Binding ElapsedSec, StringFormat={}{0:0.0}}" />
+            <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="temp (°C)" />
+            <TextBlock Grid.Row="3" Grid.Column="1" Classes="value"
+                       Text="{Binding TemperatureC, StringFormat={}{0:0.0}}" />
+          </Grid>
           <TextBlock Classes="label" FontSize="11"
                      Foreground="#A0A0A0"
                      Text="{Binding StatusText}"
                      TextWrapping="Wrap" />
         </StackPanel>
+        </Expander>
 
-        <TextBlock Classes="header" Text="Madgwick" />
-        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto">
-          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="β (gain)" VerticalAlignment="Center" />
-          <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="1" Increment="0.01" Value="{Binding MadgwickBeta}" />
-          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="ε gyro (dps)" VerticalAlignment="Center" />
-          <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="50" Increment="0.5" Value="{Binding GyroEpsilonDps}" />
-        </Grid>
-        <Grid ColumnDefinitions="*,*">
-          <Button Grid.Column="0" Content="Reset orientation"
-                  HorizontalAlignment="Stretch"
-                  Command="{Binding ResetOrientationCommand}" />
-          <Button Grid.Column="1" Content="Calibrate gyro"
-                  HorizontalAlignment="Stretch"
-                  Command="{Binding CalibrateGyroCommand}"
-                  IsEnabled="{Binding CanToggleImu}" />
-        </Grid>
-        <TextBlock Classes="value"
-                   Text="{Binding CalibrationStatusText}"
-                   FontSize="11"
-                   Foreground="#A0A0A0"
-                   TextWrapping="Wrap" />
+        <Expander Classes="section" Header="Madgwick" IsExpanded="False">
+          <StackPanel Spacing="8">
+            <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto">
+              <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="β (gain)" VerticalAlignment="Center" />
+              <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="1" Increment="0.01" Value="{Binding MadgwickBeta}" />
+              <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="ε gyro (dps)" VerticalAlignment="Center" />
+              <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="50" Increment="0.5" Value="{Binding GyroEpsilonDps}" />
+            </Grid>
+            <Grid ColumnDefinitions="*,*">
+              <Button Grid.Column="0" Content="Reset orientation"
+                      HorizontalAlignment="Stretch"
+                      Command="{Binding ResetOrientationCommand}" />
+              <Button Grid.Column="1" Content="Calibrate gyro"
+                      HorizontalAlignment="Stretch"
+                      Command="{Binding CalibrateGyroCommand}"
+                      IsEnabled="{Binding CanToggleImu}" />
+            </Grid>
+            <TextBlock Classes="value"
+                       Text="{Binding CalibrationStatusText}"
+                       FontSize="11"
+                       Foreground="#A0A0A0"
+                       TextWrapping="Wrap" />
+          </StackPanel>
+        </Expander>
 
-        <TextBlock Classes="header" Text="Telemetry" />
-        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
-          <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="quat" />
-          <TextBlock Grid.Row="0" Grid.Column="1" Classes="value"
-                     Text="{Binding OrientationText}" TextWrapping="Wrap" />
-          <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="accel (g)" />
-          <TextBlock Grid.Row="1" Grid.Column="1" Classes="value"
-                     Text="{Binding AccelGText}" />
-          <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="gyro (dps)" />
-          <TextBlock Grid.Row="2" Grid.Column="1" Classes="value"
-                     Text="{Binding GyroDpsText}" />
-          <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="frames/s" />
-          <TextBlock Grid.Row="3" Grid.Column="1" Classes="value"
-                     Text="{Binding MeasuredFps, StringFormat={}{0:0.0}}" />
-          <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="status" />
-          <TextBlock Grid.Row="4" Grid.Column="1" Classes="value" Text="{Binding StatusText}" />
-        </Grid>
+        <Expander Classes="section" Header="Telemetry" IsExpanded="False">
+          <Grid ColumnDefinitions="92,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
+            <!-- Quat W and XYZ split onto two rows so the value text
+                 stays narrow enough that the expanded section width
+                 matches the other Expanders' collapsed widths (was
+                 forcing the section wider than its peers when bound
+                 as a single 4-component line). -->
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="quat W" />
+            <TextBlock Grid.Row="0" Grid.Column="1" Classes="value"
+                       Text="{Binding OrientationWText}" />
+            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="quat XYZ" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Classes="value"
+                       Text="{Binding OrientationXyzText}" />
+            <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="accel (g)" />
+            <TextBlock Grid.Row="2" Grid.Column="1" Classes="value"
+                       Text="{Binding AccelGText}" />
+            <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="gyro (dps)" />
+            <TextBlock Grid.Row="3" Grid.Column="1" Classes="value"
+                       Text="{Binding GyroDpsText}" />
+            <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="frames/s" />
+            <TextBlock Grid.Row="4" Grid.Column="1" Classes="value"
+                       Text="{Binding MeasuredFps, StringFormat={}{0:0.0}}" />
+            <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="status" />
+            <TextBlock Grid.Row="5" Grid.Column="1" Classes="value"
+                       Text="{Binding StatusText}" TextWrapping="Wrap" />
+          </Grid>
+        </Expander>
       </StackPanel>
     </ScrollViewer>
+    </Border>
 
-    <Grid Grid.Column="1" RowDefinitions="3*,2*" Background="#202225">
+    <Grid RowDefinitions="3*,2*" Background="#202225">
       <Border Grid.Row="0" Background="#202225">
         <ctrl:OpenGlSceneControl x:Name="Scene"
                                  Orientation="{Binding Orientation}" />
@@ -215,5 +386,5 @@
         </ItemsControl.ItemTemplate>
       </ItemsControl>
     </Grid>
-  </Grid>
+  </DockPanel>
 </Window>

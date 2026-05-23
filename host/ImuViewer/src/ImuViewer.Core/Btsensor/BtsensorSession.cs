@@ -36,6 +36,7 @@ public sealed class BtsensorSession : IAsyncDisposable
     }
 
     public event Action<BundleFrame>? BundleReceived;
+    public event Action<ImuCapFrame>? ImuCapFrameReceived;
     public event Action<string>? ReplyLineReceived;
 
     public void Start()
@@ -188,6 +189,11 @@ public sealed class BtsensorSession : IAsyncDisposable
         byte type = envelope[2];
         ushort frameLen = (ushort)(envelope[3] | (envelope[4] << 8));
 
+        if (type == WireConstants.ImuCapFrameType)
+        {
+            return TryConsumeImuCap(start, frameLen);
+        }
+
         if (type != WireConstants.BundleFrameType)
         {
             return -1;
@@ -214,6 +220,43 @@ public sealed class BtsensorSession : IAsyncDisposable
         try
         {
             BundleReceived?.Invoke(frame);
+        }
+        catch
+        {
+            // Subscriber exceptions must not break the reader loop.
+        }
+
+        return frameLen;
+    }
+
+    /// <summary>
+    /// Phase 2.5 / Issue #145: IMU_CAP frame is fixed-size (27 B,
+    /// envelope + 22 B payload), so the only failure modes are
+    /// "wait for more bytes" and "header is malformed".  Caller has
+    /// already matched the magic + read frame_len from the envelope.
+    /// </summary>
+    private int TryConsumeImuCap(int start, ushort frameLen)
+    {
+        if (frameLen != WireConstants.ImuCapFrameSize)
+        {
+            return -1;
+        }
+
+        if (_bufferLength - start < frameLen)
+        {
+            return 0;
+        }
+
+        ImuCapFrame? frame = ImuCapFrameParser.TryDecode(
+            _buffer.AsSpan(start, frameLen));
+        if (frame is null)
+        {
+            return -1;
+        }
+
+        try
+        {
+            ImuCapFrameReceived?.Invoke(frame.Value);
         }
         catch
         {

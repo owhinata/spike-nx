@@ -128,6 +128,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _panelByClass = panels.ToDictionary(p => p.ClassId);
 
         SensorWrite = new SensorWriteViewModel(orchestrator);
+        Capture = new CaptureViewModel(orchestrator);
 
         _legoAggregator.StatusChanged += OnLegoStatusChanged;
         _legoAggregator.SampleReceived += OnLegoSampleReceived;
@@ -136,6 +137,9 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     /// <summary>Single-class write panel for the sidebar.</summary>
     public SensorWriteViewModel SensorWrite { get; }
+
+    /// <summary>Phase 2.5 (#145) Capture panel.</summary>
+    public CaptureViewModel Capture { get; }
 
     private void OnLegoStatusChanged(LegoClassId classId, LegoSampleAggregator.ClassState state)
     {
@@ -179,6 +183,13 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     [NotifyPropertyChangedFor(nameof(CanEditImuConfig))]
     private bool _isConnected;
 
+    partial void OnIsConnectedChanged(bool value)
+    {
+        // Forward connected state to the Capture panel so the Start
+        // button enables / disables in lockstep with the BT session.
+        Capture.IsConnected = value;
+    }
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanToggleImu))]
     private bool _isImuOn;
@@ -196,6 +207,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(OrientationText))]
+    [NotifyPropertyChangedFor(nameof(OrientationWText))]
+    [NotifyPropertyChangedFor(nameof(OrientationXyzText))]
     private Quaternion _orientation = Quaternion.Identity;
 
     [ObservableProperty]
@@ -278,6 +291,16 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     /// </summary>
     public string OrientationText =>
         $"W={Fmt3(Orientation.W)}  X={Fmt3(Orientation.X)}  Y={Fmt3(Orientation.Y)}  Z={Fmt3(Orientation.Z)}";
+
+    /// <summary>Quaternion W component, formatted for the split
+    /// Telemetry row that keeps the section narrow enough to match
+    /// the other Expanders' widths.</summary>
+    public string OrientationWText => Fmt3(Orientation.W);
+
+    /// <summary>Quaternion X/Y/Z formatted as a single triple to
+    /// match the accel / gyro rows visually.</summary>
+    public string OrientationXyzText =>
+        $"{Fmt3(Orientation.X)} / {Fmt3(Orientation.Y)} / {Fmt3(Orientation.Z)}";
 
     public string AccelGText =>
         $"{Fmt3(AccelG.X)} / {Fmt3(AccelG.Y)} / {Fmt3(AccelG.Z)}";
@@ -371,6 +394,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(CalibrationStatusText));
         Orientation = _filter.Orientation;
         MeasuredFps = _fps.Compute();
+
+        // Phase 2.5 (#145): pull recorder stats onto the bound
+        // observable properties for the Capture panel.
+        Capture.Tick();
 
         // Issue #139: only push the latched config onto the bound
         // properties when a fresh BUNDLE arrived since the last tick.
@@ -522,6 +549,10 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public async Task DisconnectAsync(CancellationToken ct)
     {
         StatusText = "disconnecting...";
+        // Phase 2.5 (#145): close any in-flight capture session before
+        // tearing the BT stream down so the .bin file is flushed and
+        // the stats reflect the final state.
+        Capture.OnDisconnected();
         await _orchestrator.DisconnectAsync();
         IsConnected = false;
         IsImuOn = false;
@@ -644,6 +675,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        Capture.Dispose();
         await _orchestrator.DisposeAsync();
     }
 

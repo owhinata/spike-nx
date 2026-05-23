@@ -61,6 +61,20 @@
 #define IMU_CAP_ODR_RESTORE    833   /* drivebase default, always set on exit */
 #define IMU_CAP_THROTTLE_MS    5     /* matches btsensor_capture_mode */
 
+/* Bench (#145 Section C verification): emitting one 27 B IMU_CAP
+ * frame per rfcomm_send caused ~6.7 % drop rate (126 / 1890 over
+ * 17 s) because the CC2564C is per-packet limited rather than
+ * per-byte limited at our bandwidth.  Pack BATCH_SIZE samples into
+ * one rfcomm_send to reduce the packet rate by 8× while keeping the
+ * on-wire format byte-identical (the host parser already extracts
+ * frames one at a time from the byte stream).  216 B is well within
+ * the RFCOMM MTU and btsensor_tx ring slot size (1408 B), and the
+ * 32-slot ring then buffers 256 samples (~2.5 s @ 104 Hz) instead
+ * of 32 samples (~0.3 s).
+ */
+
+#define IMU_CAP_BATCH_SIZE     8
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
@@ -78,6 +92,15 @@ struct imu_cap_state_s
   uint16_t               seq;
   uint32_t               frames_sent;
   uint32_t               frames_dropped;
+  /* Batch buffer: BATCH_SIZE consecutive 27 B IMU_CAP frames packed
+   * back-to-back, flushed as one rfcomm_send via
+   * btsensor_tx_try_enqueue_frame to reduce per-packet overhead on
+   * the CC2564C.
+   */
+
+  uint8_t                batch_buf[IMU_CAP_BATCH_SIZE *
+                                   BTSENSOR_IMU_CAP_FRAME_SIZE];
+  size_t                 batch_count;
   /* Diagnostic counters — logged on exit so we can tell on_read
    * activity from sensor publish rate.  Hard to debug remotely
    * without these since the hot path runs on the btstack thread.
@@ -107,6 +130,7 @@ static void imu_cap_throttle_timer_handler(btstack_timer_source_t *ts);
 static void imu_cap_duration_timer_handler(btstack_timer_source_t *ts);
 static void imu_cap_on_read(btstack_data_source_t *ds,
                             btstack_data_source_callback_type_t type);
+static void imu_cap_flush_batch(void);
 static int  imu_cap_exit_locked(void);
 
 /****************************************************************************
@@ -191,15 +215,59 @@ static void imu_cap_duration_timer_handler(btstack_timer_source_t *ts)
  * Private Functions — frame encode + read callback
  ****************************************************************************/
 
+/* Flush the current batch as one rfcomm_send unit.  No-op when the
+ * batch is empty.  btsensor_tx_try_enqueue_frame either takes the
+ * full batch into a free ring slot (rc == 0) or drops the oldest
+ * slot to make room (rc == -ENOSPC) and writes the new batch
+ * anyway.  Either way, every sample in this batch is on its way to
+ * the host; "drops" here means an *earlier* batch was overwritten,
+ * which the host detects through the seq counter gap.
+ */
+
+static void imu_cap_flush_batch(void)
+{
+  if (g_imu_cap.batch_count == 0)
+    {
+      return;
+    }
+
+  size_t bytes = g_imu_cap.batch_count * BTSENSOR_IMU_CAP_FRAME_SIZE;
+  uint32_t n   = (uint32_t)g_imu_cap.batch_count;
+  int rc = btsensor_tx_try_enqueue_frame(g_imu_cap.batch_buf, bytes);
+
+  /* frames_sent counts samples that made it into the BT tx ring;
+   * frames_dropped tracks how many samples were lost to the
+   * drop-oldest overflow (approximate — we account the whole prior
+   * batch since btsensor_tx ring slots are batches now).
+   */
+
+  g_imu_cap.frames_sent += n;
+  if (rc != 0)
+    {
+      g_imu_cap.frames_dropped += n;
+    }
+
+  g_imu_cap.batch_count = 0;
+}
+
 static int imu_cap_emit_sample(const struct sensor_imu *s)
 {
-  uint8_t buf[BTSENSOR_IMU_CAP_FRAME_SIZE];
+  /* Encode into the next slot of the batch buffer, then flush when
+   * the batch is full.  Always advance seq even on flush failure
+   * (the new batch was still written to btsensor_tx — only an older
+   * batch was dropped to make room).  Without unconditional seq
+   * advance the next sample would carry the same seq value and the
+   * host would miss the gap.
+   */
+
+  uint8_t *buf = &g_imu_cap.batch_buf[g_imu_cap.batch_count *
+                                       BTSENSOR_IMU_CAP_FRAME_SIZE];
 
   /* Envelope (5 B): magic + frame_type + frame_len. */
 
   put_u16le(&buf[0], BTSENSOR_FRAME_MAGIC);
   buf[2] = BTSENSOR_FRAME_TYPE_IMU_CAP;
-  put_u16le(&buf[3], (uint16_t)sizeof(buf));
+  put_u16le(&buf[3], (uint16_t)BTSENSOR_IMU_CAP_FRAME_SIZE);
 
   /* Payload (22 B). */
 
@@ -216,27 +284,15 @@ static int imu_cap_emit_sample(const struct sensor_imu *s)
   p[19] = s->fsr_gy_idx;
   put_u16le(p + 20, g_imu_cap.seq);
 
-  /* Always advance seq, regardless of whether btsensor_tx had to drop
-   * an older frame to make room.  btsensor_tx_try_enqueue_frame writes
-   * the new frame either way (it drops oldest on overflow, returns
-   * -ENOSPC, but the new frame is still in the ring).  If the seq
-   * stayed put on ENOSPC, the next call would encode the same seq
-   * value into a different sample's frame — the host would see a
-   * duplicate seq, fail to detect the gap, and silently accept a file
-   * with missing samples (the very condition the host reject path is
-   * supposed to catch).
-   */
-
-  int rc = btsensor_tx_try_enqueue_frame(buf, sizeof(buf));
+  g_imu_cap.batch_count++;
   g_imu_cap.seq++;
-  if (rc == 0)
+
+  if (g_imu_cap.batch_count >= IMU_CAP_BATCH_SIZE)
     {
-      g_imu_cap.frames_sent++;
-      return 0;
+      imu_cap_flush_batch();
     }
 
-  g_imu_cap.frames_dropped++;
-  return -EAGAIN;
+  return 0;
 }
 
 static void imu_cap_on_read(btstack_data_source_t *ds,
@@ -329,6 +385,15 @@ static int imu_cap_exit_locked(void)
       g_imu_cap.ds_callbacks_on = false;
     }
 
+  /* Flush any partially-filled batch so the final samples make it
+   * out before we tear the data source down.  Steady state has
+   * IMU_CAP_BATCH_SIZE samples per BT send so the residual at exit
+   * is 0..BATCH_SIZE-1 frames; the host still parses them per-frame
+   * from the byte stream so partial batches are fine.
+   */
+
+  imu_cap_flush_batch();
+
   if (g_imu_cap.fd >= 0)
     {
       close(g_imu_cap.fd);
@@ -377,6 +442,7 @@ static int imu_cap_exit_locked(void)
   g_imu_cap.seq                = 0;
   g_imu_cap.frames_sent        = 0;
   g_imu_cap.frames_dropped     = 0;
+  g_imu_cap.batch_count        = 0;
   g_imu_cap.diag_on_read_calls = 0;
   g_imu_cap.diag_read_eagain   = 0;
   g_imu_cap.diag_read_short    = 0;
@@ -458,6 +524,7 @@ int btsensor_imu_cap_mode_enter(uint32_t duration_sec)
   g_imu_cap.seq            = 0;
   g_imu_cap.frames_sent    = 0;
   g_imu_cap.frames_dropped = 0;
+  g_imu_cap.batch_count    = 0;
   g_imu_cap.active         = true;
 
   btstack_run_loop_set_data_source_fd(&g_imu_cap.ds, fd);
