@@ -13,7 +13,7 @@ public sealed class MadgwickFilter : IOrientationFilter
     private float _q0 = 1f;
     private float _q1, _q2, _q3;
 
-    public float Beta { get; set; } = 0.1f;
+    public float Beta { get; set; } = 0.05f;
 
     public Quaternion Orientation => new(_q1, _q2, _q3, _q0);
 

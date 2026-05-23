@@ -123,4 +123,57 @@ public partial class MainWindow : Window
         string? localPath = file.TryGetLocalPath();
         vm.Capture.OutputPath = localPath ?? file.Path.ToString();
     }
+
+    /// <summary>
+    /// Issue #146: Browse button for the offline IMU calibration file.
+    /// Same code-behind pattern as <see cref="OnBrowseOutputClicked"/> —
+    /// the picker needs <see cref="Window.StorageProvider"/>, which the
+    /// ViewModel intentionally doesn't reference so it stays unit-testable.
+    /// </summary>
+    private async void OnBrowseImuCalClicked(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm)
+        {
+            return;
+        }
+
+        string startDir = System.IO.Path.GetDirectoryName(vm.ImuCalPath)
+                          is { Length: > 0 } d
+            ? d
+            : System.IO.Directory.GetCurrentDirectory();
+        IStorageFolder? startFolder = null;
+        try
+        {
+            startFolder = await StorageProvider.TryGetFolderFromPathAsync(startDir);
+        }
+        catch
+        {
+            // Same fallback rationale as OnBrowseOutputClicked.
+        }
+
+        IReadOnlyList<IStorageFile> picked = await StorageProvider.OpenFilePickerAsync(
+            new FilePickerOpenOptions
+            {
+                Title = "Open IMU calibration (imu_cal.txt)",
+                AllowMultiple = false,
+                SuggestedStartLocation = startFolder,
+                FileTypeFilter = new[]
+                {
+                    new FilePickerFileType("imu_cal (*.txt)")
+                    {
+                        Patterns = new[] { "*.txt" },
+                    },
+                    FilePickerFileTypes.All,
+                },
+            });
+
+        if (picked.Count == 0)
+        {
+            return;
+        }
+
+        IStorageFile file = picked[0];
+        string? localPath = file.TryGetLocalPath();
+        vm.ImuCalPath = localPath ?? file.Path.ToString();
+    }
 }

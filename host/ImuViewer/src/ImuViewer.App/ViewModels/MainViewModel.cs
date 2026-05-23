@@ -9,6 +9,7 @@ using CommunityToolkit.Mvvm.Input;
 using ImuViewer.App.Services;
 using ImuViewer.Core.Aggregation;
 using ImuViewer.Core.Btsensor;
+using ImuViewer.Core.Calibration;
 using ImuViewer.Core.Filters;
 using ImuViewer.Core.LegoSensor;
 using ImuViewer.Core.Transport;
@@ -248,18 +249,22 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     /// <summary>
     /// Stationary-detection per-axis gyro threshold, in dps. Mirrors
     /// <see cref="StationaryDetector.GyroEpsilonDps"/> via the partial change
-    /// handler so live edits take effect on the next sample.
+    /// handler so live edits take effect on the next sample. The default
+    /// assumes offline calibration (Issue #146) is applied; users running
+    /// raw should raise this.
     /// </summary>
     [ObservableProperty]
-    private float _gyroEpsilonDps = 5.0f;
+    private float _gyroEpsilonDps = 0.5f;
 
     /// <summary>
     /// Default β for per-sample integration at chip ODR. The original 0.1
     /// was tuned for a 60 Hz integration rate; running ~14× faster needs
-    /// roughly √(833/60) ≈ 3.7× lower β to keep a similar gain density.
+    /// a roughly proportional reduction. 0.05 balances accel correction
+    /// speed against gyro smoothness when offline cal leaves the gyro
+    /// near zero at rest.
     /// </summary>
     [ObservableProperty]
-    private float _madgwickBeta = 0.03f;
+    private float _madgwickBeta = 0.05f;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CalibrationStatusText))]
@@ -334,6 +339,60 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     partial void OnGyroEpsilonDpsChanged(float value)
     {
         _biasTracker.Detector.GyroEpsilonDps = value;
+    }
+
+    /// <summary>
+    /// Issue #146: offline IMU calibration controls.  When
+    /// <see cref="IsImuCalEnabled"/> is true and <see cref="ImuCalPath"/>
+    /// resolves to a valid imu_cal.txt, the parsed cal is pushed to
+    /// <see cref="SensorAggregator.Calibration"/> so every subsequent
+    /// BUNDLE applies the matmul + bias before FSR scaling.  Both
+    /// observables route through <see cref="ApplyImuCal"/>; the user
+    /// can toggle the checkbox or pick a different file at runtime
+    /// and the next BT bundle picks up the change immediately.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ImuCalStatusText))]
+    private bool _isImuCalEnabled;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ImuCalStatusText))]
+    private string _imuCalPath = "";
+
+    [ObservableProperty]
+    private string _imuCalStatusText = "no calibration loaded";
+
+    partial void OnIsImuCalEnabledChanged(bool value) => ApplyImuCal();
+
+    partial void OnImuCalPathChanged(string value) => ApplyImuCal();
+
+    private void ApplyImuCal()
+    {
+        if (!IsImuCalEnabled)
+        {
+            _aggregator.Calibration = null;
+            ImuCalStatusText = "disabled (raw values)";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(ImuCalPath))
+        {
+            _aggregator.Calibration = null;
+            ImuCalStatusText = "no file selected";
+            return;
+        }
+        try
+        {
+            ImuCalibration cal = ImuCalibration.Load(ImuCalPath);
+            _aggregator.Calibration = cal;
+            ImuCalStatusText =
+                $"loaded · FSR ±{cal.FsrGyDps}dps/±{cal.FsrXlG}g · " +
+                $"ODR {cal.OdrHz}Hz · T {cal.AmbientTempC:0.0}°C";
+        }
+        catch (Exception ex)
+        {
+            _aggregator.Calibration = null;
+            ImuCalStatusText = $"load failed: {ex.Message}";
+        }
     }
 
     /// <summary>

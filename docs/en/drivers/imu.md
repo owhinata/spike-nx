@@ -180,30 +180,102 @@ Generates a quaternion from the first gravity vector measurement.
 
 ## 8. Calibration
 
-### Gyroscope Bias
+Phase 2.5 (Issues #145 / #146) introduced a two-stage calibration:
 
-Estimated using exponential smoothing during stationary state.
+- **Offline (Tedaldi)** — `imu_tk` (Pretto 2014) jointly solves bias / scale /
+  misalignment from a ~5 min capture session and stores the result as
+  `/mnt/flash/imu_cal.txt` (properties format).
+- **Online (EMA)** — `drivebase_imu` tracks post-boot temperature drift with
+  an α=0.1 exponential moving average, seeded by the offline bias.
 
-### Accelerometer Calibration
+The two stages cooperate: offline removes per-unit constant bias / scale /
+axis non-orthogonality, online catches temperature-dependent residual.
 
-Offset and scale computed from 6-posture gravity measurements (positive and negative directions of each axis).
+### Calibration file format
 
-### Gyroscope Scale
+`/mnt/flash/imu_cal.txt` (schema_version=1, properties format):
 
-Per-axis correction factor. Adjusted so that one rotation is approximately 360 degrees.
+```
+schema_version = 1
+nominal_gyro_radps_per_lsb = 6.108652e-04
+nominal_accel_ms2_per_lsb  = 5.985504e-04
+fsr_gy_dps = 1000
+fsr_xl_g = 2
+odr_hz = 107
+ambient_temp_c = 28.1
 
-### Storage Format
+gyro_bias_lsb_x1000  = 22406 65567 11412
+accel_bias_lsb_x1000 = -390870 12782 80597
+gyro_M_x1000  = 997 -1 18 5 988 -3 -1 -10 1002
+accel_M_x1000 = 1008 -2 9 0 1002 3 0 0 1002
+```
 
-Settings are persisted as a binary file at `/data/imu_cal.bin`.
+- `*_bias_lsb_x1000`: 3-axis bias (raw LSB × 1000)
+- `*_M_x1000`: 3×3 matrix combining misalignment × scale (row-major, x1000)
+- Apply (LSB domain): `corrected[i] = sum_j(M[i][j] × (raw[j] − bias[j])) / 1000`
+- Dividing M by the nominal sensitivity yields M_runtime with diagonal ≈ 1000
+  (= within 1% of nominal when the unit matches spec)
 
-### Default Values
+### Host pipeline (cal generation)
 
-| Parameter | Default Value |
-|---|---|
-| Gravity | ±9806.65 mm/s² |
-| Scale | 360 |
-| Gyro threshold | 2 deg/s |
-| Accel threshold | 2500 mm/s² |
+See `tools/imu_cal/README.md` for full details. Three steps:
+
+1. **Capture** — Use the ImuViewer "IMU Capture (Tedaldi)" expander to record
+   ~5 min of static-pose + rotation as 27 B/sample frames (frame_type 0x03,
+   104 Hz, FSR ±2g / ±1000dps). Tedaldi uses **the first 10 seconds** as its
+   noise-floor reference window, so leave the robot untouched right after
+   Start. Aim for ≥12 distinct static poses of ≥5 s each interleaved with
+   2–3 s hand rotations.
+2. **Run Tedaldi** — `tools/imu_cal/run_imu_tk.sh <session_dir>` invokes the
+   `ghcr.io/owhinata/ubuntu-imu_tk` Docker image and emits two `.calib`
+   files (T, K, B per triad).
+3. **Generate cfg** — `tools/imu_cal/imu_tk_output_to_cfg.py --session-dir
+   <session_dir>` folds the `.calib` + meta into `imu_cal.txt`. A warning
+   prints if the M diagonal deviates more than 5% from 1000.
+
+### Deploy to the Hub
+
+```text
+nsh> rz                                  # zmodem receive
+(host) sx -k imu_cal.txt > /dev/ttyACM0
+nsh> mv received_file /mnt/flash/imu_cal.txt
+nsh> reboot
+```
+
+After reboot, `dmesg | grep imu_cal` confirms the load:
+
+```text
+drivebase: imu_cal: loaded /mnt/flash/imu_cal.txt (FSR=±1000 dps, ODR=104 Hz, T=23°C)
+```
+
+### Hub-side application
+
+`drivebase_imu` applies matmul + bias subtraction in `integrate()` per
+sample (LSB domain). Math is x1000 fixed-point integer only. The EMA seeds
+on the cal-loaded bias and updates during stationary windows. `drivebase
+_imu show` exposes both the cal values and the runtime state.
+
+### ImuViewer-side application (Issue #146)
+
+The same cal can be applied to the host telemetry stream (frame_type 0x02):
+
+1. Open the ImuViewer **Telemetry** expander
+2. Tick **Apply offline calibration**
+3. Pick `imu_cal.txt` with **Browse...**
+4. Status line reads `loaded · FSR ±1000dps/±2g · ODR 107Hz · T 28.1°C`
+
+`SensorAggregator.OnBundle()` applies the matmul before FSR scaling — same
+math as the Hub. The Madgwick filter then sees cal-corrected input. If the
+BUNDLE header's FSR disagrees with the cal file's FSR, the aggregator logs
+a warning and skips cal application until the FSRs match again.
+
+### Verification (acceptance)
+
+| verb | Purpose | Acceptance |
+|---|---|---|
+| `drivebase _imu show` | Current cal + runtime bias / temperature | `cal.loaded=1`, M diagonal ≈ 1000 |
+| `drivebase _imu drift <sec>` | Static-state drift rate | `drift_mdegpm` < 500 (real Tedaldi run achieved 3 mdeg/min) |
+| `drivebase _imu verify <deg>` | Manual rotation vs gyro integral | IMU mount angle must be accounted for separately — rotation-axis tilt is not a cal issue |
 
 ## 9. Stationary Detection
 

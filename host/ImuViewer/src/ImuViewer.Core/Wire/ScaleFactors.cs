@@ -22,4 +22,10 @@ public static class ScaleFactors
 
     public static float GyroDps(short raw, int fsrDps) =>
         raw * fsrDps * 0.035f / 1000f;
+
+    public static float AccelG(float raw, int fsrG) =>
+        raw * fsrG / 32768f;
+
+    public static float GyroDps(float raw, int fsrDps) =>
+        raw * fsrDps * 0.035f / 1000f;
 }

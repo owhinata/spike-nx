@@ -332,31 +332,57 @@
         </Expander>
 
         <Expander Classes="section" Header="Telemetry" IsExpanded="False">
-          <Grid ColumnDefinitions="92,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
-            <!-- Quat W and XYZ split onto two rows so the value text
-                 stays narrow enough that the expanded section width
-                 matches the other Expanders' collapsed widths (was
-                 forcing the section wider than its peers when bound
-                 as a single 4-component line). -->
-            <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="quat W" />
-            <TextBlock Grid.Row="0" Grid.Column="1" Classes="value"
-                       Text="{Binding OrientationWText}" />
-            <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="quat XYZ" />
-            <TextBlock Grid.Row="1" Grid.Column="1" Classes="value"
-                       Text="{Binding OrientationXyzText}" />
-            <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="accel (g)" />
-            <TextBlock Grid.Row="2" Grid.Column="1" Classes="value"
-                       Text="{Binding AccelGText}" />
-            <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="gyro (dps)" />
-            <TextBlock Grid.Row="3" Grid.Column="1" Classes="value"
-                       Text="{Binding GyroDpsText}" />
-            <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="frames/s" />
-            <TextBlock Grid.Row="4" Grid.Column="1" Classes="value"
-                       Text="{Binding MeasuredFps, StringFormat={}{0:0.0}}" />
-            <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="status" />
-            <TextBlock Grid.Row="5" Grid.Column="1" Classes="value"
-                       Text="{Binding StatusText}" TextWrapping="Wrap" />
-          </Grid>
+          <StackPanel Spacing="6">
+            <!-- Issue #146: offline IMU calibration controls.
+                 Checkbox enables cal application; the path + Browse
+                 picker mirror the IMU Capture panel's Output file row.
+                 Both inputs route through MainViewModel.ApplyImuCal()
+                 which pushes the parsed ImuCalibration to the
+                 SensorAggregator at runtime (no restart needed). -->
+            <CheckBox Content="Apply offline calibration"
+                      IsChecked="{Binding IsImuCalEnabled}" />
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBox Grid.Column="0"
+                       Margin="0,0,4,0"
+                       MaxWidth="240"
+                       Watermark="path to imu_cal.txt"
+                       Text="{Binding ImuCalPath}" />
+              <Button Grid.Column="1"
+                      Content="Browse..."
+                      Click="OnBrowseImuCalClicked" />
+            </Grid>
+            <TextBlock Classes="label" FontSize="11"
+                       Foreground="#A0A0A0"
+                       Text="{Binding ImuCalStatusText}"
+                       TextWrapping="Wrap" />
+
+            <Grid ColumnDefinitions="92,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto"
+                  Margin="0,4,0,0">
+              <!-- Quat W and XYZ split onto two rows so the value text
+                   stays narrow enough that the expanded section width
+                   matches the other Expanders' collapsed widths (was
+                   forcing the section wider than its peers when bound
+                   as a single 4-component line). -->
+              <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="quat W" />
+              <TextBlock Grid.Row="0" Grid.Column="1" Classes="value"
+                         Text="{Binding OrientationWText}" />
+              <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="quat XYZ" />
+              <TextBlock Grid.Row="1" Grid.Column="1" Classes="value"
+                         Text="{Binding OrientationXyzText}" />
+              <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="accel (g)" />
+              <TextBlock Grid.Row="2" Grid.Column="1" Classes="value"
+                         Text="{Binding AccelGText}" />
+              <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="gyro (dps)" />
+              <TextBlock Grid.Row="3" Grid.Column="1" Classes="value"
+                         Text="{Binding GyroDpsText}" />
+              <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="frames/s" />
+              <TextBlock Grid.Row="4" Grid.Column="1" Classes="value"
+                         Text="{Binding MeasuredFps, StringFormat={}{0:0.0}}" />
+              <TextBlock Grid.Row="5" Grid.Column="0" Classes="label" Text="status" />
+              <TextBlock Grid.Row="5" Grid.Column="1" Classes="value"
+                         Text="{Binding StatusText}" TextWrapping="Wrap" />
+            </Grid>
+          </StackPanel>
         </Expander>
       </StackPanel>
     </ScrollViewer>

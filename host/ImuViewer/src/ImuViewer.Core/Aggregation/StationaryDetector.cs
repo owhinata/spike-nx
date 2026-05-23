@@ -14,14 +14,14 @@ public sealed class StationaryDetector
     public float AccelEpsilonG { get; init; } = 0.05f;
 
     /// <summary>
-    /// Per-axis gyro magnitude limit, in dps. Generous enough that the
-    /// LSM6DSL's uncalibrated ZRL (typically a few dps per axis) still
-    /// passes — otherwise the auto-bias LPF cannot bootstrap on its own.
-    /// Real intentional motion is typically &gt;10 dps, so this still
-    /// rejects rotation reliably. Settable so the GUI can tune it for the
-    /// individual chip and operating environment.
+    /// Per-axis gyro magnitude limit, in dps. The default assumes offline
+    /// calibration (Issue #146) is applied upstream so the gyro stream
+    /// sits near zero at rest; a tight 0.5 dps gate then catches the
+    /// onset of real motion within one sample. Users running uncalibrated
+    /// raw should raise this (a few dps) so the auto-bias LPF can still
+    /// bootstrap on the residual ZRL.
     /// </summary>
-    public float GyroEpsilonDps { get; set; } = 5.0f;
+    public float GyroEpsilonDps { get; set; } = 0.5f;
 
     /// <summary>Number of consecutive stationary samples needed before
     /// <see cref="IsStationary"/> latches true. Default is ~0.5 s at 833 Hz.</summary>
