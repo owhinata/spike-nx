@@ -116,6 +116,14 @@ struct db_imu_s
   uint32_t sample_count;
   uint32_t drop_count;
 
+  /* Last sample's OUT_TEMP raw value.  Captured during drain so the
+   * Section F `_imu drift` / `_imu show` verbs can report ambient
+   * temperature without re-reading the sensor topic themselves.
+   * LSM6DSL convention: T_c = 25 + raw / 256.
+   */
+
+  int16_t  last_temperature_raw;
+
   /* Offline calibration data (M_x1000 + bias initial values).  Loaded
    * from /mnt/flash/imu_cal.txt at open; falls back to Identity +
    * zero on any error so the daemon runs uncalibrated (= pre-Phase
@@ -166,6 +174,13 @@ void    db_imu_set_heading_mdeg(struct db_imu_s *im, int64_t heading);
 int32_t db_imu_get_bias_z_lsb(const struct db_imu_s *im);
 int32_t db_imu_get_bias_z_lsb_x1000(const struct db_imu_s *im);
 bool    db_imu_is_calibrated(const struct db_imu_s *im);
+
+/* Last drained sample's OUT_TEMP raw value (T_c = 25 + raw/256).  0
+ * before the first drain — callers should check sample_count first
+ * if they need a meaningful value.
+ */
+
+int16_t db_imu_get_temperature_raw(const struct db_imu_s *im);
 
 /* Force-trigger calibration: hold the robot still for ~200 ms after
  * calling, then check db_imu_is_calibrated().  Internally just

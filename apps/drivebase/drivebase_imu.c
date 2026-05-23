@@ -381,6 +381,15 @@ int db_imu_drain_and_update(struct db_imu_s *im, uint64_t now_us)
                 batch[i].gx, batch[i].gy, batch[i].gz,
                 batch[i].fsr_gy_idx, batch[i].timestamp);
     }
+
+  /* Cache last sample's temperature for the Section F `_imu show` /
+   * `_imu drift` verbs.  The driver decimates OUT_TEMP reads
+   * internally so this value is updated every TEMP_DECIMATE = 16
+   * samples on the publish side, which is plenty for ambient
+   * temperature logging.
+   */
+
+  im->last_temperature_raw = batch[count - 1].temperature_raw;
   return 0;
 }
 
@@ -428,6 +437,11 @@ int32_t db_imu_get_bias_z_lsb(const struct db_imu_s *im)
 int32_t db_imu_get_bias_z_lsb_x1000(const struct db_imu_s *im)
 {
   return im->bias_lsb_x1000[2];
+}
+
+int16_t db_imu_get_temperature_raw(const struct db_imu_s *im)
+{
+  return im->last_temperature_raw;
 }
 
 bool db_imu_is_calibrated(const struct db_imu_s *im)

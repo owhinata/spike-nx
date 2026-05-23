@@ -262,14 +262,224 @@ static uint64_t now_us(void);
  *
  *   drivebase _imu calibrate          ~250 ms idle: bias should stabilise
  *   drivebase _imu heading <ms>       integrate for <ms> and dump heading
+ *
+ * Phase 2.5 (Issue #145) adds three properties-style verbs for the
+ * test pipeline:
+ *
+ *   drivebase _imu drift <sec>        static drift rate over <sec> seconds
+ *                                     (calibrates first; one properties
+ *                                     line: drift_mdegpm=... samples=...
+ *                                     temp_*_c=... loaded=...)
+ *   drivebase _imu verify <deg> [ms]  manual <deg> rotation vs gyro
+ *                                     integration; one properties line
+ *                                     (target_deg / actual_mdeg /
+ *                                     error_mdeg / samples / loaded)
+ *   drivebase _imu show               dump cal.* + runtime.* state for
+ *                                     spot-checking the loader, matmul
+ *                                     and temperature accessor
  ****************************************************************************/
+
+/* Calibrate idle window with no per-tick printout (helper for the
+ * Phase 2.5 verbs that only care about the post-calibration heading
+ * + bias state).
+ */
+
+static void imu_calibrate_silent(struct db_imu_s *im, uint32_t ms)
+{
+  for (uint32_t t = 0; t < ms; t += 25)
+    {
+      usleep(25000);
+      db_imu_drain_and_update(im, now_us());
+    }
+}
+
+static int do_imu_drift(struct db_imu_s *im, int argc, FAR char *argv[])
+{
+  if (argc < 1)
+    {
+      fprintf(stderr, "usage: drivebase _imu drift <sec>\n");
+      return 1;
+    }
+
+  uint32_t sec = (uint32_t)atoi(argv[0]);
+  if (sec == 0 || sec > 600)
+    {
+      fprintf(stderr, "_imu drift: sec must be 1..600\n");
+      return 1;
+    }
+
+  imu_calibrate_silent(im, 250);
+
+  /* Reset heading after calibration so we measure post-cal drift. */
+
+  db_imu_set_heading_mdeg(im, 0);
+  uint32_t start_samples = im->sample_count;
+  int16_t  temp_start_raw = db_imu_get_temperature_raw(im);
+
+  /* 10 ms drain interval keeps the uORB ring (nbuffer=10) from
+   * overflowing at 833 Hz: each cycle captures ~8 samples and leaves
+   * the kernel ring under capacity.  Sleeping 50 ms drops ~75 % of
+   * samples (only the 10 oldest survive the overwrite) and would
+   * make the drift estimate noisier than necessary.
+   */
+
+  uint64_t deadline_us = now_us() + (uint64_t)sec * 1000000ULL;
+  while (now_us() < deadline_us)
+    {
+      usleep(10000);
+      db_imu_drain_and_update(im, now_us());
+    }
+
+  int64_t  heading_mdeg = db_imu_get_heading_mdeg(im);
+  uint32_t samples = im->sample_count - start_samples;
+  int16_t  temp_end_raw = db_imu_get_temperature_raw(im);
+
+  /* drift in milli-degrees per minute over the measurement window.
+   * sec is bounded to 600 above, so the multiplication fits int64.
+   */
+
+  int64_t drift_mdegpm = heading_mdeg * 60 / (int64_t)sec;
+  uint32_t dt_avg_us =
+      (samples > 0) ? (uint32_t)((uint64_t)sec * 1000000ULL / samples) : 0;
+
+  /* T_c = 25 + raw/256.  Integer truncation is fine for logging. */
+
+  int temp_start_c = 25 + (int)temp_start_raw / 256;
+  int temp_end_c   = 25 + (int)temp_end_raw   / 256;
+
+  printf("drift_mdegpm=%lld samples=%lu dt_avg_us=%lu "
+         "temp_start_c=%d temp_end_c=%d loaded=%d\n",
+         (long long)drift_mdegpm,
+         (unsigned long)samples,
+         (unsigned long)dt_avg_us,
+         temp_start_c, temp_end_c,
+         (int)im->cal.loaded);
+  return 0;
+}
+
+static int do_imu_verify(struct db_imu_s *im, int argc, FAR char *argv[])
+{
+  if (argc < 1)
+    {
+      fprintf(stderr,
+              "usage: drivebase _imu verify <deg> [duration_ms]\n");
+      return 1;
+    }
+
+  int target_deg = atoi(argv[0]);
+  if (target_deg == 0 || target_deg < -1080 || target_deg > 1080)
+    {
+      fprintf(stderr,
+              "_imu verify: deg must be -1080..1080 (excluding 0)\n");
+      return 1;
+    }
+
+  uint32_t duration_ms = (argc >= 2) ? (uint32_t)atoi(argv[1]) : 10000;
+  if (duration_ms < 1000 || duration_ms > 60000)
+    {
+      fprintf(stderr,
+              "_imu verify: duration_ms must be 1000..60000 "
+              "(default 10000)\n");
+      return 1;
+    }
+
+  imu_calibrate_silent(im, 250);
+  db_imu_set_heading_mdeg(im, 0);
+  uint32_t start_samples = im->sample_count;
+
+  printf("# rotate by %d deg within %u ms (manual)\n",
+         target_deg, (unsigned)duration_ms);
+
+  /* 10 ms drain interval — see do_imu_drift().  Especially important
+   * for verify since fast rotations push the per-sample angular
+   * displacement up; a 50 ms drain would drop ~75 % of samples and
+   * the integration would lose more on the high-rate sections of
+   * accel/decel.
+   *
+   * Note: gyro_z integration only measures rotation about the IMU's
+   * physical Z axis.  If the IMU is tilted by θ relative to the
+   * robot's actual rotation axis, the measured angle is cos(θ) times
+   * the true rotation — interpret error_mdeg accordingly until the
+   * Phase 3 gyro-fusion path takes over.
+   */
+
+  uint64_t deadline_us = now_us() + (uint64_t)duration_ms * 1000ULL;
+  while (now_us() < deadline_us)
+    {
+      usleep(10000);
+      db_imu_drain_and_update(im, now_us());
+    }
+
+  int64_t  actual_mdeg = db_imu_get_heading_mdeg(im);
+  int64_t  target_mdeg = (int64_t)target_deg * 1000;
+  int64_t  error_mdeg  = actual_mdeg - target_mdeg;
+  uint32_t samples = im->sample_count - start_samples;
+
+  printf("target_deg=%d actual_mdeg=%lld error_mdeg=%lld "
+         "samples=%lu duration_ms=%lu loaded=%d\n",
+         target_deg,
+         (long long)actual_mdeg,
+         (long long)error_mdeg,
+         (unsigned long)samples,
+         (unsigned long)duration_ms,
+         (int)im->cal.loaded);
+  return 0;
+}
+
+static int do_imu_show(struct db_imu_s *im)
+{
+  /* Drain a few samples so cur_fsr_gy_dps / gyro_mdps_num / temp
+   * reflect live driver state rather than the post-open zeros.
+   */
+
+  for (int i = 0; i < 10; i++)
+    {
+      usleep(10000);
+      db_imu_drain_and_update(im, now_us());
+    }
+
+  int temp_c = 25 + (int)db_imu_get_temperature_raw(im) / 256;
+
+  printf("cal.loaded=%d\n", (int)im->cal.loaded);
+  printf("cal.schema_version=%u\n", (unsigned)im->cal.schema_version);
+  printf("cal.fsr_gy_dps=%u\n", (unsigned)im->cal.fsr_gy_dps);
+  printf("cal.fsr_xl_g=%u\n", (unsigned)im->cal.fsr_xl_g);
+  printf("cal.odr_hz=%u\n", (unsigned)im->cal.odr_hz);
+  printf("cal.ambient_temp_c=%d\n", (int)im->cal.ambient_temp_c);
+  printf("cal.gyro_bias_x1000=%ld %ld %ld\n",
+         (long)im->cal.gyro_bias_lsb_x1000[0],
+         (long)im->cal.gyro_bias_lsb_x1000[1],
+         (long)im->cal.gyro_bias_lsb_x1000[2]);
+  printf("cal.gyro_M_x1000=%ld %ld %ld %ld %ld %ld %ld %ld %ld\n",
+         (long)im->cal.gyro_M_x1000[0][0],
+         (long)im->cal.gyro_M_x1000[0][1],
+         (long)im->cal.gyro_M_x1000[0][2],
+         (long)im->cal.gyro_M_x1000[1][0],
+         (long)im->cal.gyro_M_x1000[1][1],
+         (long)im->cal.gyro_M_x1000[1][2],
+         (long)im->cal.gyro_M_x1000[2][0],
+         (long)im->cal.gyro_M_x1000[2][1],
+         (long)im->cal.gyro_M_x1000[2][2]);
+  printf("runtime.bias_lsb_x1000=%ld %ld %ld\n",
+         (long)im->bias_lsb_x1000[0],
+         (long)im->bias_lsb_x1000[1],
+         (long)im->bias_lsb_x1000[2]);
+  printf("runtime.calibrated=%d\n", (int)im->calibrated);
+  printf("runtime.cur_fsr_gy_dps=%u\n", (unsigned)im->cur_fsr_gy_dps);
+  printf("runtime.gyro_mdps_num=%ld\n", (long)im->gyro_mdps_num);
+  printf("runtime.temperature_raw=%d\n",
+         (int)db_imu_get_temperature_raw(im));
+  printf("runtime.temperature_c=%d\n", temp_c);
+  return 0;
+}
 
 static int do_imu_subcmd(int argc, FAR char *argv[])
 {
   if (argc < 1)
     {
       fprintf(stderr,
-              "usage: drivebase _imu {calibrate|heading <ms>}\n");
+              "usage: drivebase _imu "
+              "{calibrate|heading <ms>|drift <sec>|verify <deg> [ms]|show}\n");
       return 1;
     }
 
@@ -331,6 +541,24 @@ static int do_imu_subcmd(int argc, FAR char *argv[])
                  (long long)db_imu_get_heading_mdeg(&im),
                  (unsigned long)im.sample_count);
         }
+    }
+  else if (strcmp(argv[0], "drift") == 0)
+    {
+      int sub_rc = do_imu_drift(&im, argc - 1, &argv[1]);
+      db_imu_close(&im);
+      return sub_rc;
+    }
+  else if (strcmp(argv[0], "verify") == 0)
+    {
+      int sub_rc = do_imu_verify(&im, argc - 1, &argv[1]);
+      db_imu_close(&im);
+      return sub_rc;
+    }
+  else if (strcmp(argv[0], "show") == 0)
+    {
+      int sub_rc = do_imu_show(&im);
+      db_imu_close(&im);
+      return sub_rc;
     }
   else
     {
