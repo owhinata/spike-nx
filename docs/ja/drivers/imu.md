@@ -239,7 +239,7 @@ drivebase: imu_cal: loaded /mnt/flash/imu_cal.txt (FSR=±1000 dps, ODR=104 Hz, T
 |---|---|---|
 | `drivebase _imu show` | 現在の cal + runtime bias / temperature 表示 | `cal.loaded=1`, M 対角 ≈ 1000 |
 | `drivebase _imu drift <sec>` | 静止時 drift rate 測定 | `drift_mdegpm` < 500 (実機 Tedaldi で 3 mdeg/min 達成) |
-| `drivebase _imu verify <deg>` | 任意角回転と gyro 積分結果の対照 | IMU 取付け角を考慮 (回転軸ずれは cal でなく setup 由来) |
+| `drivebase _imu verify <deg>` | 任意角回転と gyro 積分結果の対照 | Phase 2.5 までは raw-Z 積分なので `target × cos(tilt)`。Phase 3a (Section 13) で Madgwick による world-vertical yaw 抽出に切替え後は `actual_mdeg ≈ target_deg × 1000 ± 4°` (取付け角に依存しない) |
 
 ## 9. 静止判定
 
@@ -301,3 +301,80 @@ nsh> imu stop     # デーモン停止
 | `imu.settings()` | `imu_calibration` + NSH コマンド | 閾値設定 |
 | `imu.stationary()` | `imu_stationary` 状態照会 | bool |
 | `imu.reset_heading()` | `imu_fusion` ヘディングリセット | 積分値ゼロ化 |
+
+## 13. Drivebase IMU Madgwick fusion (Phase 3a, Issue #147)
+
+`apps/drivebase/drivebase_imu` は daemon が任意で gyro-locked heading source として使うユーザ空間 IMU 統合レイヤ。Phase 3a で、従来の素の `∫gz_corr dt` heading を Madgwick 6-DOF IMU-only fusion に差し替え、Hub の取付けが傾いていても heading が `cos(tilt)` だけ目減りしない設計にする。
+
+### なぜ raw 積分でなく Madgwick か
+
+Phase 2.5 verify を ~51° 傾いたベンチで実施した結果、物理 360° 旋回に対し 228.7° しか積分されなかった (= 360 × cos(51°) ≈ 226.5°)。素の Z 軸 gyro 積分は IMU の物理 Z 軸まわりの回転を見ているだけで、ロボット本体の実回転軸まわりではない。LSM6DSL を取り付けた向きが垂直からずれていれば射影誤差は構造的に発生する。Madgwick は accel (重力) を quaternion 推定にフュージョンし、その後 world-vertical yaw を抽出するので、PID が本当に欲しいロボット heading が直接得られる。
+
+### Per-sample パイプライン (LSM6DSL ODR 833 Hz)
+
+`apps/drivebase/drivebase_imu.c::integrate()`:
+
+1. **FSR 遷移ガード** (Issue #139) — driver が live FSR 切替したときに gyro bias / idle threshold の物理意味を保つよう rescale
+2. **Gyro Tedaldi matmul** — `g_corr_x1000[i] = Σⱼ M[i][j] × (g_raw[j] × 1000 − bias[j]) / 1000` (Phase 2.5、x1000 fixed-point)
+3. `gz_corr` を idle EMA に流し込み温度ドリフトを追跡
+4. **Accel FSR 整合チェック** — `fsr_xl_idx_to_g(batch[i].fsr_xl_idx)` と `cal.fsr_xl_g` を比較。不一致なら identity 補正に fallback + `accel_fsr_match=0` を `_imu show` で診断可能に。Madgwick には scale が違うが向きの正しい重力ベクトルが入り、filter 側の re-normalise で yaw drift は構造的に有界
+5. **Accel Tedaldi matmul** (一致時) / **identity** (不一致時)
+6. **float 変換**:
+   - `ω_f[rad/s] = corr_x1000 × (gyro_mdps_num/1000) × π/180 / 1e6`
+   - `a_f[g] = corr_x1000 × (fsr_xl_g / 32768) / 1000`
+7. **Stationary-gated β** (pybricks `pbio/src/imu.c:327` 形式、rad/s+g 単位に換算):
+   ```
+   stationary = min(1, ACCL_MIN_G/max(|‖a‖-1|, ACCL_MIN_G))
+              × min(1, GYRO_MIN_RADPS/max(‖ω‖, GYRO_MIN_RADPS))
+   β_eff = 0.05 × stationary
+   ```
+   静止時は β=0.05 で full accel 補正、車輪インパクト/急回転で accel error が増えると β→0 になり vibration が accel 項経由で yaw を引きずらない
+8. **Quaternion bootstrap** — 初回サンプルで accel の正規化ベクトルから (0,0,1) への最短弧 quaternion を seed。tilt 推定が即収束する (β-blend で数秒待たない)
+9. **Madgwick update** — host `ImuViewer.Core/Filters/MadgwickFilter.cs` の C 直訳。β=0.05 で Hub/host parity を担保
+
+### Per-drain yaw 抽出
+
+batch 処理後 1 回:
+
+```
+ψ_curr = atan2f(2(q0 q3 + q1 q2), 1 - 2(q2² + q3²))
+dψ     = wrap_pi(ψ_curr - ψ_prev)
+heading_mdeg += dψ × 180000/π
+ψ_prev = ψ_curr
+```
+
+`atan2f` は per-drain (~500 Hz) で per-sample (833 Hz) ではない。最悪 2000 dps × 2 ms RT tick = 4° で ±π wrap には届かないので unwrap 精度は確保される。
+
+### FPU と CPU 見積もり
+
+- `CONFIG_ARCH_FPU=y` + `CONFIG_LIBM_NEWLIB=y` が必須 (`drivebase_imu.c` 冒頭で `#error` ガード)
+- NuttX の lazy FPU は OFF (`arch/arm/src/armv7-m/arm_fpuconfig.c:63`) で context switch 時に S16–S31 が既に保存対象。Phase 3a では新たな switch コストは発生しない
+- 833 Hz 時の見積もり: Madgwick ~0.2 % CPU、`atan2f` per-drain ~0.05 %
+- `integrate()` は task context (RT tick work-queue / `_imu` CLI) からのみ呼び出し可。ISR からは禁止 (libm 経路の cycle が乗らないため)
+
+### Timestamp wrap 対応
+
+`sensor_imu.timestamp` は `CLOCK_BOOTTIME` µs の下位 32 ビット (~71 分 wrap)。Phase 3a で旧来の `last_sample_ts_us != 0 && ts > last_sample_ts_us` ガードを `last_sample_valid` フラグ + `(uint32_t)(ts - last)` のモジュラ減算に置換、wrap 越えでも負の dt にならない。
+
+### 診断
+
+`drivebase _imu show` の Phase 3a 追加出力:
+
+```
+madgwick.q_x1000=<w> <x> <y> <z>    # quaternion × 1000 (起動直後 ≈ 1000 0 0 0)
+madgwick.tilt_mdeg=<value>           # world vertical からの傾き (mdeg)
+madgwick.beta_x1000=50               # base fusion gain × 1000 (default)
+madgwick.initialized=1               # quaternion seed 済み
+madgwick.accel_fsr_match=1           # 1 = accel Tedaldi cal をこのサンプルで
+                                     #     適用 (cal loaded かつ live FSR が
+                                     #     cal.fsr_xl_g と一致)
+                                     # 0 = identity fallback (cal 未 load も
+                                     #     しくは live FSR が cal.fsr_xl_g と
+                                     #     乖離)
+```
+
+`drivebase _imu verify <deg>` (Section 8 acceptance) は world-vertical yaw を返すので、51° 傾いたベンチで物理 360° 旋回 → ≈ 360 000 mdeg。
+
+### Stale 検出 API
+
+`bool db_imu_is_stale(im, now_us, threshold_us)` は `threshold_us` (既定 `DB_IMU_DEFAULT_STALE_THRESHOLD_US = 50 ms`、25 RT tick) 以内にサンプル取得した drain がなければ true を返す。Phase 3b の heading PID 注入で encoder fallback ガードとして使い、Issue #102 の I²C 復旧中などで stale サンプルを積分しないようにする。

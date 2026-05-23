@@ -1,21 +1,21 @@
 /****************************************************************************
  * apps/drivebase/drivebase_imu.h
  *
- * IMU integration for the drivebase daemon (Issue #77 commit #10).
- * Drains LSM6DSL samples from /dev/uorb/sensor_imu0, runs a Z-axis
- * gyro integrator with bias compensation, and exposes
+ * IMU integration for the drivebase daemon.  Drains LSM6DSL samples
+ * from /dev/uorb/sensor_imu0, applies the Phase 2.5 Tedaldi gyro/accel
+ * correction, runs a Madgwick 6-DOF fusion (Phase 3a, Issue #147) to
+ * recover world-vertical yaw on a tilted Hub mounting, and exposes
  *   db_imu_get_heading_mdeg() / set_heading() for the drivebase
  *   aggregator's optional gyro-locked heading mode.
  *
- * Only the 1D heading mode (z-only, complementary bias estimate) is
- * implemented in this commit; the 3D Madgwick variant the plan
- * describes lands in a follow-up once the bench need is established.
- * The btsensor / ImuViewer Madgwick (Issue #61/#64) is the eventual
- * port target.
+ * Heading is the unwrapped world-frame yaw projected back into mdeg
+ * about the robot's actual rotation axis.  The fixed-point integration
+ * over raw gz_corr is gone; integrate() now feeds the corrected gyro
+ * (rad/s) and accel (g) into Madgwick, then atan2f-extracts yaw once
+ * per drain and unwraps into im->heading_mdeg.
  *
  * Coupled-loop wiring into drivebase_drivebase (heading_actual = gyro
- * instead of L−R / axle) is a single-flag change that the daemon FSM
- * (commit #11) will flip from the SET_USE_GYRO ioctl.
+ * instead of L−R / axle) is Phase 3b.
  ****************************************************************************/
 
 #ifndef __APPS_DRIVEBASE_DRIVEBASE_IMU_H
@@ -57,9 +57,40 @@ extern "C"
 
 #define DB_IMU_FSR_GY_IDX_UNKNOWN  0xFF
 
+/* Stale threshold (µs) for db_imu_is_stale().  50 ms ≈ 25 RT-tick at
+ * 2 ms, covers the 3-retry I2C reset window (Issue #102) without
+ * letting Phase 3b's heading PID run on data older than that.
+ */
+
+#define DB_IMU_DEFAULT_STALE_THRESHOLD_US  50000u
+
+/* Phase 3a: Madgwick fusion gain and the stationary-gate thresholds
+ * (pybricks pbio/src/imu.c:327 form, converted to this plan's units of
+ * rad/s and g): below GYRO_MIN_RADPS *and* with |‖a‖-1| below
+ * ACCL_MIN_G the accel correction runs at full β; above either, β is
+ * attenuated linearly toward 0 so wheel impacts / vibration do not
+ * pull yaw via the accel.
+ */
+
+#define DB_IMU_MADGWICK_BETA       0.05f
+#define DB_IMU_GYRO_MIN_RADPS      0.174533f   /* = 10 deg/s */
+#define DB_IMU_ACCL_MIN_G          0.015296f   /* = 150 mm/s² / 9806.65 */
+
 /****************************************************************************
  * Types
  ****************************************************************************/
+
+/* Madgwick 6-DOF IMU-only fusion state.  Quaternion is stored as
+ * (q0=w, q1=x, q2=y, q3=z) to match host MadgwickFilter.cs and the
+ * 2010 paper.
+ */
+
+struct db_madgwick_state_s
+{
+  float    q0, q1, q2, q3;        /* identity (1,0,0,0) until seeded */
+  float    beta;                   /* base fusion gain (default 0.05) */
+  bool     initialized;            /* seeded from first usable accel */
+};
 
 struct db_imu_s
 {
@@ -104,12 +135,43 @@ struct db_imu_s
   uint16_t cur_fsr_gy_dps;
   int32_t  gyro_mdps_num;
 
-  /* Heading state, mdeg, signed.  Wraps at ±2^31 mdeg = ±5.96 M deg
-   * which is well past any realistic continuous run.
+  /* Heading state, mdeg, signed.  In Phase 3a this is the unwrapped
+   * world-vertical yaw extracted from the Madgwick quaternion (per
+   * drain), not the raw ∫gz_corr dt of pre-Phase-3.  ±2^63 mdeg
+   * headroom dwarfs any realistic continuous run.
    */
 
   int64_t  heading_mdeg;
-  uint64_t last_sample_ts_us;
+  uint32_t last_sample_ts_us;     /* sensor_imu.timestamp (32-bit µs,
+                                   * 71-min wrap); modular subtract
+                                   * for dt in integrate(). */
+  bool     last_sample_valid;     /* false until first sample seen
+                                   * (replaces the old "0 means no
+                                   * sample" sentinel that broke on
+                                   * timestamps that happened to be
+                                   * 0 after wrap). */
+
+  /* Phase 3a Madgwick fusion + per-drain yaw extraction state. */
+
+  struct db_madgwick_state_s madgwick;
+  float    psi_prev;              /* yaw rad at last drain, valid
+                                   * after psi_valid */
+  bool     psi_valid;             /* psi_prev seeded */
+  uint8_t  accel_fsr_match;       /* 1 = accel Tedaldi cal was applied
+                                   * this sample (cal loaded AND
+                                   * cal.fsr_xl_g == live driver FSR).
+                                   * 0 = identity fallback either
+                                   * because cal is not loaded OR the
+                                   * live FSR drifted away from
+                                   * cal.fsr_xl_g.  Madgwick still
+                                   * runs with a roughly-correct
+                                   * gravity direction in both cases
+                                   * (identity branch uses the live
+                                   * FSR for float scaling), but tilt
+                                   * precision is degraded. */
+  uint64_t last_drain_ok_us;      /* daemon-clock µs of the last drain
+                                   * that processed ≥ 1 sample;
+                                   * 0 before first ok drain */
 
   /* Diagnostics */
 
@@ -141,25 +203,49 @@ int  db_imu_open(struct db_imu_s *im);
 void db_imu_close(struct db_imu_s *im);
 bool db_imu_is_open(const struct db_imu_s *im);
 
-/* Per-tick: drain the topic, integrate Δheading, update bias.
- * `now_us` is the daemon's own monotonic reference; `dt_us` between
- * samples is taken from the LUMP frame timestamp so the integrator
- * is independent of tick scheduling jitter.  Returns 0 or a negated
- * errno (-EAGAIN if no fresh sample arrived this tick — heading
- * stays the same).
+/* Per-tick: drain the uORB topic, step the Madgwick fusion per sample,
+ * then extract+unwrap yaw once into im->heading_mdeg.  `now_us` is the
+ * daemon's monotonic reference and is recorded in `last_drain_ok_us`
+ * on success so db_imu_is_stale() can detect bus stalls.  Inter-sample
+ * `dt` is computed from the per-sample sensor_imu.timestamp (ISR-
+ * captured, modular subtract for wrap-safety) so the fusion step is
+ * independent of tick scheduling jitter.  Returns 0 or a negated errno
+ * (-EAGAIN if no fresh sample arrived this tick — heading and stale
+ * timestamp stay the same).
  */
 
 int  db_imu_drain_and_update(struct db_imu_s *im, uint64_t now_us);
 
+/* Stale detector for the Phase 3b PID injection guard.  Returns true
+ * when no drain has produced ≥ 1 sample within the last
+ * `threshold_us` daemon-clock micro-seconds, or when the IMU has
+ * never produced a sample.  Use DB_IMU_DEFAULT_STALE_THRESHOLD_US
+ * unless the caller has a reason to override.
+ */
+
+bool db_imu_is_stale(const struct db_imu_s *im, uint64_t now_us,
+                     uint32_t threshold_us);
+
+/* Madgwick diagnostic accessors.  Both are safe to call before the
+ * first sample arrives (quaternion is (1,0,0,0) identity at open and
+ * tilt_deg returns 0).  Float is intentional — these are CLI / test
+ * scope, the PID path stays on int64.  `q[4]` is (w,x,y,z) row order.
+ */
+
+void  db_imu_get_quaternion(const struct db_imu_s *im, float q[4]);
+float db_imu_get_tilt_deg(const struct db_imu_s *im);
+float db_imu_get_beta(const struct db_imu_s *im);
+
 /* Callback alternative for hot paths that already have one IMU
  * sample in hand (push API the plan describes — see
- * drivebase_imu.h notes).  `g[3]` and `a[3]` are raw int16 values.
+ * drivebase_imu.h notes).  Raw int16 values, accel passed through to
+ * the Madgwick stage.
  */
 
 void db_imu_push_sample(struct db_imu_s *im,
                         int16_t gx, int16_t gy, int16_t gz,
                         int16_t ax, int16_t ay, int16_t az,
-                        uint64_t ts_us);
+                        uint8_t fsr_xl_idx, uint32_t ts_us);
 
 /* Heading accessors */
 

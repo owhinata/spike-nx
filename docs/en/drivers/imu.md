@@ -275,7 +275,7 @@ a warning and skips cal application until the FSRs match again.
 |---|---|---|
 | `drivebase _imu show` | Current cal + runtime bias / temperature | `cal.loaded=1`, M diagonal ≈ 1000 |
 | `drivebase _imu drift <sec>` | Static-state drift rate | `drift_mdegpm` < 500 (real Tedaldi run achieved 3 mdeg/min) |
-| `drivebase _imu verify <deg>` | Manual rotation vs gyro integral | IMU mount angle must be accounted for separately — rotation-axis tilt is not a cal issue |
+| `drivebase _imu verify <deg>` | Manual rotation vs gyro integral | Phase 2.5 raw-Z integral was `target × cos(tilt)`; Phase 3a (Section 13) recovers world-vertical yaw via Madgwick so `actual_mdeg ≈ target_deg × 1000 ± 4°` regardless of mounting tilt |
 
 ## 9. Stationary Detection
 
@@ -337,3 +337,119 @@ nsh> imu stop     # Stop daemon
 | `imu.settings()` | `imu_calibration` + NSH command | Threshold settings |
 | `imu.stationary()` | `imu_stationary` state query | bool |
 | `imu.reset_heading()` | `imu_fusion` heading reset | Zero integration values |
+
+## 13. Drivebase IMU Madgwick fusion (Phase 3a, Issue #147)
+
+`apps/drivebase/drivebase_imu` is the user-space integration layer the daemon
+consumes for its optional gyro-locked heading source. Phase 3a replaces the
+former raw `∫gz_corr dt` heading with a Madgwick 6-DOF IMU-only fusion stage
+so a tilted Hub mounting no longer biases the heading by `cos(tilt)`.
+
+### Why Madgwick instead of raw integration
+
+The Phase 2.5 verify on a ~51° tilted bench measured 228.7° on a physical
+360° turn (= 360 × cos(51°) ≈ 226.5°). Raw Z-gyro integration measures
+rotation about the IMU's physical Z, not the robot's actual rotation axis;
+with the LSM6DSL mounted off-vertical the projection error is structural.
+Madgwick fuses accel (gravity) into the quaternion estimate, then we extract
+world-vertical yaw — which is the robot heading the daemon's PID actually
+wants.
+
+### Per-sample pipeline (LSM6DSL ODR 833 Hz)
+
+`integrate()` in `apps/drivebase/drivebase_imu.c`:
+
+1. **FSR transition guard** (Issue #139) — rescale cached gyro bias and idle
+   threshold to preserve their physical meaning when the driver switches
+   FSR live.
+2. **Gyro Tedaldi matmul** — `g_corr_x1000[i] = Σⱼ M[i][j] × (g_raw[j] × 1000 −
+   bias[j]) / 1000` (Phase 2.5, integer x1000).
+3. **Idle-EMA bias update** on `gz_corr` to follow temperature drift.
+4. **Accel FSR match guard** — compare `fsr_xl_idx_to_g(batch[i].fsr_xl_idx)`
+   against `cal.fsr_xl_g`; on mismatch fall back to identity correction and
+   raise `accel_fsr_match=0` (visible in `_imu show`). Madgwick still gets a
+   roughly-correct gravity direction (just wrong scale), and the filter
+   re-normalises so the bound on yaw drift stays predictable.
+5. **Accel Tedaldi matmul** (matched branch) or **identity** (mismatch).
+6. **Float conversion**:
+   - `ω_f[rad/s] = corr_x1000 × (gyro_mdps_num/1000) × π/180 / 1e6`
+   - `a_f[g] = corr_x1000 × (fsr_xl_g / 32768) / 1000`
+7. **Stationary-gated β** (pybricks `pbio/src/imu.c:327` form, converted to
+   rad/s+g):
+   ```
+   stationary = min(1, ACCL_MIN_G/max(|‖a‖-1|, ACCL_MIN_G))
+              × min(1, GYRO_MIN_RADPS/max(‖ω‖, GYRO_MIN_RADPS))
+   β_eff = 0.05 × stationary
+   ```
+   At idle, β=0.05 (full accel correction); under wheel impact / fast
+   rotation the accel error climbs and β drops toward zero so vibration
+   cannot pull yaw via the accel term.
+8. **Quaternion bootstrap** — first sample seeds the quaternion via
+   shortest-arc rotation from (0,0,1) onto the normalised accel, so tilt
+   estimate converges immediately rather than after seconds of β-blend.
+9. **Madgwick update** — direct C port of
+   `host/ImuViewer/src/ImuViewer.Core/Filters/MadgwickFilter.cs` (β=0.05 for
+   Hub/host numerical parity).
+
+### Per-drain yaw extraction
+
+After the drain batch is processed:
+
+```
+ψ_curr = atan2f(2(q0 q3 + q1 q2), 1 - 2(q2² + q3²))
+dψ     = wrap_pi(ψ_curr - ψ_prev)
+heading_mdeg += dψ × 180000/π
+ψ_prev = ψ_curr
+```
+
+`atan2f` runs once per drain (~500 Hz), not per sample. At 2000 dps the
+worst-case angular displacement across a 2 ms RT tick is ~4 deg, far from
+±π, so unwrap accuracy holds.
+
+### FPU and CPU envelope
+
+- `CONFIG_ARCH_FPU=y` + `CONFIG_LIBM_NEWLIB=y` (compile-time `#error`
+  guards in `drivebase_imu.c`).
+- NuttX lazy FPU is OFF (`arch/arm/src/armv7-m/arm_fpuconfig.c:63`); context
+  switching already saves S16–S31 so Phase 3a does not add a new switch
+  cost.
+- Estimated load at 833 Hz: Madgwick ~0.2 % CPU, `atan2f` per drain ~0.05 %.
+- Hard limit on `integrate()` call site: task context only (RT tick
+  work-queue or `_imu` CLI). Not safe from an ISR.
+
+### Timestamp wrap fix
+
+`sensor_imu.timestamp` is the low 32 bits of `CLOCK_BOOTTIME` µs (≈71 min
+wrap). Phase 3a replaces the legacy `last_sample_ts_us != 0 && ts >
+last_sample_ts_us` guard with a `last_sample_valid` flag plus a `(uint32_t)
+(ts - last)` modular subtract, so a wrap event never produces negative dt.
+
+### Diagnostics
+
+`drivebase _imu show` prints:
+
+```
+madgwick.q_x1000=<w> <x> <y> <z>    # quaternion × 1000 (≈ 1000 0 0 0 at boot)
+madgwick.tilt_mdeg=<value>           # angle from world vertical (mdeg)
+madgwick.beta_x1000=50               # base fusion gain × 1000 (default)
+madgwick.initialized=1               # quaternion seeded
+madgwick.accel_fsr_match=1           # 1 = accel Tedaldi cal applied this
+                                     #     sample (cal loaded AND live
+                                     #     FSR matches cal.fsr_xl_g).
+                                     # 0 = identity fallback (cal not
+                                     #     loaded OR live FSR drifted
+                                     #     away from cal.fsr_xl_g).
+```
+
+`drivebase _imu verify <deg>` (Section 8 acceptance row) now treats the
+return value as the unwrapped world-vertical yaw, so a physical 360° turn
+on a 51° tilted bench reads ≈ 360 000 mdeg.
+
+### Stale detection API
+
+`bool db_imu_is_stale(im, now_us, threshold_us)` returns true when no drain
+has produced ≥ 1 sample within `threshold_us` (default
+`DB_IMU_DEFAULT_STALE_THRESHOLD_US = 50 ms`, 25 RT ticks). Phase 3b will use
+this as a guard in the heading PID injection path so a brief I²C recovery
+(Issue #102) falls back to encoder heading instead of integrating stale
+samples.

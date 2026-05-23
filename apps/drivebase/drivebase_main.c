@@ -396,11 +396,11 @@ static int do_imu_verify(struct db_imu_s *im, int argc, FAR char *argv[])
    * the integration would lose more on the high-rate sections of
    * accel/decel.
    *
-   * Note: gyro_z integration only measures rotation about the IMU's
-   * physical Z axis.  If the IMU is tilted by θ relative to the
-   * robot's actual rotation axis, the measured angle is cos(θ) times
-   * the true rotation — interpret error_mdeg accordingly until the
-   * Phase 3 gyro-fusion path takes over.
+   * Phase 3a (Issue #147): heading_mdeg is the unwrapped world-
+   * vertical yaw extracted from the Madgwick quaternion, so a tilted
+   * IMU mounting no longer scales the result by cos(θ).  A physical
+   * 360° rotation on a 51° tilted bench should now read
+   * actual_mdeg ≈ target_deg × 1000 ± 4°.
    */
 
   uint64_t deadline_us = now_us() + (uint64_t)duration_ms * 1000ULL;
@@ -470,6 +470,27 @@ static int do_imu_show(struct db_imu_s *im)
   printf("runtime.temperature_raw=%d\n",
          (int)db_imu_get_temperature_raw(im));
   printf("runtime.temperature_c=%d\n", temp_c);
+
+  /* Phase 3a Madgwick diagnostics.  q0..q3 are scaled to mdeg-style
+   * x1000 (= micro-units) so the print stays integer-only and matches
+   * the convention the rest of the line uses.  tilt_deg is also
+   * x1000 — i.e. the value is "milli-degrees of tilt from world
+   * vertical".  beta_x1000 is the configured base gain × 1000.
+   */
+
+  float q[4];
+  db_imu_get_quaternion(im, q);
+  printf("madgwick.q_x1000=%ld %ld %ld %ld\n",
+         (long)(q[0] * 1000.0f),
+         (long)(q[1] * 1000.0f),
+         (long)(q[2] * 1000.0f),
+         (long)(q[3] * 1000.0f));
+  printf("madgwick.tilt_mdeg=%ld\n",
+         (long)(db_imu_get_tilt_deg(im) * 1000.0f));
+  printf("madgwick.beta_x1000=%ld\n",
+         (long)(db_imu_get_beta(im) * 1000.0f));
+  printf("madgwick.initialized=%d\n", (int)im->madgwick.initialized);
+  printf("madgwick.accel_fsr_match=%d\n", (int)im->accel_fsr_match);
   return 0;
 }
 

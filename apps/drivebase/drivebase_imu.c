@@ -1,26 +1,52 @@
 /****************************************************************************
  * apps/drivebase/drivebase_imu.c
  *
- * 1D heading integration over Z-axis gyro with running-bias estimate.
+ * IMU heading integration for the drivebase daemon (Phase 3a,
+ * Issue #147).  Per sample we:
  *
- * Sample format: struct sensor_imu (NuttX standard) carrying raw
- * int16 gx/gy/gz + ax/ay/az already rotated into the SPIKE Prime
- * Hub body frame by the lsm6dsl_uorb driver.  Default sensitivity is
- * 70 mdps/LSB at FS=2000 dps; sample rate 833 Hz from the LSM6DSL
- * boot config (we do not change ODR — sharing with btsensor
- * sampler).
+ *   1. Detect FSR transitions (Issue #139) and rescale the cached
+ *      gyro bias / idle threshold to preserve their physical meaning.
+ *   2. Apply the Tedaldi gyro matmul (Phase 2.5, Issue #145) on
+ *      bias-residual raw LSB and integrate the idle estimator over
+ *      the corrected Z component.
+ *   3. Apply the Tedaldi accel matmul, gated by an accel-FSR match
+ *      check (cal was taken at a specific fsr_xl_g; if the runtime
+ *      driver has switched FSR live we fall back to identity so the
+ *      orientation filter does not see a wildly wrong gravity).
+ *   4. Convert corrected gyro/accel to float (rad/s, g) and step a
+ *      Madgwick 6-DOF IMU-only fusion, attenuating β by a pybricks-
+ *      style stationary gate so vibration / wheel impacts can't pull
+ *      yaw via the accel.
  *
- * Bias estimation: while |gz| stays below `bias_idle_threshold_lsb`
- * (default 71 LSB ≈ 2.5 dps at the system default FS=1000 dps) for
- * `bias_window_us` (default 200 ms), we accumulate the running
- * average and update bias_z_lsb.  The subtracting integrator then
- * produces ~0 deg drift per second when the chassis is still.
+ * Per drain (≈ daemon-tick = 500 Hz) we extract yaw with a single
+ * atan2f and unwrap into heading_mdeg, keeping the public API on int64
+ * even though the fusion state is float.  This per-drain extraction
+ * is safe: even at 2000 dps the worst-case angular displacement
+ * across a 2 ms RT tick is ~4 deg, far from the ±π wrap point.
+ *
+ * Sample rate is 833 Hz from the LSM6DSL boot config (we do not
+ * change ODR — shared with btsensor).  The host ImuViewer
+ * MadgwickFilter (Issue #146) ports the same algorithm + β=0.05 so
+ * Hub vs host numbers stay comparable.
+ *
+ * integrate() must be called from a task context only (daemon RT
+ * tick work-queue or the _imu CLI); the FPU is enabled (lazy stacking
+ * disabled by arm_fpuconfig.c) so context switching is safe, but the
+ * libm calls cost cycles the ISR path doesn't have to spare.
  ****************************************************************************/
 
 #include <nuttx/config.h>
 
+#if !defined(CONFIG_ARCH_FPU)
+#  error "drivebase_imu Madgwick fusion requires CONFIG_ARCH_FPU"
+#endif
+#if !defined(CONFIG_LIBM_NEWLIB) && !defined(CONFIG_LIBM)
+#  error "drivebase_imu Madgwick fusion requires libm (CONFIG_LIBM_NEWLIB)"
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +69,12 @@
                                              /* curves are not mistaken  */
                                              /* for idle).               */
 #define DB_IMU_DEFAULT_BIAS_WINDOW_US 200000u
+
+#ifndef M_PI_F
+#  define M_PI_F                     3.14159265358979323846f
+#endif
+
+#define DB_IMU_DEG_PER_RAD_X1000    (180000.0f / M_PI_F)
 
 /****************************************************************************
  * Private Helpers
@@ -67,6 +99,202 @@ static uint16_t fsr_gy_idx_to_dps(uint8_t idx)
     [6] = 2000,
   };
   return (idx < (sizeof(table) / sizeof(table[0]))) ? table[idx] : 0;
+}
+
+/* Accel FSR enum (board_lsm6dsl.h: 0=2g, 1=16g, 2=4g, 3=8g) -> g
+ * lookup.  Used by integrate() to compare the per-sample idx against
+ * the cal-file fsr_xl_g and fall back to identity correction when the
+ * live driver FSR has drifted away from the calibration condition.
+ */
+
+static uint8_t fsr_xl_idx_to_g(uint8_t idx)
+{
+  static const uint8_t table[] = {
+    [0] = 2,
+    [1] = 16,
+    [2] = 4,
+    [3] = 8,
+  };
+  return (idx < (sizeof(table) / sizeof(table[0]))) ? table[idx] : 0;
+}
+
+/* Madgwick 6-DOF IMU-only update (port of host
+ * ImuViewer.Core/Filters/MadgwickFilter.cs::Update).  q is
+ * (q0=w, q1=x, q2=y, q3=z); g_rps is gyro rad/s; a_g is accel in
+ * g-units.  beta is the *effective* gain (stationary-gated by the
+ * caller).  Normalises the quaternion at the end so accumulated
+ * float error stays bounded.
+ */
+
+static void madgwick_update_imu(struct db_madgwick_state_s *m,
+                                float ax, float ay, float az,
+                                float gx, float gy, float gz,
+                                float dt, float beta)
+{
+  float q0 = m->q0, q1 = m->q1, q2 = m->q2, q3 = m->q3;
+
+  /* Rate of change from gyroscope. */
+
+  float qDot1 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
+  float qDot2 = 0.5f * ( q0 * gx + q2 * gz - q3 * gy);
+  float qDot3 = 0.5f * ( q0 * gy - q1 * gz + q3 * gx);
+  float qDot4 = 0.5f * ( q0 * gz + q1 * gy - q2 * gx);
+
+  float aNormSq = ax * ax + ay * ay + az * az;
+  if (aNormSq > 1e-12f)
+    {
+      float aRecipNorm = 1.0f / sqrtf(aNormSq);
+      ax *= aRecipNorm;
+      ay *= aRecipNorm;
+      az *= aRecipNorm;
+
+      float _2q0 = 2.0f * q0;
+      float _2q1 = 2.0f * q1;
+      float _2q2 = 2.0f * q2;
+      float _2q3 = 2.0f * q3;
+      float _4q0 = 4.0f * q0;
+      float _4q1 = 4.0f * q1;
+      float _4q2 = 4.0f * q2;
+      float _8q1 = 8.0f * q1;
+      float _8q2 = 8.0f * q2;
+      float q0q0 = q0 * q0;
+      float q1q1 = q1 * q1;
+      float q2q2 = q2 * q2;
+      float q3q3 = q3 * q3;
+
+      float s0 = _4q0 * q2q2 + _2q2 * ax + _4q0 * q1q1 - _2q1 * ay;
+      float s1 = _4q1 * q3q3 - _2q3 * ax + 4.0f * q0q0 * q1 - _2q0 * ay
+                 - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 + _4q1 * az;
+      float s2 = 4.0f * q0q0 * q2 + _2q0 * ax + _4q2 * q3q3 - _2q3 * ay
+                 - _4q2 + _8q2 * q1q1 + _8q2 * q2q2 + _4q2 * az;
+      float s3 = 4.0f * q1q1 * q3 - _2q1 * ax + 4.0f * q2q2 * q3 - _2q2 * ay;
+
+      float sNormSq = s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3;
+      if (sNormSq > 1e-12f)
+        {
+          float sRecipNorm = 1.0f / sqrtf(sNormSq);
+          qDot1 -= beta * s0 * sRecipNorm;
+          qDot2 -= beta * s1 * sRecipNorm;
+          qDot3 -= beta * s2 * sRecipNorm;
+          qDot4 -= beta * s3 * sRecipNorm;
+        }
+    }
+
+  q0 += qDot1 * dt;
+  q1 += qDot2 * dt;
+  q2 += qDot3 * dt;
+  q3 += qDot4 * dt;
+
+  float qNormSq = q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3;
+  if (qNormSq > 1e-12f)
+    {
+      float qRecipNorm = 1.0f / sqrtf(qNormSq);
+      q0 *= qRecipNorm;
+      q1 *= qRecipNorm;
+      q2 *= qRecipNorm;
+      q3 *= qRecipNorm;
+    }
+
+  m->q0 = q0;
+  m->q1 = q1;
+  m->q2 = q2;
+  m->q3 = q3;
+}
+
+/* Seed the quaternion from a first accel sample so post-init the
+ * gravity vector is already aligned to (0,0,1) in the body frame.
+ * Without this the filter would start at identity (= board-up
+ * assumption) and take β-scaled samples to converge, which on a
+ * tilted Hub means seconds of yaw drift before _imu show would
+ * report a stable tilt_deg.
+ *
+ * Formula: shortest-arc quaternion from world-down (0,0,1) to the
+ * normalised accel vector.  Hand-derived in the (q0=w, q1=x, q2=y,
+ * q3=z) convention.  Falls back to identity if the accel norm is
+ * degenerate.
+ */
+
+static void madgwick_seed_from_accel(struct db_madgwick_state_s *m,
+                                     float ax, float ay, float az)
+{
+  float norm_sq = ax * ax + ay * ay + az * az;
+  if (norm_sq < 1e-12f)
+    {
+      m->q0 = 1.0f;
+      m->q1 = m->q2 = m->q3 = 0.0f;
+      m->initialized = true;
+      return;
+    }
+
+  float recip = 1.0f / sqrtf(norm_sq);
+  float ux = ax * recip;
+  float uy = ay * recip;
+  float uz = az * recip;
+
+  /* Shortest-arc body-to-world quaternion: q rotates the body-frame
+   * accel direction u onto the world-up vector v = (0,0,1).
+   *
+   *   q_unnorm = (1 + u·v, u × v)
+   *            = (1 + uz, (uy, -ux, 0))
+   *
+   * When uz approaches -1 (sensor upside-down) the formula
+   * degenerates; pick a fallback 180° rotation about X.
+   *
+   * Note: an earlier draft used q = (1 + uz, -uy, ux, 0), which is
+   * the conjugate (world-to-body) of the shortest arc and seeded the
+   * filter on the *opposite* side of the accel constraint manifold.
+   * The accel correction is too weak to slide q back across the
+   * manifold under β=0.05 + stationary gate, so heading then traced
+   * the wrong projection of world-yaw (0° → +39° → 0° → -39° → 0°
+   * for a 51° tilted IMU).  See Issue #147 hardware-verification
+   * notes.
+   */
+
+  float q0 = 1.0f + uz;
+  float q1 = uy;
+  float q2 = -ux;
+  float q3 = 0.0f;
+
+  float qNormSq = q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3;
+  if (qNormSq < 1e-6f)
+    {
+      /* Upside-down: rotate π about X (q = (0, 1, 0, 0)). */
+
+      m->q0 = 0.0f;
+      m->q1 = 1.0f;
+      m->q2 = m->q3 = 0.0f;
+    }
+  else
+    {
+      float r = 1.0f / sqrtf(qNormSq);
+      m->q0 = q0 * r;
+      m->q1 = q1 * r;
+      m->q2 = q2 * r;
+      m->q3 = q3 * r;
+    }
+
+  m->initialized = true;
+}
+
+/* Wrap-safe modular dt (µs).  sensor_imu.timestamp is the low 32 bits
+ * of CLOCK_BOOTTIME us; subtracting in uint32_t domain gives the
+ * natural mod-2^32 difference, which is correct as long as the
+ * inter-sample gap stays well below 71 minutes — true for any LSM6DSL
+ * configuration (default 833 Hz = 1.2 ms gap).
+ */
+
+static uint32_t wrap_safe_dt_us(uint32_t now, uint32_t prev)
+{
+  return (uint32_t)(now - prev);
+}
+
+/* Wrap a delta into (-π, π] for unwrap accumulation. */
+
+static float wrap_pi(float x)
+{
+  while (x >   M_PI_F) x -= 2.0f * M_PI_F;
+  while (x <= -M_PI_F) x += 2.0f * M_PI_F;
+  return x;
 }
 
 /* On FSR change, rescale the cached bias_lsb_x1000 (raw-LSB × 1000
@@ -146,7 +374,9 @@ static void apply_fsr_change(struct db_imu_s *im, uint8_t new_idx)
 
 static void integrate(struct db_imu_s *im,
                       int16_t gx_raw, int16_t gy_raw, int16_t gz_raw,
-                      uint8_t fsr_gy_idx, uint64_t ts_us)
+                      int16_t ax_raw, int16_t ay_raw, int16_t az_raw,
+                      uint8_t fsr_gy_idx, uint8_t fsr_xl_idx,
+                      uint32_t ts_us)
 {
   /* Issue #139: detect FSR transitions before any bias arithmetic. */
 
@@ -155,7 +385,7 @@ static void integrate(struct db_imu_s *im,
       apply_fsr_change(im, fsr_gy_idx);
     }
 
-  /* Phase 2.5: 3×3 matmul with x1000 fractional bias.
+  /* Phase 2.5: 3×3 gyro matmul with x1000 fractional bias.
    *
    *   residual_x1000[j] = g_raw[j] * 1000 - bias_lsb_x1000[j]
    *   g_corr_x1000[i]   = (sum_j M_x1000[i][j] * residual_x1000[j]) / 1000
@@ -163,15 +393,8 @@ static void integrate(struct db_imu_s *im,
    * Both sides of the multiplication stay in 64-bit so a worst-case
    * |M_x1000| ≈ 1100 and |residual| ≈ 33e6 (full-scale int16 raw +
    * bias drift) sum to at most ~1.1e11 across the 3 terms — well
-   * within int64.  The final divide-by-1000 keeps g_corr_x1000 in
-   * millis-LSB so the downstream heading integration and idle gate
-   * see the same units.
-   *
-   * We only consume index 2 (Z) downstream; computing the full 3-row
-   * matmul costs the same since the matrix is small and the loop
-   * unrolls trivially.  Keeping the loop also leaves the X/Y entries
-   * available for future tilt-estimator wiring without another
-   * refactor.
+   * within int64.  Phase 3a consumes the full 3-vector (Madgwick),
+   * not just Z, so the matmul is no longer "computed for free".
    */
 
   const int16_t g_raw[3] = { gx_raw, gy_raw, gz_raw };
@@ -192,27 +415,27 @@ static void integrate(struct db_imu_s *im,
 
   int64_t gz_corr_x1000 = g_corr_x1000[2];
 
-  /* Bias estimation gate.  Compare in millis-LSB so the threshold
-   * (raw-LSB) needs to be scaled up.  Using the corrected residual
-   * (not raw - bias_z_only) means the gate keeps its physical
-   * meaning even when the off-diagonal matrix terms have nudged the
-   * effective bias.
+  /* Bias estimation gate (idle EMA over Z).  Threshold lives in
+   * raw-LSB so multiply by 1000 to compare against millis-LSB.
+   * Using the corrected residual keeps the physical meaning even
+   * when the off-diagonal matrix terms nudge the effective bias.
    */
 
   int64_t threshold_x1000 = (int64_t)im->bias_idle_threshold_lsb * 1000;
 
   if (llabs(gz_corr_x1000) < threshold_x1000)
     {
-      /* Idle.  Accumulate raw Z × 1000 (not bias-corrected) so the
-       * estimate tracks the true drift of the gyro itself.
+      /* Idle.  Accumulate raw Z × 1000 so the estimate tracks the
+       * gyro's true drift.
        */
 
       im->bias_acc_lsb_x1000 += (int64_t)gz_raw * 1000;
       im->bias_acc_count++;
 
-      if (im->last_sample_ts_us != 0 && ts_us > im->last_sample_ts_us)
+      if (im->last_sample_valid)
         {
-          im->bias_idle_streak_us += ts_us - im->last_sample_ts_us;
+          im->bias_idle_streak_us += wrap_safe_dt_us(ts_us,
+                                                     im->last_sample_ts_us);
         }
 
       if (im->bias_idle_streak_us >= im->bias_window_us &&
@@ -224,22 +447,15 @@ static void integrate(struct db_imu_s *im,
           if (!im->calibrated)
             {
               /* First successful idle window after open / recalibrate.
-               * Full assignment so the very first capture lands on the
-               * actual bias instead of a 10 % blend with whatever
-               * (often zero or a stale cal value) was sitting in
-               * bias_lsb_x1000[2].
+               * Full assignment instead of α-blend so the very first
+               * capture lands on the actual bias.
                */
 
               im->bias_lsb_x1000[2] = (int32_t)new_bias_z_x1000;
             }
           else
             {
-              /* α = 0.1 EMA tracks slow temperature drift without
-               * over-reacting to a single noisy idle window.  Integer
-               * form: (new + 9 * old) / 10.  At FSR=1000 dps with
-               * x1000 fractional, this preserves sub-LSB precision
-               * across temperature swings of ~20°C.
-               */
+              /* α = 0.1 EMA: (new + 9 * old) / 10. */
 
               int64_t prev_x1000 = (int64_t)im->bias_lsb_x1000[2];
               im->bias_lsb_x1000[2] = (int32_t)
@@ -254,39 +470,192 @@ static void integrate(struct db_imu_s *im,
     }
   else
     {
-      /* Motion.  Reset the calibration window so a single noisy frame
-       * doesn't poison the average.
-       */
-
       im->bias_idle_streak_us = 0;
       im->bias_acc_lsb_x1000  = 0;
       im->bias_acc_count      = 0;
     }
 
-  /* Heading integration in x1000 domain:
+  /* Accel: apply the Tedaldi accel matmul gated on FSR match.
    *
-   *   d_mdeg = gz_corr_x1000 (millis-LSB) × gyro_mdps_num
-   *            × dt_us / (1000 × 1e9)
-   *
-   * The (/ 1000) drops the millis-LSB scale; the (/ 1e9) folds the
-   * 1/32768 sensitivity into the 1/1e6 dt seconds factor as before
-   * (see the pre-Phase 2.5 comment).  gyro_mdps_num == 0 means the
-   * FSR idx was invalid — skip integration rather than producing
-   * garbage heading.
+   * Cal was taken at a specific fsr_xl_g; if the runtime driver has
+   * switched FSR live (Issue #139) the bias and matrix scale would
+   * be wrong by a factor of (cal_g / live_g).  Detect mismatch and
+   * fall back to (raw - 0) identity correction so the orientation
+   * filter sees a roughly-correct gravity vector — degraded tilt
+   * but not divergent.
    */
 
-  if (im->last_sample_ts_us != 0 && ts_us > im->last_sample_ts_us
-      && im->gyro_mdps_num != 0)
+  uint8_t live_xl_g = fsr_xl_idx_to_g(fsr_xl_idx);
+  bool xl_match = (im->cal.loaded && im->cal.fsr_xl_g != 0 &&
+                   live_xl_g == im->cal.fsr_xl_g);
+  im->accel_fsr_match = (uint8_t)xl_match;
+
+  const int16_t a_raw[3] = { ax_raw, ay_raw, az_raw };
+  int64_t a_corr_x1000[3];
+
+  if (xl_match)
     {
-      uint64_t dt_us = ts_us - im->last_sample_ts_us;
-      int64_t  d_mdeg = gz_corr_x1000 * (int64_t)im->gyro_mdps_num *
-                        (int64_t)dt_us /
-                        ((int64_t)1000 * 1000000000);
-      im->heading_mdeg += d_mdeg;
+      for (int i = 0; i < 3; i++)
+        {
+          int64_t sum = 0;
+          for (int j = 0; j < 3; j++)
+            {
+              int64_t residual_j = (int64_t)a_raw[j] * 1000
+                                  - (int64_t)im->cal.accel_bias_lsb_x1000[j];
+              sum += (int64_t)im->cal.accel_M_x1000[i][j] * residual_j;
+            }
+
+          a_corr_x1000[i] = sum / 1000;
+        }
+    }
+  else
+    {
+      /* Identity correction.  Keeps the x1000 scale consistent with
+       * the matched branch so the float conversion below stays one
+       * expression.
+       */
+
+      a_corr_x1000[0] = (int64_t)ax_raw * 1000;
+      a_corr_x1000[1] = (int64_t)ay_raw * 1000;
+      a_corr_x1000[2] = (int64_t)az_raw * 1000;
+    }
+
+  /* Float conversion.
+   *
+   * Gyro: corrected x1000 LSB → rad/s.  Existing fixed-point uses
+   *   gyro_mdps_num = cur_fsr_gy_dps * 35   [mdps/LSB × 1000]
+   * (repo convention 35 mdps/LSB at FSR=1000 dps; datasheet 30.5).
+   * For float we divide by 1000 to recover mdps/LSB, then chain:
+   *   ω_f [rad/s] = corr_x1000 * mdps_per_lsb * π/180 / 1e6
+   * The /1e6 folds the x1000 (corr) × 1000 (mdps→dps) → 1e6, and the
+   * /1000 inside mdps→dps cancels with x1000 to a single /1e6.
+   *
+   * Sanity (FSR=1000 dps): 1 LSB = 35 mdps = 35e-3 * π/180 ≈
+   * 6.109e-4 rad/s — matches lsm6dsl_uorb.c and the cal-file
+   * informational constant.
+   *
+   * Accel: corrected x1000 LSB → g-units.  ±cal.fsr_xl_g maps to
+   * ±32768 LSB, so a_f[g] = corr_x1000 * (fsr_xl_g / 32768) / 1000.
+   * If cal is identity (mismatch / not loaded) we still need a g
+   * value; use live_xl_g when known, else default to 2g (the post-
+   * boot driver default).  Wrong scale would only stretch the
+   * accel vector — Madgwick re-normalises before the s-error
+   * gradient, so the gain stays predictable.
+   */
+
+  float mdps_per_lsb = (float)im->gyro_mdps_num / 1000.0f;
+  float wf[3];
+  for (int i = 0; i < 3; i++)
+    {
+      wf[i] = (float)g_corr_x1000[i] * mdps_per_lsb
+              * (M_PI_F / 180.0f) / 1.0e6f;
+    }
+
+  uint8_t a_scale_g = xl_match ? im->cal.fsr_xl_g
+                               : (live_xl_g != 0 ? live_xl_g : 2);
+  float a_scale = (float)a_scale_g / (32768.0f * 1000.0f);
+  float af[3];
+  for (int i = 0; i < 3; i++)
+    {
+      af[i] = (float)a_corr_x1000[i] * a_scale;
+    }
+
+  /* Stationary-gated β (pybricks pbio/src/imu.c:327 form, converted
+   * to (rad/s, g) units).  When the chassis is still both errs go to
+   * zero and β_eff == β_base; under wheel impacts / vibration the
+   * accel-err climbs > ACCL_MIN_G and β scales down toward zero so
+   * Madgwick's accel-correction term stops pulling yaw.
+   */
+
+  float a_norm = sqrtf(af[0] * af[0] + af[1] * af[1] + af[2] * af[2]);
+  float accl_err = fabsf(a_norm - 1.0f);
+  float gyro_err = sqrtf(wf[0] * wf[0] + wf[1] * wf[1] + wf[2] * wf[2]);
+
+  float accl_term = DB_IMU_ACCL_MIN_G /
+                    (accl_err > DB_IMU_ACCL_MIN_G ? accl_err : DB_IMU_ACCL_MIN_G);
+  float gyro_term = DB_IMU_GYRO_MIN_RADPS /
+                    (gyro_err > DB_IMU_GYRO_MIN_RADPS ? gyro_err : DB_IMU_GYRO_MIN_RADPS);
+
+  float stationary = accl_term * gyro_term;
+  if (stationary > 1.0f) stationary = 1.0f;
+  if (stationary < 0.0f) stationary = 0.0f;
+  float beta_eff = im->madgwick.beta * stationary;
+
+  /* First-sample bootstrap: seed the quaternion from accel, then
+   * skip the Madgwick update (no dt yet) so the seed is not
+   * immediately wobbled by a 1.2 ms integration step.
+   */
+
+  if (!im->madgwick.initialized)
+    {
+      madgwick_seed_from_accel(&im->madgwick, af[0], af[1], af[2]);
+      im->last_sample_ts_us = ts_us;
+      im->last_sample_valid = true;
+      im->sample_count++;
+      return;
+    }
+
+  if (im->last_sample_valid)
+    {
+      uint32_t dt_us = wrap_safe_dt_us(ts_us, im->last_sample_ts_us);
+
+      /* Skip the Madgwick step when dt_us is implausibly large
+       * (sensor hang / I²C recovery): 20 ms = ~16 nominal sample
+       * periods.  This is freeze-not-clamp — quaternion stays put
+       * for the long-dt sample, so per-drain yaw extraction sees
+       * ψ_curr == ψ_prev and heading_mdeg also freezes.  Once
+       * sampling resumes the next dt_us is back under the gate and
+       * fusion catches up live.  Free-integrating gz for hundreds
+       * of ms during a stall would otherwise corrupt yaw far more
+       * than a 20 ms freeze does.
+       */
+
+      if (dt_us > 0 && dt_us < 20000)
+        {
+          float dt_s = (float)dt_us * 1.0e-6f;
+          madgwick_update_imu(&im->madgwick,
+                              af[0], af[1], af[2],
+                              wf[0], wf[1], wf[2],
+                              dt_s, beta_eff);
+        }
     }
 
   im->last_sample_ts_us = ts_us;
+  im->last_sample_valid = true;
   im->sample_count++;
+}
+
+/* Extract world-vertical yaw (rad) from the Madgwick quaternion and
+ * unwrap-accumulate into heading_mdeg.  Called per drain (not per
+ * sample): even at 2000 dps the worst-case dψ across a 2 ms RT tick
+ * is ~4 deg, far from ±π, so unwrap accuracy holds.
+ */
+
+static void extract_yaw_and_unwrap(struct db_imu_s *im)
+{
+  if (!im->madgwick.initialized)
+    {
+      return;
+    }
+
+  float q0 = im->madgwick.q0;
+  float q1 = im->madgwick.q1;
+  float q2 = im->madgwick.q2;
+  float q3 = im->madgwick.q3;
+
+  float psi = atan2f(2.0f * (q0 * q3 + q1 * q2),
+                     1.0f - 2.0f * (q2 * q2 + q3 * q3));
+
+  if (!im->psi_valid)
+    {
+      im->psi_prev  = psi;
+      im->psi_valid = true;
+      return;
+    }
+
+  float dpsi = wrap_pi(psi - im->psi_prev);
+  im->heading_mdeg += (int64_t)(dpsi * DB_IMU_DEG_PER_RAD_X1000);
+  im->psi_prev = psi;
 }
 
 /****************************************************************************
@@ -299,6 +668,23 @@ int db_imu_open(struct db_imu_s *im)
   im->fd = -1;
   im->bias_idle_threshold_lsb = DB_IMU_DEFAULT_BIAS_THRESH;
   im->bias_window_us          = DB_IMU_DEFAULT_BIAS_WINDOW_US;
+
+  /* Phase 3a: Madgwick state.  Quaternion starts at identity; the
+   * first integrate() call replaces it with a shortest-arc seed from
+   * the first accel sample so post-init the gravity vector is
+   * already aligned.
+   */
+
+  im->madgwick.q0           = 1.0f;
+  im->madgwick.q1           = 0.0f;
+  im->madgwick.q2           = 0.0f;
+  im->madgwick.q3           = 0.0f;
+  im->madgwick.beta         = DB_IMU_MADGWICK_BETA;
+  im->madgwick.initialized  = false;
+  im->psi_valid             = false;
+  im->accel_fsr_match       = 0;
+  im->last_drain_ok_us      = 0;
+  im->last_sample_valid     = false;
 
   /* Phase 2.5: load offline calibration (Identity + zero bias on any
    * failure, so the daemon runs uncalibrated rather than refusing to
@@ -352,7 +738,6 @@ bool db_imu_is_open(const struct db_imu_s *im)
 
 int db_imu_drain_and_update(struct db_imu_s *im, uint64_t now_us)
 {
-  (void)now_us;
   if (!im->opened) return -ENODEV;
 
   struct sensor_imu batch[DB_IMU_DRAIN_BATCH];
@@ -369,18 +754,22 @@ int db_imu_drain_and_update(struct db_imu_s *im, uint64_t now_us)
   size_t count = (size_t)n / sizeof(batch[0]);
   if (count == 0) return -EAGAIN;
 
-  /* Process every sample in the batch — heading integration needs all
-   * of them, not just the last one.  (Velocity-estimator-style
-   * drop-to-latest doesn't apply because the integrator's accuracy is
-   * proportional to sample-count.)
+  /* Process every sample in the batch — Madgwick accuracy is
+   * proportional to sample-count, so drop-to-latest is not safe.
    */
 
   for (size_t i = 0; i < count; i++)
     {
       integrate(im,
                 batch[i].gx, batch[i].gy, batch[i].gz,
-                batch[i].fsr_gy_idx, batch[i].timestamp);
+                batch[i].ax, batch[i].ay, batch[i].az,
+                batch[i].fsr_gy_idx, batch[i].fsr_xl_idx,
+                batch[i].timestamp);
     }
+
+  /* Per-drain: extract world-vertical yaw and unwrap-accumulate. */
+
+  extract_yaw_and_unwrap(im);
 
   /* Cache last sample's temperature for the Section F `_imu show` /
    * `_imu drift` verbs.  The driver decimates OUT_TEMP reads
@@ -390,26 +779,28 @@ int db_imu_drain_and_update(struct db_imu_s *im, uint64_t now_us)
    */
 
   im->last_temperature_raw = batch[count - 1].temperature_raw;
+  im->last_drain_ok_us     = now_us;
   return 0;
 }
 
 void db_imu_push_sample(struct db_imu_s *im,
                         int16_t gx, int16_t gy, int16_t gz,
                         int16_t ax, int16_t ay, int16_t az,
-                        uint64_t ts_us)
+                        uint8_t fsr_xl_idx, uint32_t ts_us)
 {
-  (void)ax;
-  (void)ay;
-  (void)az;
   if (!im->opened) return;
-  /* No external caller knows the FSR idx for a hand-injected sample;
-   * use the integrator's current cached idx so the scale stays
-   * consistent with whatever the driver last fed in.  If the
+
+  /* No external caller knows the gyro FSR idx for a hand-injected
+   * sample; use the integrator's current cached idx so the scale
+   * stays consistent with whatever the driver last fed in.  If the
    * integrator has never seen a real sample, gyro_mdps_num is 0 and
-   * the heading update is skipped (fail-soft).
+   * the corrected gyro stays at LSB — Madgwick still runs but only
+   * the accel correction is meaningful, which is fine for
+   * unit-test injection.
    */
 
-  integrate(im, gx, gy, gz, im->cur_fsr_gy_idx, ts_us);
+  integrate(im, gx, gy, gz, ax, ay, az,
+            im->cur_fsr_gy_idx, fsr_xl_idx, ts_us);
 }
 
 int64_t db_imu_get_heading_mdeg(const struct db_imu_s *im)
@@ -455,4 +846,48 @@ void db_imu_recalibrate(struct db_imu_s *im)
   im->bias_acc_count      = 0;
   im->bias_idle_streak_us = 0;
   im->calibrated          = false;
+}
+
+bool db_imu_is_stale(const struct db_imu_s *im, uint64_t now_us,
+                     uint32_t threshold_us)
+{
+  if (!im->opened || im->last_drain_ok_us == 0)
+    {
+      return true;
+    }
+
+  if (now_us <= im->last_drain_ok_us)
+    {
+      return false;
+    }
+
+  return (now_us - im->last_drain_ok_us) > (uint64_t)threshold_us;
+}
+
+void db_imu_get_quaternion(const struct db_imu_s *im, float q[4])
+{
+  q[0] = im->madgwick.q0;
+  q[1] = im->madgwick.q1;
+  q[2] = im->madgwick.q2;
+  q[3] = im->madgwick.q3;
+}
+
+float db_imu_get_tilt_deg(const struct db_imu_s *im)
+{
+  /* tilt = angle between body Z and world Z.  In (q0=w, q1=x, q2=y,
+   * q3=z) convention the rotation-matrix R[2][2] entry is
+   *   cos(tilt) = 1 - 2*(q1² + q2²).
+   * Clamp into [-1,1] before acosf to defend against FP rounding.
+   */
+
+  float c = 1.0f - 2.0f * (im->madgwick.q1 * im->madgwick.q1 +
+                           im->madgwick.q2 * im->madgwick.q2);
+  if (c >  1.0f) c =  1.0f;
+  if (c < -1.0f) c = -1.0f;
+  return acosf(c) * (180.0f / M_PI_F);
+}
+
+float db_imu_get_beta(const struct db_imu_s *im)
+{
+  return im->madgwick.beta;
 }
