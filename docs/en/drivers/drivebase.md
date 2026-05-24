@@ -608,6 +608,46 @@ i.e. MULTIPLY by `vbat / nominal` (a number < 1 when below nominal).  Both raw a
 
 **No RT-path impact**: SysId runs only while the daemon is stopped, so its math never executes from the RT tick.  `drivebase_sysid.o` does contain 64-bit divides in the fit helpers, but it is outside the RT path and excluded from the CoreMark gate (Plan note).  RT-path object 64-bit divide counts are unchanged from Step 6.3 (aggregate.o=0, control.o=5, drivebase.o=13, rt.o=3, battery.o=0).
 
+#### 8.5.5 Phase 6 closeout (Issue [#152](https://github.com/owhinata/spike-nx/issues/152) Step 6.6)
+
+Production defaults after the Phase 6 FF / battery / SysId stack plus the Step 6.6 ki sweep, baked into `drivebase_settings.c` / `drivebase_config.c` and mirrored in `cfg.sample`:
+
+| key | Phase 6 production | Why |
+|---|---|---|
+| `pid_dist_ki_pos` | **5** | Step 6.6 ki sweep.  Pre-Phase-6 was 15 (the integrator was the only thing dragging the motor past breakaway).  With FF (kV=9 + kS=700) now supplying the duty floor, lower ki settles cleaner on long moves — straight 300 lands within ±1 mm at ki=5 vs +3-5 mm overshoot at ki=10/15. |
+| `pid_head_ki_pos` | 15 (unchanged) | Heading axis was not bench-swept independently; left at the pre-Phase-6 value. |
+| `ff_dist_kV` | **9** | Phase 6.1 confirmed: cuts `straight 300 brake` settling from 4.6 s to 1.8 s. |
+| `ff_dist_kA` | 0 | Step 6.5: the symmetric `kA × a_ref` over-decelerates during the trajectory's decel phase. |
+| `ff_head_kV` | 0 | Step 6.5: even kV=6 alone makes turn 90 stop 6° short of target before ki ramps it past. |
+| `ff_head_kA` | 0 | Same regression mechanism as `ff_dist_kA`. |
+| `ff_motor_kS` | **700** | Phase 6.2 confirmed: 3.5 % per-side rail-step helps the PID + kV tip past static friction without biasing cruise. |
+| `ff_v_hyst_enter_mdegps` | 5000 | Phase 6.2 default. |
+| `ff_v_hyst_exit_mdegps` | 1000 | Phase 6.2 default. |
+| `battery_nominal_mv` | 7200 | Phase 6.3 default (6S Li-Ion nominal). |
+| `battery_min_mv` | 6000 | Phase 6.3 default (1.2× boost cap). |
+| `use_gyro_plus1` | **2** | Phase 6.6 flipped this from 0 (key absent → NONE) to 2 (1D gyro-locked heading at boot) so the typical SPIKE drivebase use case gets the IMU active from the first command. |
+
+**Step 6.6 ki sweep full results** (`straight 50` / `straight 300` / `turn 90` / `turn 180` brake at ki ∈ {0, 5, 10, 15}, 2 runs each = 32 runs):
+
+| Scenario | ki=15 | ki=10 | **ki=5 (production)** | ki=0 |
+|---|---|---|---|---|
+| straight 50 | 45-47mm done 1/2 | 45-46mm done 0/2 | 44-46mm done 0/2 | 43-44mm done 0/2 |
+| straight 300 | 305mm done 0/2 | 303-304mm done 2/2 | **299-301mm done 2/2 (±1mm)** | 296-297mm done 2/2 (-3-4mm) |
+| turn 90 | +1.0/+2.2° done 2/2 | +1.1/+1.5° done 2/2 | **+1.0/+1.1° done 2/2** | +1.1/+1.5° done 2/2 |
+| turn 180 | +8.0/+10.2° done 0/2 | +8.9/+9.6° done 0/2 | +8.5/+10.0° done 0/2 | +8.7/+8.9° done 0/2 |
+
+**Two problems Phase 6 did NOT resolve (Phase 7 territory)**:
+
+1. **`straight 50 brake` fails `done` at every ki**: motor stops 4-7 mm short of target, just outside the 3.9 mm pos_tolerance window.  Cause: static friction (~25 %) exceeds the PID's mid-settle duty (~5-10 %), so the motor cannot break out once it has stopped.  PID gain tuning alone cannot fix this — Phase 7 candidates include widening pos_tolerance, raising kp_pos, or applying a short-move-specific kS boost.
+2. **`turn 180 brake` overshoots +8-10° at every ki**: motor inertia exceeds the trajectory's decel rate so the wheel coasts past target.  Step 6.5 tried heading-axis FF and saw worse regression.  Phase 7 candidates: asymmetric kA (contribute only during accel), heading-specific trajectory shaping, or wider tolerance for long turns.
+
+#### 8.5.6 Phase 7 / follow-up candidates (logged at Phase 6 close)
+
+- **`straight 50` boundary fix**: dynamic kS for short moves / pos_tolerance auto-widen / kp_pos boost.
+- **`turn 180` overshoot**: asymmetric kA design / heading-specific SysId / trajectory shaping.
+- **Heading-axis FF redesign**: root-cause why the symmetric `kV × v_ref` works on distance but regresses on heading (inertia ratio?  friction characteristics?).
+- **Issue #153 / #154 race fixes**: rcS auto-start attach race and mid-bench `-ENOTCONN` are open follow-ups for the chardev cleanup path.
+
 ### 8.6 Runtime config override (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
 At `drivebase start` the daemon reads a text file on the external W25Q256 NOR (LittleFS at `/mnt/flash`) and applies any recognised key=value pairs to PID gains / completion / stall / wheel/axle/tick before launching the RT thread.  This shortens bench-tuning iteration: no rebuild required.

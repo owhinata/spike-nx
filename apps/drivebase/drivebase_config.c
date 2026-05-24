@@ -442,6 +442,17 @@ int db_config_load(const char *path)
 {
   memset(&g_start_defaults, 0, sizeof(g_start_defaults));
 
+  /* Phase 6 production default: gyro-locked heading at boot.  Phase
+   * 2.5/3a/3b shipped the Madgwick fusion + heading-PID injection so
+   * the typical drivebase use case wants 1D gyro from the first
+   * command.  cfg can still override to 0/1 (NONE) explicitly if the
+   * IMU is intentionally disabled; this just changes the unedited-
+   * cfg default.  See drivebase_daemon.c for the `use_gyro_plus1 - 1`
+   * decode and the latched-on-first-command flow.
+   */
+
+  g_start_defaults.use_gyro_plus1 = 2;   /* +1 encoding: 2 = 1D    */
+
   if (path == NULL) path = DB_CONFIG_DEFAULT_PATH;
 
   FILE *fp = fopen(path, "r");

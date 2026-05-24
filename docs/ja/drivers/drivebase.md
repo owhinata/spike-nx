@@ -606,6 +606,46 @@ gain_nominal = gain_measured * vbat_mv / battery_nominal_mv
 
 **RT path 影響なし**: SysId 実装は daemon stop 前提のため RT thread 中は走らない。`drivebase_sysid.o` には fit math の 64-bit divide が含まれるが RT path 外で CoreMark gate には無関係 (Plan 明記)。RT path object 計数は Step 6.3 と完全一致 (aggregate.o=0, control.o=5, drivebase.o=13, rt.o=3, battery.o=0)。
 
+#### 8.5.5 Phase 6 closeout (Issue [#152](https://github.com/owhinata/spike-nx/issues/152) Step 6.6)
+
+Phase 6 で追加した FF / battery / SysId stack と Step 6.6 の ki sweep を踏まえた最終 production defaults (`drivebase_settings.c` + `drivebase_config.c` の compiled default、cfg.sample にもそのまま反映):
+
+| key | Phase 6 production | 経緯 |
+|---|---|---|
+| `pid_dist_ki_pos` | **5** | Step 6.6 ki sweep。pre-Phase-6 は 15 で「ki が breakaway を超える唯一の手段」だったが Phase 6 で FF (kV=9 + kS=700) が duty floor を供給するので ki を 5 まで下げると straight 300 brake が target ±1mm で着地 (ki=10/15 は 3-5mm overshoot で done window 外) |
+| `pid_head_ki_pos` | 15 (unchanged) | heading 軸は dist と独立、bench 検証無しなので touch せず |
+| `ff_dist_kV` | **9** | Phase 6.1 confirmed (`straight 300 brake` settling 4577→1767ms = 2.6×) |
+| `ff_dist_kA` | 0 | Step 6.5 評価で symmetric kA が decel phase で過剰減速 |
+| `ff_head_kV` | 0 | Step 6.5 bench で head kV=6 単独でも turn 90 で 84° stall regression、heading axis は symmetric kV モデル不適 |
+| `ff_head_kA` | 0 | 同上 |
+| `ff_motor_kS` | **700** | Phase 6.2 confirmed、per-side 3.5% rail-step で breakaway 補助 |
+| `ff_v_hyst_enter_mdegps` | 5000 | Phase 6.2 default |
+| `ff_v_hyst_exit_mdegps` | 1000 | Phase 6.2 default |
+| `battery_nominal_mv` | 7200 | Phase 6.3 default、SPIKE 6S Li-Ion 公称 |
+| `battery_min_mv` | 6000 | Phase 6.3 default、1.2× cap |
+| `use_gyro_plus1` | **2** | Phase 6.6 で default を flip (0 → 2)、IMU を持つ典型ケースで boot 時から 1D gyro 有効 |
+
+**Step 6.6 ki sweep 全データ**: `straight 50` brake / `straight 300` brake / `turn 90` brake / `turn 180` brake を ki ∈ {0, 5, 10, 15} で各 2 run、計 32 runs。
+
+| Scenario | ki=15 | ki=10 | **ki=5 (production)** | ki=0 |
+|---|---|---|---|---|
+| straight 50 | 45-47mm done 1/2 | 45-46mm done 0/2 | 44-46mm done 0/2 | 43-44mm done 0/2 |
+| straight 300 | 305mm done 0/2 | 303-304mm done 2/2 | **299-301mm done 2/2 (±1mm)** | 296-297mm done 2/2 (-3-4mm) |
+| turn 90 | +1.0/+2.2° done 2/2 | +1.1/+1.5° done 2/2 | **+1.0/+1.1° done 2/2** | +1.1/+1.5° done 2/2 |
+| turn 180 | +8.0/+10.2° done 0/2 | +8.9/+9.6° done 0/2 | +8.5/+10.0° done 0/2 | +8.7/+8.9° done 0/2 |
+
+**Phase 6 で解決できなかった 2 つの問題 (Phase 7 領分)**:
+
+1. **`straight 50` brake が全 ki で done 立たず**: motor が target から 4-7mm 手前で stop、tolerance window (3.9mm) 外。原因 = 静止摩擦 ~25% に対し PID 整定中の duty が 5-10% で breakaway 復帰不可。**Phase 6 のスコープ (PID + FF gain tuning)** では構造的に解決不能。Phase 7 候補: pos_tolerance widen、kp_pos 強化、kS dynamic boost (短距離 only)
+2. **`turn 180` brake が全 ki で +8-10° overshoot、done 立たず**: motor 慣性 > trajectory decel rate で target 過ぎる。Step 6.5 で kV/kA を heading 軸に投入したが逆 regression。**Phase 7 候補**: asymmetric kV (accel phase only)、wider tolerance for long turns、または trajectory decel rate を motor inertia spec から逆算
+
+#### 8.5.6 Phase 7 / 後継 Issue 候補 (Phase 6 完了時点)
+
+- **`straight 50` boundary fix**: dynamic kS for short moves / tolerance auto-widen / kp boost
+- **`turn 180` overshoot**: asymmetric kA design / heading-specific SysId / trajectory shaping
+- **Heading-axis FF redesign**: symmetric `kV × v_ref` が heading で機能しない原因の root cause (慣性比? 摩擦特性?) 究明
+- **Issue #153/#154 系の race 解決**: rcS auto-start attach race / mid-bench `-ENOTCONN` の chardev cleanup 改善
+
 ### 8.6 ランタイム設定上書き (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
 `drivebase start` 時に外部 W25Q256 NOR (LittleFS `/mnt/flash`) 上の text file から PID gain / completion / stall / wheel/axle/tick を読み込み、ビルド済みバイナリの default を rebuild なしで上書きできる。bench tuning iteration 短縮が目的。

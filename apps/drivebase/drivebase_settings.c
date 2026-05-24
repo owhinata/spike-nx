@@ -160,17 +160,31 @@ _Static_assert(DB_KP_POS_DEFAULT > 0,
 static struct db_servo_gains_s g_pid_gains_distance =
 {
   .kp_pos        = DB_KP_POS_DEFAULT,
-  .ki_pos        = 15,          /* ki for static-friction break (#141  */
-                                /* bench: ki=5 left ~8 mm undershoot,  */
-                                /* ki=15 mirrors pre-#140 effective    */
-                                /* duty rate within ~1 s.              */
-                                /* #142 Step B confirmed ki=10 also    */
-                                /* undershoots short straight 50 by    */
-                                /* ~5 mm and prevents long turn 180    */
-                                /* from completing due to slow i_acc   */
-                                /* decay — ki=15 stays optimal until   */
-                                /* a feed-forward path (Phase 6)       */
-                                /* compensates static friction.)       */
+  .ki_pos        = 5,           /* Phase 6.6 ki sweep landed here.     */
+                                /* History: pre-Phase-6 settled on 15  */
+                                /* so the integrator could drag the    */
+                                /* motor past its ~25 % static-friction*/
+                                /* breakaway (Issue #141/#142).  Phase */
+                                /* 6 added FF (kV=9 + kS=700) which    */
+                                /* gives the controller a duty floor   */
+                                /* without ki, so the integrator is no */
+                                /* longer load-bearing for breakaway.  */
+                                /* The Phase 6.6 bench compared        */
+                                /* ki ∈ {0,5,10,15} on straight        */
+                                /* 50/300 + turn 90/180:               */
+                                /*   ki=5 best (straight 300 lands     */
+                                /*     within ±1 mm of target,         */
+                                /*     turn 90 variance ≤ 0.1°)        */
+                                /*   ki=10 overshoots straight 300     */
+                                /*     by 3-4 mm (still within done    */
+                                /*     window)                          */
+                                /*   ki=15 overshoots so far it never  */
+                                /*     reaches done on straight 300    */
+                                /*   ki=0 undershoots straight 300 by  */
+                                /*     3-4 mm and is fragile to        */
+                                /*     constant disturbance.            */
+                                /* See Issue #152 Step 6.6 comment for */
+                                /* the full per-scenario numbers.      */
   .kd_pos        = 0,
   .kp_speed      = 5,
   .ki_speed      = 0,
@@ -196,17 +210,20 @@ static struct db_servo_gains_s g_pid_gains_heading =
 
 /* Feed-forward gain — per-axis (Issue #127 Phase 6 Step 6.1, Plan D6).
  *
- * Defaults are 0 so this Step is a behavioural no-op until cfg overrides
- * land — the existing PID stack keeps full responsibility for actuation.
- * Step 6.5 will seed kV from the Issue #127 spec (~9) and kA from the
- * SysId fit.  Per-motor kS friction is in a separate struct added in
- * Step 6.2 (it is non-linear in the L/R compose, so cannot share the
- * per-axis plumbing — Plan D1 Codex BLOCKING).
+ * Distance-axis kV defaults to the Phase 6 production value (9) so a
+ * fresh build with no /mnt/flash/drivebase.cfg gets the same behaviour
+ * the bench-tuned cfg gives.  Heading-axis FF stays at 0 — Phase 6.5
+ * bench showed `ff_head_kV=6` alone causes turn 90 brake to stop short
+ * of target (decel-phase over-correction); the heading axis needs an
+ * asymmetric-kV redesign or its own SysId before any non-zero gain.
+ * kA stays at 0 on both axes — the symmetric `kA × a_ref` term
+ * over-decelerates during the trajectory's decel phase, regardless of
+ * axis (Phase 6.5 bench finding).
  */
 
 static struct db_ff_axis_gains_s g_ff_axis_gains_distance =
 {
-  .kV = 0,
+  .kV = 9,
   .kA = 0,
 };
 
@@ -218,10 +235,14 @@ static struct db_ff_axis_gains_s g_ff_axis_gains_heading =
 
 /* Per-motor friction FF (Issue #127 Phase 6 Step 6.2, Plan D1+D6).
  *
- * Default kS=0 keeps this Step a behavioural no-op; Step 6.5 seeds it
- * from `_sysid ramp-ks` results (Plan target ~700, applied as
- * sign·kS/2 so effective per-side is ~350 at full breakaway).  The
- * hysteresis enter/exit defaults are 5 dps / 1 dps (Plan D4): tight
+ * `kS=700` is the Phase 6.2 bench-confirmed production value — it
+ * gives a 3.5 % per-side rail-step (after the `/2` attenuation) which
+ * is enough to help the PID + kV tip past breakaway without biasing
+ * cruise.  The SysId measurement was ~2952 (the absolute static-
+ * friction duty) and that value is NOT the right setting for kS:
+ * see drivebase.md §8.5.2 / cfg.sample for the rationale.
+ *
+ * Hysteresis enter/exit defaults are 5 dps / 1 dps (Plan D4): tight
  * enough that any non-trivial trajectory is well past the enter
  * threshold the moment it leaves the start segment, and wide enough
  * that v_ref oscillation around 0 (the only failure mode the
@@ -230,7 +251,7 @@ static struct db_ff_axis_gains_s g_ff_axis_gains_heading =
 
 static struct db_ff_motor_friction_s g_ff_motor_friction =
 {
-  .kS                       = 0,
+  .kS                       = 700,
   .v_hyst_enter_mdegps      = 5000,
   .v_hyst_exit_mdegps       = 1000,
 };

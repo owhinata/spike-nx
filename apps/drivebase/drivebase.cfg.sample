@@ -8,35 +8,48 @@
 # Precedence: CLI args to `drivebase start` > this file > compiled.
 # `vi /mnt/flash/drivebase.cfg` to edit, then `drivebase stop; drivebase start`.
 #
-# This template lists every supported key set to its compiled default,
-# so loading it as-is is equivalent to not having a cfg file (`dmesg`
-# will report `loaded 39 config key(s) ... (0 rejected)`).  Copy this
-# file to /mnt/flash/drivebase.cfg on the hub and edit the values you
-# want to override; comment out (or delete) everything else.
+# This template lists every supported key at the Phase 6 production-
+# tuned default; loading it as-is is equivalent to using the compiled
+# binary's built-in defaults (`dmesg` reports `loaded 40 config key(s)
+# ... (0 rejected)`).  Copy this file to /mnt/flash/drivebase.cfg on
+# the hub and edit the values you want to override; comment out (or
+# delete) everything else.
 #
-# Phase 3b (#148) added `use_gyro_plus1` as an OPTIONAL 40th key; when
-# absent it leaves the daemon at its DRIVEBASE_USE_GYRO_NONE default
-# (so the "loaded 39" line above stays accurate for the unedited
-# template).  See the section near the bottom for the encoding.
+# Phase 6.6 flipped the `use_gyro_plus1` default from 0 (key absent →
+# DRIVEBASE_USE_GYRO_NONE) to 2 (1D gyro-locked heading).  The typical
+# SPIKE drivebase use case wants the IMU active from boot; if your
+# build intentionally disables the gyro, set the line near the bottom
+# to 1 (= NONE explicit).
 #
-# Phase 6 (#152) feed-forward + battery keys:
-#   Step 6.1 added 4 linear FF gains (ff_{dist,head}_{kV,kA}).
-#   Step 6.2 added 3 per-motor friction keys (ff_motor_kS,
-#            ff_v_hyst_enter_mdegps, ff_v_hyst_exit_mdegps).
-#   Step 6.3 added 2 battery sag keys (battery_nominal_mv,
-#            battery_min_mv).
-# All default to 0/seed-only so the template is still a no-op load.
-# See the FF and battery sections near the bottom.
+# Phase 6 (#152) shipped a coordinated FF + PID retune.  The compiled
+# defaults reflect the Phase 6.6 bench result:
+#   pid_dist_ki_pos = 5  (was 15 pre-Phase-6; ki is no longer load-
+#                         bearing for breakaway now that FF supplies
+#                         the duty floor — see drivebase_settings.c
+#                         for the per-scenario bench numbers)
+#   ff_dist_kV      = 9  (back-EMF cancel for distance axis)
+#   ff_dist_kA      = 0  (kA over-decelerates symmetrically — Step 6.5)
+#   ff_head_*       = 0  (heading FF needs redesign — Step 6.5)
+#   ff_motor_kS     = 700 (3.5%/side breakaway assist)
+#   battery_*       = 7200/6000 (Phase 6.3 sag correction)
+# Long-motion (straight 300, turn 90) lands within ±1 mm / ±0.1° of
+# target with this set.  Short-motion (straight 50) and large turns
+# (turn 180) have known limitations: see drivebase.md §8.5 for the
+# detail and Phase 7 candidates.
 
 # ----------------------------------------------------------------------
 # PID gains — distance axis (state_distance = (sL + sR) / 2 motor mdeg)
 # ----------------------------------------------------------------------
 # kp_pos        : (0, 10000]   .01%-duty per mdeg of position error
-# ki_pos        : [0, 10000]   .01%-duty per (mdeg * s); SPIKE static
-#                              friction needs >= 15 until FF (Phase 6).
-#                              See project memory
-#                              `drivebase_ki_floor_static_friction` for
-#                              the Step B (#142) sweep evidence.
+# ki_pos        : [0, 10000]   .01%-duty per (mdeg * s); Phase 6.6 ki
+#                              sweep landed on 5 — FF (kV=9 + kS=700)
+#                              now supplies the breakaway floor, so ki
+#                              is no longer load-bearing for static
+#                              friction and lower values give cleaner
+#                              long-motion settling.  Pre-Phase-6 the
+#                              compiled default was 15 (the integrator
+#                              dragged the motor past breakaway on its
+#                              own).
 # kd_pos        : [0, 10000]   .01%-duty per (mdeg/s); 0 by default
 # kp_speed      : [0, 10000]   .01%-duty per (mdeg/s of velocity error)
 # ki_speed      : [0, 10000]   .01%-duty per (mdeg/s * s)
@@ -44,7 +57,7 @@
 # out_max       : (0, 10000]   duty rail (.01%); out_min mirrors
 
 pid_dist_kp_pos        = 50
-pid_dist_ki_pos        = 15
+pid_dist_ki_pos        = 5
 pid_dist_kd_pos        = 0
 pid_dist_kp_speed      = 5
 pid_dist_ki_speed      = 0
@@ -119,31 +132,26 @@ tick_us    = 2000     # RT tick = 2 ms (range 1000..20000)
 # Units: kV in .01% duty per (deg/s); kA in .01% duty per (deg/s^2).
 # duty_ff is summed inside db_pid_update BEFORE saturation so the anti-
 # windup gate reacts to the full output (PID + FF), not just the PID
-# part.  All four gains default to 0 so an unedited cfg load is a no-op;
-# enable selectively per the SysId measurements below.  Range for each:
-# [-1000, +1000] (validated by setter to keep the RT-path math in int32).
-# Per-motor kS friction is added in Step 6.2 with its own keys.
+# part.  Range for each: [-1000, +1000] (validated by setter to keep
+# the RT-path math in int32).  Per-motor kS friction lives in its own
+# section below.
 #
-# SysId-measured values on the reference SPIKE drivebase (Step 6.4
-# bench, on-ground, vbat-normalised to 7200 mV):
+# Distance-axis kV is the Phase 6 production default (`ff_dist_kV=9`).
+# That setting is bench-confirmed through Step 6.5 + Step 6.6: it cuts
+# `straight 300 brake` settling from 4.6 s to 1.8 s and works
+# cleanly with `pid_dist_ki_pos=5` (the new post-Phase-6 ki).  The
+# SysId measurement was kV ≈ 6 (real motor's back-EMF); 6 and 9
+# both work in practice and 9 is the bench-validated value.
 #
-#   ff_dist_kV ≈ 6   (.01% per deg/s).  Plan seed was 9, real motor
-#                    is closer to 6.  At a 1100 deg/s cruise that's
-#                    6 * 1100 = 6600 = 66% duty from kV alone (PID
-#                    + kS supply the rest).
-#   ff_dist_kA ≈ 1   (.01% per deg/s^2).  Step 6.5 evaluated this
-#                    on turn 90 brake.  At the default trajectory
-#                    accel ≈ 1833 deg/s^2 the kA contribution peaks
-#                    at 1 * 1833 = 1833 = 18.3% duty during the
-#                    accel/decel phases (zero in cruise).
-#   ff_head_*       no separate SysId yet; use the dist values until
-#                    Step 6.6 retunes both axes together.
-#
-# To enable on this drivebase, uncomment the lines below.  Leave them
-# commented to keep the template count exactly at 39 keys.
+# Heading-axis FF stays at 0 — Step 6.5 bench confirmed `ff_head_kV=6`
+# alone causes turn 90 brake to stop 6° short of target before PID's
+# ki ramps it past (see drivebase.md §8.5.1 for the trace).  kA was
+# similarly evaluated and over-decelerates symmetrically, so all the
+# `ff_head_*` and `ff_*_kA` keys stay 0 until a future redesign
+# (asymmetric kV / dedicated heading SysId) lands.
 # ----------------------------------------------------------------------
 
-ff_dist_kV = 0
+ff_dist_kV = 9
 ff_dist_kA = 0
 ff_head_kV = 0
 ff_head_kA = 0
@@ -229,11 +237,9 @@ ff_head_kA = 0
 # between breakaway help and cruise stability.
 # ----------------------------------------------------------------------
 
-ff_motor_kS              = 0
+ff_motor_kS              = 700
 ff_v_hyst_enter_mdegps   = 5000
 ff_v_hyst_exit_mdegps    = 1000
-# Recommended assist (uncomment after benching — Phase 6.2 confirmed):
-# ff_motor_kS = 700
 
 # ----------------------------------------------------------------------
 # Battery sag correction (Issue #152 Phase 6 Step 6.3)
@@ -258,12 +264,13 @@ battery_nominal_mv = 7200
 battery_min_mv     = 6000
 
 # ----------------------------------------------------------------------
-# Phase 3b (#148) boot-time gyro mode
-#   0 = key absent  — daemon picks DRIVEBASE_USE_GYRO_NONE
+# Phase 3b (#148) boot-time gyro mode (Phase 6.6: default flipped to 2)
+#   0 = key absent  — daemon picks DRIVEBASE_USE_GYRO_NONE (legacy)
 #   1 = NONE        — explicit encoder-only at boot
-#   2 = 1D          — gyro-locked heading at boot
+#   2 = 1D          — gyro-locked heading at boot (Phase 6 default)
 # The mode is only `latched` once the first command starts AND Madgwick
 # has converged (calibrated); `drivebase status` reports the live state.
+# Set to 1 if you intentionally want to disable the gyro at boot.
 # ----------------------------------------------------------------------
 
-# use_gyro_plus1 = 2
+use_gyro_plus1 = 2
