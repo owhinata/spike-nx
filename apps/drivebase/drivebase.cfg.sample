@@ -119,16 +119,59 @@ tick_us    = 2000     # RT tick = 2 ms (range 1000..20000)
 # Units: kV in .01% duty per (deg/s); kA in .01% duty per (deg/s^2).
 # duty_ff is summed inside db_pid_update BEFORE saturation so the anti-
 # windup gate reacts to the full output (PID + FF), not just the PID
-# part.  Both gains default to 0 — Phase 6 Step 6.1 plumbs the math;
-# values are seeded from SysId (Step 6.4) in Step 6.5.  Range for each:
+# part.  All four gains default to 0 so an unedited cfg load is a no-op;
+# enable selectively per the SysId measurements below.  Range for each:
 # [-1000, +1000] (validated by setter to keep the RT-path math in int32).
 # Per-motor kS friction is added in Step 6.2 with its own keys.
+#
+# SysId-measured values on the reference SPIKE drivebase (Step 6.4
+# bench, on-ground, vbat-normalised to 7200 mV):
+#
+#   ff_dist_kV ≈ 6   (.01% per deg/s).  Plan seed was 9, real motor
+#                    is closer to 6.  At a 1100 deg/s cruise that's
+#                    6 * 1100 = 6600 = 66% duty from kV alone (PID
+#                    + kS supply the rest).
+#   ff_dist_kA ≈ 1   (.01% per deg/s^2).  Step 6.5 evaluated this
+#                    on turn 90 brake.  At the default trajectory
+#                    accel ≈ 1833 deg/s^2 the kA contribution peaks
+#                    at 1 * 1833 = 1833 = 18.3% duty during the
+#                    accel/decel phases (zero in cruise).
+#   ff_head_*       no separate SysId yet; use the dist values until
+#                    Step 6.6 retunes both axes together.
+#
+# To enable on this drivebase, uncomment the lines below.  Leave them
+# commented to keep the template count exactly at 39 keys.
 # ----------------------------------------------------------------------
 
 ff_dist_kV = 0
 ff_dist_kA = 0
 ff_head_kV = 0
 ff_head_kA = 0
+# Recommended SysId-derived overrides (uncomment after benching).
+# Apply to BOTH axes — heading-only commands (turn) use ff_head_*,
+# distance-only commands (straight) use ff_dist_*, and curve/arc use
+# both.  Asymmetric FF (only one axis seeded) produces uneven gains
+# between command types.  No separate heading-axis SysId yet — start
+# from dist values and retune in Step 6.6 if needed.
+# ff_dist_kV = 6
+# ff_head_kV = 6
+#
+# kA = 0 is the production recommendation (Step 6.5 bench finding).
+# The SysId measurement gives kA ≈ 1 (.01% per deg/s²), and the
+# contribution at peak accel (= 18% on distance / 9% on heading) is
+# above the 2% threshold from plan OQ1.  But Step 6.5 bench showed
+# that the symmetric kA term over-decelerates during the trajectory's
+# decel phase, leaving the motor stopped short of target with
+# `done=0` for the rest of the 3 s observation:
+#   straight 300 brake @ kA=1: dist=289-295 mm (target 300), done never
+#   turn  90  brake @ kA=1: angle 84-87° (target 90°), done late/never
+# Once the motor stops short, static friction (≈25%) traps it; PID +
+# ki ramps slowly and may never reach target.  Phase 6.2 baseline
+# (kA=0) reaches target cleanly in 1.5-1.8 s.  Step 6.6 will revisit
+# kA together with ki / kS sweep so the decel/PID balance can be
+# tuned as one set rather than gain-by-gain.
+# ff_dist_kA = 1   # DO NOT enable until Step 6.6 retune
+# ff_head_kA = 1   # DO NOT enable until Step 6.6 retune
 
 # ----------------------------------------------------------------------
 # Per-motor friction FF (Issue #152 Phase 6 Step 6.2)
@@ -150,11 +193,32 @@ ff_head_kA = 0
 # setter accepts any ordering and the hysteresis function tolerates
 # degenerate orderings deterministically.  Bounds: kS in [0, 1000];
 # enter/exit in [0, 100000] mdeg/s.
+#
+# Sizing kS: this is the per-side rail-step (after /2 attenuation) that
+# helps the motor break static friction; it is NOT the full measured
+# breakaway from `_sysid ramp-ks`.  SysId measures the absolute static-
+# friction duty (~3000 .01% = 30% on the reference drivebase); putting
+# that value here would bias every cruise tick by 15% and cause PID
+# overshoot.  The right size is a small assist that lets PID + kV + ki
+# tip past breakaway without disturbing steady-state operation:
+#
+#   kS=700   (plan seed, Phase 6.2 bench): 3.5% per-side assist.
+#            straight 50 brake hits target exactly with ki=10 + kV=9.
+#            Validated as the production value through Phase 6.5.
+#   kS=2952  (SysId measurement):           DO NOT USE as cfg.  This
+#            is the absolute static-friction breakaway, useful as
+#            calibration reference only.  As a kS, it over-drives
+#            the motor in cruise by 15% per side.
+#
+# Step 6.6 will sweep ki together with kS to fine-tune the trade-off
+# between breakaway help and cruise stability.
 # ----------------------------------------------------------------------
 
 ff_motor_kS              = 0
 ff_v_hyst_enter_mdegps   = 5000
 ff_v_hyst_exit_mdegps    = 1000
+# Recommended assist (uncomment after benching — Phase 6.2 confirmed):
+# ff_motor_kS = 700
 
 # ----------------------------------------------------------------------
 # Battery sag correction (Issue #152 Phase 6 Step 6.3)

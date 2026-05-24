@@ -479,6 +479,13 @@ A linear feed-forward `duty_ff = kV·v_ref + kA·a_ref` is summed into the aggre
 - **Unit scaling**: trajectory ref is `mdeg/s` / `mdeg/s²`, gains are `.01% per (deg/s)` / `.01% per (deg/s²)`.  To structurally keep `__aeabi_ldivmod` out of the RT path, the `/1000` conversion runs in int32 BEFORE the multiplication.  With kV/kA bounded to ±1000, `kV × v_dps` peaks at 1.11e6 and `kA × a_dps2` at 8e5 — comfortably inside int32.
 - **Per-motor kS friction**: added in Step 6.2 (see below).  L/R compose is linear for kV/kA (per-axis is equivalent to per-motor), but `sign(v) × kS` is non-linear (pivot makes per-axis and per-motor disagree), so kS must apply after the compose.
 - **Defaults**: kV=0 / kA=0 = behavioural no-op.  Bench with `ff_dist_kV = 9` reduced `straight 300 brake` settling from 4.6 s to 1.8 s and eliminated the post-target backward swing (anti-windup `i_acc` release artefact) — see #152 bench notes.
+- **SysId measurements (Step 6.4)**: `ff_dist_kV ≈ 6` (lower than the plan's seed of 9 — the real motor needs less back-EMF compensation), `ff_dist_kA ≈ 1`.  See §8.5.4 below for the bench data.
+- **kA contribution formula**: `peak_accel × kA / 1000` in .01% duty.  With the default distance-axis trajectory accel = 1833 deg/s², `ff_dist_kA=1` adds **18.3% duty during accel/decel phases** (zero in cruise).  The heading-axis default accel is 916 deg/s² so `ff_head_kA=1` adds **9.2%** instead.
+- **Per-axis routing**: `ff_dist_*` only affects the distance component of straight / drive_forever / curve commands; `ff_head_*` only affects the heading component of turn / curve.  Asymmetric seeding (one axis only) produces uneven gains across command types — production cfg should set both axes to the same value.
+- **Step 6.5 evaluation — DO NOT enable kA in production**: The SysId-measured `kA=1` looked promising (contribution well above plan OQ1's 2% threshold), but bench on both axes showed regression:
+    `straight 300 brake` @ kA=1: dist = 289-295 mm (target 300), `done=0` for the full 3 s observation window.
+    `turn 90 brake` @ kA=1: angle = 84-87° (target 90°), `done` late or never.
+  Root cause: kA is symmetric across the trajectory accel/decel phases, so the negative `kA × a_ref` during decel subtracts from PID output and stops the motor short of target.  Once stopped, static friction (~25%) traps it; PID alone (ki=10) ramps too slowly to break out before the observation ends.  The Phase 6.2 baseline (kA=0) reaches target cleanly in 1.5–1.8 s.  Per plan OQ1 spirit ("ship a contribution only if the bench confirms it helps"), kA stays at default 0 in production cfg, the verb stays for forward-compat, and Phase 6.6 will revisit kA together with ki / kS so the decel/PID balance can be tuned as one set.
 
 cfg keys (Step 6.1):
 
@@ -515,6 +522,10 @@ cfg keys (Step 6.2):
 | `ff_v_hyst_exit_mdegps` | 1000 | [0, 100000] | hysteresis exit (mdeg/s) |
 
 Convention is `enter > exit`, but the setters do not enforce a cross-key invariant (that would make cfg load order load-bearing).  The hysteresis function tolerates any ordering deterministically.
+
+**Sizing kS (important)**: do NOT copy the `kS_nominal` printed by `_sysid ramp-ks` (~2952 = ~30% duty on the reference drivebase) into `ff_motor_kS`.  SysId measures the absolute static-friction duty — the minimum needed to make a stationary motor move on its own.  As an `ff_motor_kS`, that value applies a 15% per-side bias (after `/2` attenuation) every tick, including cruise, shifting the PID operating point and inviting overshoot.  The right `ff_motor_kS` is a SMALL assist that helps `PID + kV + ki` tip past breakaway without disturbing steady-state:
+- **`ff_motor_kS = 700`** (Phase 6.2 plan seed, bench-confirmed): 3.5 % per-side rail-step.  Lets `straight 50 brake` hit target exactly with `ki=10 + kV=9`.  This is the production-recommended value.
+- **`ff_motor_kS = 2952`** (SysId result): calibration reference only — do NOT set this in cfg.
 
 `drivebase _alg settings` prints `motor ff : kS=… v_hyst=[exit,enter]` for the live values.
 

@@ -478,6 +478,14 @@ drive_speed default は wheel_diameter から算出 (`v_max_mdegps`、`accel = v
 - **単位スケーリング**: trajectory ref は `mdeg/s` / `mdeg/s²`、gain は `.01% per (deg/s)` / `.01% per (deg/s²)`。RT path に `__aeabi_ldivmod` を **構造的に出さない** ため `/1000` を int32 領域で先に実行 → 乗算。kV/kA は ±1000 に bound されており、`kV × v_dps` max 1.11e6 / `kA × a_dps2` max 8e5 で int32 内安全
 - **per-motor kS friction**: Step 6.2 で追加 (下記参照)。L/R compose は線形 (kV/kA は per-axis 等価) だが `sign(v) × kS` は非線形 (pivot で aggregate per-axis vs per-motor が一致しない) ため compose 後に分離
 - **defaults**: kV=0 / kA=0 で behavioural no-op。bench で `ff_dist_kV = 9` を試すと straight 300 brake が settling 4.6 秒 → 1.8 秒、post-target 巻き戻し挙動 (`i_acc` 解放) 消失を確認 (#152 bench)
+- **SysId 実測値 (Step 6.4)**: `ff_dist_kV ≈ 6` (plan seed 9 より低い、real motor 値)、`ff_dist_kA ≈ 1`。詳細は §8.5.4 SysId CLI 参照
+- **kA contribution 計算式**: trajectory peak accel × kA / 1000 [in .01% duty 単位]。distance axis default accel = 1833 deg/s² で `ff_dist_kA=1` だと **18.3% duty 追加 (accel/decel phase only、cruise は 0)**、heading axis default accel = 916 deg/s² で `ff_head_kA=1` だと **9.2% duty 追加**
+- **axis 分離**: `ff_dist_*` は straight/forever/curve の distance 成分のみ、`ff_head_*` は turn/curve の heading 成分のみ。片方だけ seed すると command 種別で gain 非対称、両軸対称 seed が production 推奨
+- **Step 6.5 評価結論: kA=0 維持 (production 推奨)**: SysId 実測 kA=1 を **dist+head 両軸に投入すると bench で undershoot regression** を観測:
+  - straight 300 brake: target 300 mm / 実達 289-295 mm、**done 立たず** (3 秒 timeout)
+  - turn 90 brake: target 90° / 実達 84-87°、done 遅延または立たず
+  - 原因 = 「**decel phase で kA が PID 出力から過剰減速**」、motor が target 手前で stop、静止摩擦 (~25%) に trap、ki 単独では復帰遅い
+  - Plan OQ1 spirit (「contribution あっても over-correction なら不採用」) に従い default 0 維持、verb は forward-compat 残す、Phase 6.6 で ki + kS と合わせて再評価
 
 cfg key (Step 6.1):
 
@@ -514,6 +522,10 @@ cfg key (Step 6.2):
 | `ff_v_hyst_exit_mdegps` | 1000 | [0, 100000] mdeg/s | hysteresis 弱閾値 |
 
 慣例 `enter > exit` を保つが、setter は cross-key 検証しない (cfg load 順依存を回避)。hysteresis 関数自体は任意順序で deterministic に動作。
+
+**kS の適正値 (重要)**: `_sysid ramp-ks` で実測した kS_nominal (~2952、約 30% duty) を **そのまま `ff_motor_kS` に入れてはいけない**。SysId が測るのは「**静止摩擦を超える絶対 duty**」で、それを kS に設定すると `/2` 適用後でも **15% duty / 側を cruise 中も常時印加** → PID の operating point ズレ → overshoot リスク。`ff_motor_kS` は **「PID + kV が breakaway を超えるための小さな assist」** であるべき:
+- **Phase 6.2 確認済の `ff_motor_kS = 700`** (per side 3.5%) が straight 50 brake で完璧動作
+- SysId 実測 2952 は **calibration reference のみ**、cfg 値ではない
 
 `drivebase _alg settings` で `motor ff : kS=… v_hyst=[exit,enter]` を表示。
 
