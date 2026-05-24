@@ -49,6 +49,7 @@
 #include "drivebase_imu.h"
 #include "drivebase_daemon.h"
 #include "drivebase_battery.h"
+#include "drivebase_sysid.h"
 
 #include <pthread.h>
 #include <time.h>
@@ -1830,7 +1831,11 @@ static void usage(void)
           "  drivebase get-state [duration_ms [interval_ms]]\n"
           "                                              GET_STATE (table; default one-shot)\n"
           "  drivebase set-gyro <none|1d|3d>             SET_USE_GYRO\n"
-          "  drivebase jitter [reset]                    JITTER_DUMP\n");
+          "  drivebase jitter [reset]                    JITTER_DUMP\n"
+          "  drivebase _sysid {ramp-ks|ramp-kv|ramp-ka|vbat} ...\n"
+          "                                              FF system-id\n"
+          "                                              (daemon must be stopped;\n"
+          "                                              ground-only, see help)\n");
 }
 
 /****************************************************************************
@@ -1885,6 +1890,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(verb, "_imu") == 0)
     {
       return do_imu_subcmd(argc - 2, &argv[2]);
+    }
+
+  if (strcmp(verb, "_sysid") == 0)
+    {
+      return drivebase_sysid_cli(argc - 2, &argv[2]);
     }
 
   if (strcmp(verb, "help") == 0 ||

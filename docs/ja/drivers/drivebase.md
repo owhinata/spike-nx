@@ -545,6 +545,49 @@ cfg key (Step 6.3):
 
 `drivebase _alg settings` で `battery : vbat=… nominal=… min=…` を表示 (vbat は atomic snapshot)。
 
+#### 8.5.4 SysId CLI (`drivebase _sysid`、Step 6.4)
+
+Phase 6 FF (`u = sign(v_ref)·kS + kV·v_ref + kA·a_ref`) のゲイン (kS / kV / kA) を実機計測する CLI 群。closed-loop PID を bypass し、`drivebase_motor_set_duty()` で **open-loop duty 直駆動**で encoder slope (`db_observer_v`) を読む。daemon が走っていると RT thread が 2ms ごとに duty を上書きするため、verb 入口で `DRIVEBASE_GET_STATUS` を query して `daemon_attached==1` なら **`-EBUSY` で reject**。退出時は両モーター必ず coast。
+
+**前提条件 (Plan D8、help string 明記)**:
+- 接地・走行可能な平坦面で実施 (free-spin 浮かせでは床摩擦 + 車体慣性が抜けて kS 過小推定、kA は測れない)
+- 広い直線スペース (~2m) 確保、Ctrl-C で緊急停止可能な状態
+- **Ctrl-C が端末で食われる環境 (picocom 等)**: `_sysid ... &` で背景化して `kill -2 <pid>` (**SIGINT 明示**) で止める。`kill <pid>` の **default signal は NuttX 多くで SIGKILL = handler bypass で motors 取り残し**になるため必ず `-2` を付ける。SIGTERM 未 catch、SIGKILL は bypass 不可
+- 複数バッテリ状態で取り直して vbat 正規化の収束を確認
+
+**実行順序固定**: `ramp-ks → ramp-kv → ramp-ka` (kV fit に kS 必要、kA fit に kV 必要)
+
+| verb | 引数 | 出力 |
+|---|---|---|
+| `_sysid ramp-ks <step> [max] [hold_ms]` | step duty (.01%)、max (default 2500=25%)、hold (default 200ms) | 各 step の `vL/vR_mdegps` + breakaway duty `kS_L/kS_R/max` + vbat normalised `kS_nominal`、cfg 行サマリ |
+| `_sysid ramp-kv <max> <duration_ms> <kS_subtract>` | peak duty、両方向合計時間、ramp-ks で得た kS | 22 サンプル (forward 11 + reverse 11) CSV + per-side kV fit + average + nominal、cfg 行サマリ |
+| `_sysid ramp-ka <duty> <duration_ms> <kV>` | step duty、観測 window、ramp-kv で得た kV | 25ms 間隔の v_avg trace + `v_steady_avg` + 63% 立上り `τ_ms` + `kA = kV*τ/1000`、cfg 行サマリ |
+| `_sysid vbat` | (none) | `vbat=… mV nominal=… mV ratio=…/1000` 1 行 |
+
+**vbat 正規化方向 (Plan D8 Codex Round 2 BLOCKING)**:
+低 vbat で測ると同 v に到達するのに duty を多く要するため kS / kV は **大きく** 測れる。nominal へ戻すには:
+```
+gain_nominal = gain_measured * vbat_mv / battery_nominal_mv
+```
+(掛ける、symmetric rounding で truncation bias 抑制)。`battery_nominal_mv` は `db_settings_battery()` から取得 (Step 6.3 で導入)。
+
+**ramp-kv fit 方法**:
+- `kS_subtract` 引数で friction を除去: `u_eff = duty - sign(v_mdegps) * kS_subtract`
+- breakaway 未満 (`|v_mdegps| < 30000`) のサンプルは fit から除外
+- `kV = Σ(u_eff * v_dps) / Σ(v_dps²)` の least-squares 解 (`v_dps = v_mdegps / 1000`)
+- forward + reverse 合算 fit、per-side 算出後 L/R 平均
+- 全 int64 sum で int32 範囲安全
+
+**ramp-ka fit 方法**:
+- step duty を duration_ms の間印加、25ms 間隔で v_avg 取得
+- 末尾 25% の平均で v_steady を推定
+- 63.2% threshold (`v_steady * 632 / 1000`) を最初に超えた時刻が τ_ms
+- `kA = kV * τ_ms / 1000` (ms→s 変換、結果は .01% per deg/s²)
+
+**出力 protocol**: cfg writer は別 Issue trail なので **print のみ**。「`# To apply: set ff_X = N in /mnt/flash/drivebase.cfg`」行を出すので、operator が `vi` で手動コピー。
+
+**RT path 影響なし**: SysId 実装は daemon stop 前提のため RT thread 中は走らない。`drivebase_sysid.o` には fit math の 64-bit divide が含まれるが RT path 外で CoreMark gate には無関係 (Plan 明記)。RT path object 計数は Step 6.3 と完全一致 (aggregate.o=0, control.o=5, drivebase.o=13, rt.o=3, battery.o=0)。
+
 ### 8.6 ランタイム設定上書き (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
 `drivebase start` 時に外部 W25Q256 NOR (LittleFS `/mnt/flash`) 上の text file から PID gain / completion / stall / wheel/axle/tick を読み込み、ビルド済みバイナリの default を rebuild なしで上書きできる。bench tuning iteration 短縮が目的。

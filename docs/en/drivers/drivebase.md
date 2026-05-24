@@ -546,6 +546,51 @@ Convention is `min_mv < nominal_mv` but setters do not cross-validate (cfg load 
 
 `drivebase _alg settings` prints `battery : vbat=… nominal=… min=…` for the live snapshot.
 
+#### 8.5.4 SysId CLI (`drivebase _sysid`, Step 6.4)
+
+Open-loop measurement of the Phase 6 FF gains (kS, kV, kA) without the closed-loop PID.  Each verb bypasses `db_aggregate` / `db_servo_apply` and drives motors directly via `drivebase_motor_set_duty()`, reading speed from a side-local `db_observer` instance built from raw encoder samples drained on the CLI task.
+
+Every verb queries `DRIVEBASE_GET_STATUS` at entry and **rejects with `-EBUSY`** if `daemon_attached==1` (the production RT thread would otherwise overwrite our duty commands every 2 ms).  Every exit path coasts both motors.
+
+**Ground-only contract (Plan D8, repeated in the help string)**:
+- The drivebase must be on a flat surface with ~2 m of clear straight space.  Free-spin (wheels-up) measurements under-fit because they don't include floor friction or chassis inertia; kA cannot be measured at all.
+- Keep Ctrl-C ready as a manual stop.
+- **If your terminal swallows Ctrl-C (e.g. `picocom`)**: run the verb in the background with `&` and stop it via `kill -2 <pid>` — `-2` is **SIGINT**, which is what the handler is registered for.  Plain `kill <pid>` defaults to SIGKILL on most NuttX builds, which bypasses the handler entirely and leaves motors at whatever duty was last commanded.  SIGTERM is not caught either, so always specify `-2`.
+- Re-run at different battery voltages to confirm the nominal-normalised gains converge.
+
+**Verb order is fixed**: `ramp-ks → ramp-kv → ramp-ka`.  ramp-kv subtracts the kS measured by ramp-ks; ramp-ka uses the kV measured by ramp-kv.  Running them out of order produces biased gains.
+
+| verb | arguments | output |
+|---|---|---|
+| `_sysid ramp-ks <step> [max] [hold_ms]` | step duty in .01%, max (default 2500 = 25%), hold (default 200 ms) | per-step vL/vR CSV + breakaway duty `kS_L / kS_R / max` + vbat-normalised `kS_nominal` + cfg-line summary |
+| `_sysid ramp-kv <max> <duration_ms> <kS_subtract>` | peak duty, total time for both directions, kS from ramp-ks | 22 samples (forward 11 + reverse 11) CSV + per-side kV fit + average + nominal + cfg-line summary |
+| `_sysid ramp-ka <duty> <duration_ms> <kV>` | step duty, observation window, kV from ramp-kv | 25 ms-spaced v_avg trace + `v_steady_avg` + 63% rise `τ_ms` + `kA = kV*τ/1000` + cfg-line summary |
+| `_sysid vbat` | (none) | one-line `vbat=… mV nominal=… mV ratio=…/1000` |
+
+**vbat normalisation direction (Plan D8 Codex Round 2 BLOCKING)**:
+A measurement at low vbat OVERESTIMATES the gain (more duty was needed to hit the same physical effect).  To rebase to the nominal voltage:
+```
+gain_nominal = gain_measured * vbat_mv / battery_nominal_mv
+```
+i.e. MULTIPLY by `vbat / nominal` (a number < 1 when below nominal).  Both raw and normalised values are printed alongside vbat.  Rounding is symmetric to avoid systematic truncation bias.
+
+**ramp-kv fit**:
+- `kS_subtract` argument removes the friction term: `u_eff = duty - sign(v_mdegps) * kS_subtract`
+- Samples below breakaway (`|v_mdegps| < 30000`) are excluded from the fit
+- Least-squares: `kV = Σ(u_eff * v_dps) / Σ(v_dps²)` with `v_dps = v_mdegps / 1000`
+- Forward + reverse pooled into one fit per side, then L/R averaged
+- int64 accumulators absorb worst-case sums while keeping the final result int32
+
+**ramp-ka fit**:
+- The step duty runs for `duration_ms`, with v_avg sampled every 25 ms
+- `v_steady` = average of the final 25 % of samples
+- τ = time when v_avg first reaches 63.2 % of v_steady (matches the first-order plant model the FF implicitly assumes)
+- `kA = kV * τ_ms / 1000` (ms → s), result in `.01% per (deg/s²)`
+
+**Output protocol**: print-only; the operator copies the suggested cfg line into `/mnt/flash/drivebase.cfg`.  An auto-write surface is a separate Issue's responsibility.
+
+**No RT-path impact**: SysId runs only while the daemon is stopped, so its math never executes from the RT tick.  `drivebase_sysid.o` does contain 64-bit divides in the fit helpers, but it is outside the RT path and excluded from the CoreMark gate (Plan note).  RT-path object 64-bit divide counts are unchanged from Step 6.3 (aggregate.o=0, control.o=5, drivebase.o=13, rt.o=3, battery.o=0).
+
 ### 8.6 Runtime config override (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
 At `drivebase start` the daemon reads a text file on the external W25Q256 NOR (LittleFS at `/mnt/flash`) and applies any recognised key=value pairs to PID gains / completion / stall / wheel/axle/tick before launching the RT thread.  This shortens bench-tuning iteration: no rebuild required.
