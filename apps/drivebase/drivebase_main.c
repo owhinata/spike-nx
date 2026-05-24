@@ -493,15 +493,19 @@ static int do_imu_verify(struct db_imu_s *im, int argc, FAR char *argv[])
 
 static int do_imu_show(struct db_imu_s *im)
 {
-  /* Drain a few samples so cur_fsr_gy_dps / gyro_mdps_num / temp
-   * reflect live driver state rather than the post-open zeros.
+  /* Drain long enough to (a) populate cur_fsr_gy_dps / gyro_mdps_num /
+   * temp from the live driver state, and (b) let the Z-bias idle EMA
+   * cross its 200 ms `DB_IMU_DEFAULT_BIAS_WINDOW_US` window so
+   * `runtime.calibrated` reports the converged value instead of the
+   * fresh-instance default 0.  Pre-#149 we drained 100 ms which
+   * structurally couldn't satisfy the 200 ms window — the diagnostic
+   * always read `calibrated=0` even on a perfectly idle bench, masking
+   * any real bias-estimator regression behind a known artifact.  Reuse
+   * `imu_calibrate_silent()` (also used by `_imu drift` / `_imu watch`)
+   * so the convergence semantics stay uniform across diagnostic verbs.
    */
 
-  for (int i = 0; i < 10; i++)
-    {
-      usleep(10000);
-      db_imu_drain_and_update(im, now_us());
-    }
+  imu_calibrate_silent(im, 250);
 
   int temp_c = 25 + (int)db_imu_get_temperature_raw(im) / 256;
 
