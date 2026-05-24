@@ -7,8 +7,11 @@
  *   1. Detect FSR transitions (Issue #139) and rescale the cached
  *      gyro bias / idle threshold to preserve their physical meaning.
  *   2. Apply the Tedaldi gyro matmul (Phase 2.5, Issue #145) on
- *      bias-residual raw LSB and integrate the idle estimator over
- *      the corrected Z component.
+ *      bias-residual raw LSB and run the idle estimator over the
+ *      corrected 3-axis residual (#150: Phase 3a Madgwick projects
+ *      X/Y bias error into world-vertical yaw on tilted Hub mounts,
+ *      so the gate now requires all three axes below threshold and
+ *      the EMA updates all three).
  *   3. Apply the Tedaldi accel matmul, gated by an accel-FSR match
  *      check (cal was taken at a specific fsr_xl_g; if the runtime
  *      driver has switched FSR live we fall back to identity so the
@@ -413,23 +416,37 @@ static void integrate(struct db_imu_s *im,
       g_corr_x1000[i] = sum / 1000;
     }
 
-  int64_t gz_corr_x1000 = g_corr_x1000[2];
-
-  /* Bias estimation gate (idle EMA over Z).  Threshold lives in
-   * raw-LSB so multiply by 1000 to compare against millis-LSB.
-   * Using the corrected residual keeps the physical meaning even
-   * when the off-diagonal matrix terms nudge the effective bias.
+  /* Bias estimation gate (idle EMA over all 3 axes, #150).  Threshold
+   * lives in raw-LSB so multiply by 1000 to compare against millis-LSB.
+   * Using the corrected residual keeps the physical meaning even when
+   * the off-diagonal matrix terms nudge the effective bias.
+   *
+   * Pre-#150 the gate looked only at Z; Phase 3a turned X/Y bias error
+   * into a real heading contributor (Madgwick world-yaw projection on
+   * tilted Hub mounts), so all three axes must be still for the idle
+   * window to count.  A turntable yawing the Hub purely around its
+   * physical Z (gx ≈ gy ≈ 0, |gz| > threshold) is no longer mis-
+   * counted as idle, and a pitch-only swing (|gx| > threshold but Z
+   * idle) no longer leaks into X bias.
    */
 
   int64_t threshold_x1000 = (int64_t)im->bias_idle_threshold_lsb * 1000;
 
-  if (llabs(gz_corr_x1000) < threshold_x1000)
+  bool idle = (llabs(g_corr_x1000[0]) < threshold_x1000 &&
+               llabs(g_corr_x1000[1]) < threshold_x1000 &&
+               llabs(g_corr_x1000[2]) < threshold_x1000);
+
+  if (idle)
     {
-      /* Idle.  Accumulate raw Z × 1000 so the estimate tracks the
-       * gyro's true drift.
+      /* Idle.  Accumulate raw × 1000 per axis so each estimate tracks
+       * the corresponding axis's true drift.
        */
 
-      im->bias_acc_lsb_x1000 += (int64_t)gz_raw * 1000;
+      const int16_t g_raw_arr[3] = { gx_raw, gy_raw, gz_raw };
+      for (int i = 0; i < 3; i++)
+        {
+          im->bias_acc_lsb_x1000[i] += (int64_t)g_raw_arr[i] * 1000;
+        }
       im->bias_acc_count++;
 
       if (im->last_sample_valid)
@@ -441,38 +458,46 @@ static void integrate(struct db_imu_s *im,
       if (im->bias_idle_streak_us >= im->bias_window_us &&
           im->bias_acc_count > 0)
         {
-          int64_t new_bias_z_x1000 = im->bias_acc_lsb_x1000 /
-                                     (int64_t)im->bias_acc_count;
-
-          if (!im->calibrated)
+          for (int i = 0; i < 3; i++)
             {
-              /* First successful idle window after open / recalibrate.
-               * Full assignment instead of α-blend so the very first
-               * capture lands on the actual bias.
-               */
+              int64_t new_bias_i_x1000 = im->bias_acc_lsb_x1000[i] /
+                                         (int64_t)im->bias_acc_count;
 
-              im->bias_lsb_x1000[2] = (int32_t)new_bias_z_x1000;
+              if (!im->calibrated)
+                {
+                  /* First successful idle window after open /
+                   * recalibrate.  Full assignment instead of α-blend so
+                   * the very first capture lands on the actual bias for
+                   * every axis at once.
+                   */
+
+                  im->bias_lsb_x1000[i] = (int32_t)new_bias_i_x1000;
+                }
+              else
+                {
+                  /* α = 0.1 EMA: (new + 9 * old) / 10. */
+
+                  int64_t prev_x1000 = (int64_t)im->bias_lsb_x1000[i];
+                  im->bias_lsb_x1000[i] = (int32_t)
+                      ((new_bias_i_x1000 + prev_x1000 * 9) / 10);
+                }
             }
-          else
-            {
-              /* α = 0.1 EMA: (new + 9 * old) / 10. */
 
-              int64_t prev_x1000 = (int64_t)im->bias_lsb_x1000[2];
-              im->bias_lsb_x1000[2] = (int32_t)
-                  ((new_bias_z_x1000 + prev_x1000 * 9) / 10);
-            }
-
-          im->bias_acc_lsb_x1000  = 0;
-          im->bias_acc_count      = 0;
-          im->bias_idle_streak_us = 0;
-          im->calibrated          = true;
+          im->bias_acc_lsb_x1000[0] = 0;
+          im->bias_acc_lsb_x1000[1] = 0;
+          im->bias_acc_lsb_x1000[2] = 0;
+          im->bias_acc_count        = 0;
+          im->bias_idle_streak_us   = 0;
+          im->calibrated            = true;
         }
     }
   else
     {
-      im->bias_idle_streak_us = 0;
-      im->bias_acc_lsb_x1000  = 0;
-      im->bias_acc_count      = 0;
+      im->bias_idle_streak_us   = 0;
+      im->bias_acc_lsb_x1000[0] = 0;
+      im->bias_acc_lsb_x1000[1] = 0;
+      im->bias_acc_lsb_x1000[2] = 0;
+      im->bias_acc_count        = 0;
     }
 
   /* Accel: apply the Tedaldi accel matmul gated on FSR match.
@@ -842,10 +867,12 @@ bool db_imu_is_calibrated(const struct db_imu_s *im)
 
 void db_imu_recalibrate(struct db_imu_s *im)
 {
-  im->bias_acc_lsb_x1000  = 0;
-  im->bias_acc_count      = 0;
-  im->bias_idle_streak_us = 0;
-  im->calibrated          = false;
+  im->bias_acc_lsb_x1000[0] = 0;
+  im->bias_acc_lsb_x1000[1] = 0;
+  im->bias_acc_lsb_x1000[2] = 0;
+  im->bias_acc_count        = 0;
+  im->bias_idle_streak_us   = 0;
+  im->calibrated            = false;
 }
 
 bool db_imu_is_stale(const struct db_imu_s *im, uint64_t now_us,

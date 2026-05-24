@@ -100,13 +100,15 @@ struct db_imu_s
 
   /* Phase 2.5: per-axis gyro bias in x1000 fractional LSB (millis-LSB).
    *
-   * Index 2 (Z) is the only axis the runtime idle estimator updates,
-   * since the heading integrator consumes only the Z component.  X
-   * and Y stay at the cal-file initial value (or zero when no cal is
-   * loaded) plus FSR rescale — they contribute to corrected Z only
-   * through the off-diagonal entries M_x1000[2][0..1], which are
-   * typically <0.5 % of the diagonal so a few-LSB X/Y bias drift is
-   * sub-mdeg/s on Z.
+   * Phase 3a (#147) introduced Madgwick world-vertical yaw extraction,
+   * which projects X/Y gyro bias error into the published heading
+   * (chip tilt ⇒ X/Y component bleeds into world Z via the rotation
+   * matrix).  Phase 3b cold-start measurements showed -5000 mdegpm
+   * drift at 30 °C falling to -2500 mdegpm at 34 °C (slope ≈ 625
+   * mdegpm/°C, matching LSM6DSL ZRL datasheet), so X/Y bias also
+   * drifts with chip warmup and the cal-time initial value cannot stay
+   * accurate.  #150 extends the idle EMA to all 3 axes so the
+   * estimator tracks warmup-induced X/Y drift in addition to Z.
    *
    * x1000 lets the idle EMA hold sub-LSB bias values: ±1 LSB at
    * FSR=1000 dps equals ±35 mdps ≈ ±2 deg/min, which would dominate
@@ -118,7 +120,8 @@ struct db_imu_s
   uint32_t bias_idle_threshold_lsb;
   uint64_t bias_idle_streak_us;
   uint64_t bias_window_us;
-  int64_t  bias_acc_lsb_x1000;    /* Z-axis raw × 1000 summed during idle */
+  int64_t  bias_acc_lsb_x1000[3]; /* per-axis raw × 1000 summed during  */
+                                  /* idle window (#150)                  */
   uint32_t bias_acc_count;
 
   /* Issue #139: dynamic gyro sensitivity tracking.  cur_fsr_gy_idx is
