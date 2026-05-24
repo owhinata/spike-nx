@@ -114,16 +114,6 @@ stall_duty_min     = 6000
 stall_window_ms    = 200
 
 # ----------------------------------------------------------------------
-# `drivebase start` defaults
-# Used ONLY when the matching CLI positional arg is omitted; explicit
-# CLI args (`drivebase start <wheel_mm> <axle_mm> <tick_ms>`) win.
-# ----------------------------------------------------------------------
-
-wheel_d_um = 56000    # SPIKE Medium Motor wheel = 56 mm
-axle_t_um  = 112000   # SPIKE drivebase axle    = 112 mm
-tick_us    = 2000     # RT tick = 2 ms (range 1000..20000)
-
-# ----------------------------------------------------------------------
 # Feed-forward gains — distance + heading (Issue #127 Phase 6 Step 6.1)
 #
 #   duty_ff = kV * (v_ref_mdegps / 1000)
@@ -274,3 +264,13 @@ battery_min_mv     = 6000
 # ----------------------------------------------------------------------
 
 use_gyro_plus1 = 2
+
+# ----------------------------------------------------------------------
+# `drivebase start` defaults
+# Used ONLY when the matching CLI positional arg is omitted; explicit
+# CLI args (`drivebase start <wheel_mm> <axle_mm> <tick_ms>`) win.
+# ----------------------------------------------------------------------
+
+wheel_d_um = 56000    # SPIKE Medium Motor wheel = 56 mm
+axle_t_um  = 112000   # SPIKE drivebase axle    = 112 mm
+tick_us    = 2000     # RT tick = 2 ms (range 1000..20000)
