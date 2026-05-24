@@ -13,6 +13,11 @@
 # will report `loaded 30 config key(s) ... (0 rejected)`).  Copy this
 # file to /mnt/flash/drivebase.cfg on the hub and edit the values you
 # want to override; comment out (or delete) everything else.
+#
+# Phase 3b (#148) added `use_gyro_plus1` as an OPTIONAL 31st key; when
+# absent it leaves the daemon at its DRIVEBASE_USE_GYRO_NONE default
+# (so the "loaded 30" line above stays accurate for the unedited
+# template).  See the section near the bottom for the encoding.
 
 # ----------------------------------------------------------------------
 # PID gains — distance axis (state_distance = (sL + sR) / 2 motor mdeg)
@@ -95,3 +100,14 @@ stall_window_ms    = 200
 wheel_d_um = 56000    # SPIKE Medium Motor wheel = 56 mm
 axle_t_um  = 112000   # SPIKE drivebase axle    = 112 mm
 tick_us    = 2000     # RT tick = 2 ms (range 1000..20000)
+
+# ----------------------------------------------------------------------
+# Phase 3b (#148) boot-time gyro mode
+#   0 = key absent  — daemon picks DRIVEBASE_USE_GYRO_NONE
+#   1 = NONE        — explicit encoder-only at boot
+#   2 = 1D          — gyro-locked heading at boot
+# The mode is only `latched` once the first command starts AND Madgwick
+# has converged (calibrated); `drivebase status` reports the live state.
+# ----------------------------------------------------------------------
+
+# use_gyro_plus1 = 2

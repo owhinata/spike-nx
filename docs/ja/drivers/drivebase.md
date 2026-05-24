@@ -440,7 +440,22 @@ SMART 完了は次の relative move 開始判定 (`|prev_endpoint - current_posi
 - `distance = (l_pos + r_pos) / 2 × wheel_circumference / 360`
 - `heading_rad = (r_pos - l_pos) × wheel_circumference / (2 × axle_track × π / 360)`
 
-distance + heading の 2 系 PID 出力 (mm/s, deg/s) を逆変換して L/R 各 servo の reference speed に分配。gyro が ON なら heading actual を gyro 推定 heading で上書き (encoder の slip 影響を排除)。
+distance + heading の 2 系 PID 出力 (mm/s, deg/s) を逆変換して L/R 各 servo の reference speed に分配。
+
+**Phase 3b heading PID への IMU 注入 (Issue [#148](https://github.com/owhinata/spike-nx/issues/148))**:
+
+`drivebase set-gyro 1d` で IMU world-vertical heading を heading PID の state 入力に注入できる (encoder slip / バックラッシュ / モーター個体差を closed-loop で吸収する)。注入は以下の 2 段に分けて構造的に race を防ぐ:
+
+- **requested** (`status.use_gyro_requested`): ユーザ要求モード。`set-gyro` ioctl または cfg `use_gyro_plus1` で更新される
+- **latched** (`status.use_gyro_latched`): モーション開始時 (`db_drivebase_capture_start_heading(do_latch=true)`) に一回だけ評価され、`gyro_origin_capturable()` (IMU attach済 + calibrated + not stale + requested != NONE) が成立した時のみ requested と同値が入る。モーション中は固定で、IMU が一時的に stale になっても per-tick 注入が encoder fallback に切替えるだけで latched は変えない
+
+走行中の `set-gyro` は `-EBUSY` (`status.last_set_gyro_rc=-16`)、`set-gyro 3d` は `-ENOSYS` (`-38`、Phase 7 まで)、不正値は `-EINVAL` (`-22`)。ioctl 戻り値は kernel chardev envelope queue を経由するため userspace に直接届かないが、daemon は `last_set_gyro_rc` 経由で公開する + `syslog(LOG_WARNING)` でも出力する。
+
+注入は **position state のみ** (`state.heading_x_mdeg`)。`state.heading_v_mdegps` (D 項) は LSM6DSL の量子化ノイズを避けるため encoder 由来を維持。pybricks と同じパターン。
+
+origin は `gyro_origin_mdeg`: `set-gyro` / `set_origin` / `reset` / latch で `db_imu_get_heading_mdeg() - angle_mdeg` を保存し、PID 入力と publish の両方で `raw - gyro_origin_mdeg` を引いて使う。これで `drivebase reset 0 90` 直後の `get-state.angle_mdeg ≈ 90000`、encoder モードで turn 90 後に `set-gyro 1d` 切替えても publish が 0 にジャンプしない。
+
+publish path も同じ origin を引くので PID 状態と user-visible heading が SSOT 化される (走行中 + 未走行 manual rotate の両ケースで一致)。
 
 ### 8.5 設定 (`drivebase_settings.c`)
 
@@ -493,6 +508,7 @@ drive_speed default は wheel_diameter から算出 (`v_max_mdegps`、`accel = v
 | Start | `wheel_d_um` (56000) | uint32 | > 0、`drivebase start` CLI で wheel 省略時のみ採用 |
 | | `axle_t_um` (112000) | uint32 | > 0、CLI で axle 省略時のみ採用 |
 | | `tick_us` (DB_RT_TICK_US_DEFAULT) | uint32 | > 0、CLI で tick 省略時のみ採用 |
+| | `use_gyro_plus1` (0 = unset) | uint8 | Phase 3b (#148): 0 = key 不在で `NONE`、1 = `NONE`、2 = `1D`。daemon 起動時に `db_drivebase_set_use_gyro` を呼ぶだけ。Madgwick 未収束のため `latched` 遷移は最初のコマンドまで保留される |
 
 **Wheel / axle / tick の precedence**: `drivebase start [wheel_mm] [axle_mm] [tick_ms]` で argc により明示判定。明示時は CLI 優先、省略時は config を採用、両方無しでコード default。
 
@@ -557,7 +573,21 @@ motor が両ポート (odd + even) に挿さっていない可能性。`drivebas
 
 ### 10.3 IMU 機能 (`set-gyro 1d`) が効かない
 
-`/dev/uorb/sensor_imu0` が boot 時の LSM6DSL init 失敗で存在しない可能性。dmesg で `ERROR: Failed to initialize LSM6DSL: -110` が出ていれば I2C2 配線 / pull-up / boot 順序を確認。daemon は best-effort なので IMU 失敗でも encoder-only で動く (`drivebase status` の `imu_present=0`)。
+確認順序:
+
+1. `drivebase status` で `imu_present` を確認。
+    - `0` → LSM6DSL init 失敗。dmesg で `ERROR: Failed to initialize LSM6DSL: -110` が出ていれば I2C2 配線 / pull-up / boot 順序を確認。daemon は best-effort なので IMU 失敗でも encoder-only で動く
+    - `1` → IMU は健在、次のステップへ
+2. `drivebase status` で `last_set_gyro_rc` を確認。
+    - `0` → 受理されたが motion 開始時に latched に遷移しなかった可能性 (次へ)
+    - `-16 (EBUSY)` → motion 中に `set-gyro` を発行した。`drivebase stop-motion coast` してから再試行
+    - `-38 (ENOSYS)` → `set-gyro 3d` は Phase 7 までサポート無し
+    - `-22 (EINVAL)` → 不正値
+3. `use_gyro_requested == 1` だが `use_gyro_latched == 0` のまま motion を発行している:
+    - Madgwick 未収束 (cold-boot 直後)、`drivebase _imu show` で `madgwick.initialized=1` + `calibrated=1` を確認。200 ms 以上の静止が必要
+    - IMU stale (`db_imu_is_stale` true)、`_imu drift 5` 等で sample が来ているか確認
+4. publish (`drivebase get-state` の `angle_mdeg`) が gyro origin-relative にならない:
+    - `use_gyro_requested == 1` かつ `gyro_origin_valid` (内部状態) が必要。`set-gyro 1d` 直後に capturable でなければ origin が立たないので、`drivebase reset 0 0` で再 origin 化を試す
 
 ### 10.4 stall watchdog が誤発火する
 

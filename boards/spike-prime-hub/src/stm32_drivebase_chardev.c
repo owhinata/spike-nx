@@ -450,6 +450,8 @@ static int db_publish_status(FAR struct db_chardev_s *dev,
   dev->status.motor_r_bound     = src_kern.motor_r_bound;
   dev->status.imu_present       = src_kern.imu_present;
   dev->status.use_gyro          = src_kern.use_gyro;
+  dev->status.use_gyro_latched  = src_kern.use_gyro_latched;
+  dev->status.last_set_gyro_rc  = src_kern.last_set_gyro_rc;
   dev->status.tick_count        = src_kern.tick_count;
   dev->status.tick_overrun_count = src_kern.tick_overrun_count;
   dev->status.tick_max_lag_us    = src_kern.tick_max_lag_us;
@@ -542,6 +544,8 @@ static void db_detach_locked(FAR struct db_chardev_s *dev,
   dev->status.motor_r_bound      = 0;
   dev->status.imu_present        = 0;
   dev->status.use_gyro           = 0;
+  dev->status.use_gyro_latched   = 0;
+  dev->status.last_set_gyro_rc   = 0;
   dev->status.tick_count         = 0;
   dev->status.tick_overrun_count = 0;
   dev->status.tick_max_lag_us    = 0;

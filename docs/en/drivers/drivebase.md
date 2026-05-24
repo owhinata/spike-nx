@@ -441,7 +441,22 @@ From the per-servo actual positions:
 - `distance = (l_pos + r_pos) / 2 × wheel_circumference / 360`
 - `heading_rad = (r_pos - l_pos) × wheel_circumference / (2 × axle_track × π / 360)`
 
-Two PIDs (distance and heading) produce mm/s and deg/s outputs, then the inverse map distributes them into reference speeds for the L/R servos.  When gyro is enabled the heading actual is overridden with the gyro estimate (rejecting wheel slip).
+Two PIDs (distance and heading) produce mm/s and deg/s outputs, then the inverse map distributes them into reference speeds for the L/R servos.
+
+**Phase 3b heading PID injection from the IMU (Issue [#148](https://github.com/owhinata/spike-nx/issues/148))**:
+
+`drivebase set-gyro 1d` swaps the heading PID's *state input* from the encoder-derived `(sR-sL)/2` to the Madgwick-fused world-vertical heading.  This is what closes the loop on wheel slip, gear backlash, and motor-to-motor mismatch.  Two-stage latching keeps a race-free guarantee:
+
+- **`status.use_gyro_requested`** — the user-asked mode (`set-gyro` ioctl, or boot-time `use_gyro_plus1` cfg)
+- **`status.use_gyro_latched`** — only set at command-start (`db_drivebase_capture_start_heading(do_latch=true)`), and only when `gyro_origin_capturable()` (IMU attached, calibrated, not stale, requested != NONE) is true.  Frozen during the in-flight motion; transient IMU staleness mid-motion just bounces the per-tick injection to encoder fallback without flipping the latched intent.
+
+Mid-motion `set-gyro` returns `-EBUSY` (`status.last_set_gyro_rc=-16`); `set-gyro 3d` returns `-ENOSYS` (`-38`, deferred to Phase 7); invalid values return `-EINVAL` (`-22`).  The kernel chardev envelope queue swallows the daemon's return code, so the propagation channels are the published `last_set_gyro_rc` field and a one-shot `syslog(LOG_WARNING)` line — not the user-facing ioctl rc.
+
+Only the **position state** (`state.heading_x_mdeg`) flips to gyro; the D-term input (`state.heading_v_mdegps`) stays encoder-derived to dodge LSM6DSL quantisation noise.  Matches the pybricks pattern.
+
+The origin baseline `gyro_origin_mdeg` is captured by `set_use_gyro` / `set_origin` / `reset` / start-of-motion latch as `db_imu_get_heading_mdeg() - angle_mdeg`, and the PID input + publish path both subtract it.  So `drivebase reset 0 90` lands `get-state.angle_mdeg ≈ 90000`, and an encoder-mode `turn 90` followed by `set-gyro 1d` keeps the published angle at ≈ 90000 instead of snapping back to 0.
+
+Because the publish path subtracts the same baseline, the PID state and the user-visible heading share a single source of truth (SSOT) across both in-flight motion and idle-rotate scenarios.
 
 ### 8.5 Settings (`drivebase_settings.c`)
 
@@ -494,6 +509,7 @@ At `drivebase start` the daemon reads a text file on the external W25Q256 NOR (L
 | Start | `wheel_d_um` (56000) | uint32 | > 0, used only when CLI omits wheel |
 | | `axle_t_um` (112000) | uint32 | > 0, used only when CLI omits axle |
 | | `tick_us` (DB_RT_TICK_US_DEFAULT) | uint32 | > 0, used only when CLI omits tick |
+| | `use_gyro_plus1` (0 = unset) | uint8 | Phase 3b (#148): 0 = key absent ⇒ `NONE`, 1 = `NONE`, 2 = `1D`.  The daemon calls `db_drivebase_set_use_gyro` once at startup; Madgwick has not converged yet so the `latched` transition is deferred to the first command. |
 
 **Wheel / axle / tick precedence**: `drivebase start [wheel_mm] [axle_mm] [tick_ms]` decides "explicit vs omitted" by `argc`.  Explicit CLI > config > compiled default.
 
@@ -560,7 +576,21 @@ Confirm `lump: port X: SYNCED type=48` for both ports in dmesg.
 
 ### 10.3 Gyro features (`set-gyro 1d`) have no effect
 
-`/dev/uorb/sensor_imu0` may not exist if LSM6DSL boot init failed.  Look for `ERROR: Failed to initialize LSM6DSL: -110` in dmesg — check the I2C2 wiring / pull-ups / boot ordering.  The daemon is best-effort, so encoder-only operation continues with `imu_present=0` reported in `drivebase status`.
+Triage order:
+
+1. Check `drivebase status` `imu_present`.
+   - `0` → LSM6DSL boot init failed.  Look for `ERROR: Failed to initialize LSM6DSL: -110` in dmesg — check I2C2 wiring / pull-ups / boot ordering.  The daemon is best-effort, so encoder-only operation continues.
+   - `1` → IMU is healthy; continue.
+2. Check `drivebase status` `last_set_gyro_rc`.
+   - `0` → accepted, but `latched` may not have transitioned at command-start (see next step)
+   - `-16 (EBUSY)` → `set-gyro` was issued mid-motion.  `drivebase stop-motion coast` first, then retry
+   - `-38 (ENOSYS)` → `set-gyro 3d` is not supported until Phase 7
+   - `-22 (EINVAL)` → unknown mode
+3. `use_gyro_requested == 1` but `use_gyro_latched == 0` after issuing a motion:
+   - Madgwick not converged (just after cold boot).  Confirm `drivebase _imu show` reports `madgwick.initialized=1` + `calibrated=1`.  Needs ≥ 200 ms of stillness.
+   - IMU stale (`db_imu_is_stale` true).  `_imu drift 5` to confirm samples are arriving.
+4. `drivebase get-state` `angle_mdeg` does not turn gyro-origin-relative:
+   - `use_gyro_requested == 1` and the internal `gyro_origin_valid` must both hold.  If `set-gyro 1d` ran before IMU calibration, the origin never landed — try `drivebase reset 0 0` to re-snapshot.
 
 ### 10.4 Stall watchdog fires spuriously
 

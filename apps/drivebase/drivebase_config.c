@@ -202,6 +202,20 @@ static int set_tick_us(const char *value)
   return 0;
 }
 
+/* Phase 3b (#148): use_gyro_plus1 ∈ {0..2}.  See struct
+ * db_config_start_defaults_s comment for the encoding.
+ */
+
+static int set_use_gyro_plus1(const char *value)
+{
+  uint32_t v;
+  int rc = parse_u32(value, &v);
+  if (rc < 0) return rc;
+  if (v > 2) return -EINVAL;
+  g_start_defaults.use_gyro_plus1 = (uint8_t)v;
+  return 0;
+}
+
 /****************************************************************************
  * Dispatch table
  ****************************************************************************/
@@ -243,6 +257,8 @@ static const struct db_config_entry_s g_config_table[] =
   { "wheel_d_um",                     set_wheel_d_um },
   { "axle_t_um",                      set_axle_t_um },
   { "tick_us",                        set_tick_us },
+
+  { "use_gyro_plus1",                 set_use_gyro_plus1 },
 };
 
 #define DB_CONFIG_TABLE_SIZE \

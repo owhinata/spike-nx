@@ -50,7 +50,7 @@
 #include "drivebase_drivebase.h"
 #include "drivebase_motor.h"
 #include "drivebase_chardev_handler.h"
-#include "drivebase_imu.h"
+#include "drivebase_imu.h"          /* DB_IMU_DEFAULT_STALE_THRESHOLD_US */
 #include "drivebase_rt.h"
 #include "drivebase_config.h"
 #include "drivebase_settings.h"
@@ -95,7 +95,6 @@ struct daemon_global_s
   struct db_chardev_handler_s handler;
   struct db_rt_s            rt;
   struct db_imu_s           imu;
-  uint8_t                   use_gyro;
   bool                      imu_open;
 
   /* Stall watchdog */
@@ -146,33 +145,63 @@ static int rt_tick_cb(uint64_t now_us_arg, void *arg)
 {
   struct daemon_global_s *d = (struct daemon_global_s *)arg;
 
-  /* Drain envelopes + dispatch + drivebase update. */
+  /* Drain envelopes + dispatch + IMU drain + drivebase update.  Phase
+   * 3b moves the IMU drain ahead of db_drivebase_update so the heading
+   * PID injection (which reads db_imu_get_heading_mdeg) sees a sample
+   * from the same tick, not the previous one.  See Phase 3b plan Step 0.
+   */
 
   db_chardev_handler_tick(&d->handler, now_us_arg);
-  if (d->handler.configured)
-    {
-      db_drivebase_update(&d->db, now_us_arg);
-    }
   if (d->imu_open)
     {
       db_imu_drain_and_update(&d->imu, now_us_arg);
     }
+  if (d->handler.configured)
+    {
+      db_drivebase_update(&d->db, now_us_arg);
+    }
 
   /* Re-publish state after the drivebase update so the user sees
-   * fresh distance / heading values immediately.  IMU heading is
-   * folded in when use_gyro is non-NONE.
+   * fresh distance / heading values immediately.
+   *
+   * Phase 3b (#148) publish overwrite — fold the IMU heading into
+   * `angle_mdeg` when EITHER of the two scenarios holds:
+   *   1. A motion is in flight with latched 1D mode (the PID is
+   *      already running on the gyro state input — publish must agree
+   *      so reset/SMART/get-state stay coherent with the PID).
+   *   2. The drivebase is idle but the user already armed 1D mode and
+   *      we hold a valid origin.  This is the manual-spin case
+   *      ("hand-rotate the robot and watch angle_mdeg track").
+   * In both cases the IMU must be online and not stale; otherwise the
+   * encoder-derived publish from db_drivebase_get_state passes through
+   * unchanged (transient bus-stall fallback).
+   *
+   * The same gyro_origin_mdeg baseline used by the PID injection feeds
+   * the publish overwrite, so PID state and user-visible heading share
+   * a single source of truth (SSOT).  Saturating to int32 is safe: at
+   * ±5.96 M deg the saturation only fires after months of continuous
+   * spin, far past anything the user would interpret as a fresh heading.
    */
 
   if (d->handler.configured)
     {
       struct drivebase_state_s st;
       db_drivebase_get_state(&d->db, &st);
-      if (d->use_gyro != DRIVEBASE_USE_GYRO_NONE && d->imu_open)
+
+      bool publish_gyro =
+          (d->db.use_gyro_latched   == DRIVEBASE_USE_GYRO_1D) ||
+          (d->db.use_gyro_requested == DRIVEBASE_USE_GYRO_1D &&
+           d->db.gyro_origin_valid);
+
+      if (publish_gyro && d->imu_open && d->db.gyro_origin_valid &&
+          !db_imu_is_stale(&d->imu, now_us_arg,
+                           DB_IMU_DEFAULT_STALE_THRESHOLD_US))
         {
-          int64_t h = db_imu_get_heading_mdeg(&d->imu);
-          if (h >  INT32_MAX) h = INT32_MAX;
-          if (h <  INT32_MIN) h = INT32_MIN;
-          st.angle_mdeg = (int32_t)h;
+          int64_t raw = db_imu_get_heading_mdeg(&d->imu);
+          int64_t rel = raw - d->db.gyro_origin_mdeg;
+          if (rel >  INT32_MAX) rel = INT32_MAX;
+          if (rel <  INT32_MIN) rel = INT32_MIN;
+          st.angle_mdeg = (int32_t)rel;
         }
       st.tick_seq = d->rt.tick_count;
       db_chardev_handler_publish_state(&d->handler, &st);
@@ -253,7 +282,6 @@ static int daemon_task_main(int argc, char *argv[])
   d->axle_t_um  = axle_t_um;
   d->consecutive_misses = 0;
   d->last_seen_misses   = 0;
-  d->use_gyro           = DRIVEBASE_USE_GYRO_NONE;
   d->imu_open           = false;
 
   atomic_store(&d->state, DB_DAEMON_INITIALISING);
@@ -334,6 +362,32 @@ static int daemon_task_main(int argc, char *argv[])
   if (db_imu_open(&d->imu) == 0)
     {
       d->imu_open = true;
+      /* Phase 3b (#148) — attach the live IMU so heading PID injection
+       * + publish overwrite can pull world-vertical mdeg.  Safe to call
+       * before the RT thread starts; later set_use_gyro / command-start
+       * latches will negotiate when to actually use the data.
+       */
+
+      db_drivebase_attach_imu(&d->db, &d->imu);
+    }
+
+  /* Phase 3b (#148) — apply persisted boot-time gyro mode.  Madgwick
+   * has not converged yet (calibrated false), so set_use_gyro will
+   * record `requested` and defer the latched / origin capture to the
+   * first command-start.  Skipping the call entirely when use_gyro_plus1
+   * is unset preserves the prior default of DRIVEBASE_USE_GYRO_NONE.
+   */
+
+  if (cfg->use_gyro_plus1 != 0)
+    {
+      uint8_t boot_mode = (uint8_t)(cfg->use_gyro_plus1 - 1);
+      int set_rc = db_drivebase_set_use_gyro(&d->db, boot_mode, t0);
+      if (set_rc < 0)
+        {
+          syslog(LOG_WARNING,
+                 "drivebase: boot use_gyro=%u rejected rc=%d\n",
+                 (unsigned)boot_mode, set_rc);
+        }
     }
 
   db_rt_init(&d->rt, tick_us);

@@ -50,6 +50,20 @@ struct db_config_start_defaults_s
   uint32_t wheel_d_um;
   uint32_t axle_t_um;
   uint32_t tick_us;
+
+  /* Phase 3b (#148): persisted boot-time gyro mode, biased by +1 so
+   * value 0 means "key absent — leave the daemon default alone".  The
+   * encoded values are:
+   *
+   *   0 = unset       — daemon picks DRIVEBASE_USE_GYRO_NONE
+   *   1 = NONE        — explicit encoder-only
+   *   2 = 1D          — gyro-locked heading at boot
+   *
+   * Other values are rejected by the parser, so consumers can treat
+   * `use_gyro_plus1 - 1` as the enum once they confirm != 0.
+   */
+
+  uint8_t  use_gyro_plus1;
 };
 
 /* Load and apply a config file.  Returns 0 on success (including the

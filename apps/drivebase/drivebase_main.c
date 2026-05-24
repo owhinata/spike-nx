@@ -1762,6 +1762,9 @@ static int do_status(void)
   printf("motor_r_bound    = %u\n", st.motor_r_bound);
   printf("imu_present      = %u\n", st.imu_present);
   printf("use_gyro         = %u\n", st.use_gyro);
+  printf("use_gyro_requested= %u\n", st.use_gyro_requested);
+  printf("use_gyro_latched = %u\n", st.use_gyro_latched);
+  printf("last_set_gyro_rc = %d\n", (int)st.last_set_gyro_rc);
   printf("wheel_d_um       = %lu\n", (unsigned long)st.wheel_d_um);
   printf("axle_t_um        = %lu\n", (unsigned long)st.axle_t_um);
   printf("tick_us          = %lu\n", (unsigned long)st.tick_us);
@@ -2330,10 +2333,22 @@ int main(int argc, FAR char *argv[])
           fprintf(stderr, "usage: drivebase set-gyro <none|1d|3d>\n");
           close(dev); return 1;
         }
-      uint8_t mode = DRIVEBASE_USE_GYRO_NONE;
+      uint8_t mode;
       if      (strcmp(argv[2], "none") == 0) mode = DRIVEBASE_USE_GYRO_NONE;
       else if (strcmp(argv[2], "1d")   == 0) mode = DRIVEBASE_USE_GYRO_1D;
       else if (strcmp(argv[2], "3d")   == 0) mode = DRIVEBASE_USE_GYRO_3D;
+      else
+        {
+          /* Codex NIT: silent fallback to NONE hides typos.  Surface
+           * the bad argument and bail rather than mutating state.
+           */
+
+          fprintf(stderr,
+                  "drivebase set-gyro: unknown mode '%s' "
+                  "(expected none|1d|3d)\n", argv[2]);
+          close(dev);
+          return 1;
+        }
       struct drivebase_set_use_gyro_s a = { .use_gyro = mode };
       int rc = ioctl(dev, DRIVEBASE_SET_USE_GYRO, (unsigned long)&a);
       close(dev);

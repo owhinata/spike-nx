@@ -54,6 +54,13 @@ extern "C"
 {
 #endif
 
+/* Forward decl — Phase 3b heading PID consumes IMU via a daemon-owned
+ * instance attached at startup, but we keep the full drivebase_imu.h
+ * out of this header so build deps stay minimal.
+ */
+
+struct db_imu_s;
+
 /****************************************************************************
  * Types
  ****************************************************************************/
@@ -112,6 +119,40 @@ struct db_drivebase_s
   uint8_t  active_command;    /* enum drivebase_active_command_e         */
   bool     done;
   bool     stalled;
+
+  /* Phase 3b (#148): IMU-locked heading injection.
+   *
+   * `imu` is attached by the daemon after db_imu_open() succeeds.  All
+   * Phase 3b state below is owned by the RT-tick thread (chardev
+   * handler, set_use_gyro, set_origin, reset, db_drivebase_update all
+   * dispatch from the same RT callback), with two exceptions:
+   *
+   *   - use_gyro_requested / use_gyro_latched / last_set_gyro_rc are
+   *     read by the daemon idle thread (drivebase_daemon.c publish_status,
+   *     ~20 Hz) and written by the RT thread.  Single-byte accesses on
+   *     Cortex-M4 are atomic for aligned types; `volatile` documents the
+   *     cross-thread access and prevents the compiler from caching the
+   *     value across the idle-loop sleep.
+   *
+   *   - gyro_origin_{mdeg,valid} are touched only by the RT thread.
+   */
+
+  struct db_imu_s   *imu;
+  volatile uint8_t   use_gyro_requested;
+                                /* enum drivebase_use_gyro_e — user-       */
+                                /* requested mode (cfg or ioctl)           */
+  volatile uint8_t   use_gyro_latched;
+                                /* enum drivebase_use_gyro_e — mode in     */
+                                /* effect for the in-flight motion; only   */
+                                /* set at command-start when capturable    */
+  volatile int8_t    last_set_gyro_rc;
+                                /* last db_drivebase_set_use_gyro return   */
+                                /* code (0 / -EBUSY / -EINVAL / -ENOSYS)   */
+  int64_t            gyro_origin_mdeg;
+                                /* robot-heading mdeg baseline; subtract   */
+                                /* from raw IMU heading to obtain the      */
+                                /* user-visible / PID-state value          */
+  bool               gyro_origin_valid;
 };
 
 /****************************************************************************
@@ -126,10 +167,34 @@ int  db_drivebase_init(struct db_drivebase_s *db,
 
 int  db_drivebase_reset(struct db_drivebase_s *db, uint64_t now_us);
 
-/* Reset the daemon's distance/heading origin without touching motors. */
+/* Reset the daemon's distance/heading origin without touching motors.
+ * `now_us` is needed by Phase 3b (#148) to re-evaluate the IMU origin
+ * via gyro_origin_capturable() — encoder-only callers can ignore the
+ * meaning and just thread the RT tick's clock through.
+ */
 
 void db_drivebase_set_origin(struct db_drivebase_s *db,
-                             int32_t distance_mm, int32_t angle_mdeg);
+                             int32_t distance_mm, int32_t angle_mdeg,
+                             uint64_t now_us);
+
+/* Phase 3b (#148) — attach the daemon's IMU instance so the heading
+ * PID can pull world-vertical mdeg into its state input.  May be called
+ * once at daemon start, before the RT thread; passing NULL detaches.
+ * Not thread-safe — caller must guarantee no in-flight RT tick.
+ */
+
+void db_drivebase_attach_imu(struct db_drivebase_s *db,
+                             struct db_imu_s *imu);
+
+/* Phase 3b (#148) — change the requested gyro mode.  Returns 0 on
+ * success, -EBUSY if a motion is in flight, -EINVAL for unknown modes,
+ * -ENOSYS for 3D (not yet implemented).  Updates the db's latched
+ * `last_set_gyro_rc` regardless of the path taken so a status snapshot
+ * can observe the last attempt.  Single-thread (RT tick) only.
+ */
+
+int  db_drivebase_set_use_gyro(struct db_drivebase_s *db, uint8_t mode,
+                               uint64_t now_us);
 
 /* User-level drive commands.  speed_mmps / turn_rate_dps == 0 falls
  * back to the db_settings_distance_limits / heading_limits defaults

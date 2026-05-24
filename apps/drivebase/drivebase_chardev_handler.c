@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <string.h>
+#include <syslog.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -57,7 +58,8 @@ static int dispatch_envelope(struct db_chardev_handler_s *h,
         {
           const struct drivebase_reset_s *r =
               (const struct drivebase_reset_s *)env->payload;
-          db_drivebase_set_origin(h->db, r->distance_mm, r->angle_mdeg);
+          db_drivebase_set_origin(h->db, r->distance_mm, r->angle_mdeg,
+                                  now_us);
           return 0;
         }
 
@@ -136,8 +138,29 @@ static int dispatch_envelope(struct db_chardev_handler_s *h,
           return 0;
         }
 
-      case DRIVEBASE_SET_DRIVE_SETTINGS:
       case DRIVEBASE_SET_USE_GYRO:
+        if (!h->configured) return -ENOTCONN;
+        {
+          const struct drivebase_set_use_gyro_s *a =
+              (const struct drivebase_set_use_gyro_s *)env->payload;
+          int rc = db_drivebase_set_use_gyro(h->db, a->use_gyro, now_us);
+          if (rc < 0)
+            {
+              /* The kernel chardev envelope queue drops daemon-side rc
+               * before it reaches the user ioctl path, so the visible
+               * channel is (a) the publish_status `last_set_gyro_rc`
+               * field and (b) this one-shot syslog line.  See plan
+               * Step 5 / Step 6 for the explicit propagation contract.
+               */
+
+              syslog(LOG_WARNING,
+                     "drivebase: set_use_gyro(%u) rc=%d\n",
+                     (unsigned)a->use_gyro, rc);
+            }
+          return rc;
+        }
+
+      case DRIVEBASE_SET_DRIVE_SETTINGS:
       case DRIVEBASE_SPIKE_DRIVE_FOREVER:
       case DRIVEBASE_SPIKE_DRIVE_TIME:
       case DRIVEBASE_SPIKE_DRIVE_ANGLE:
@@ -264,8 +287,20 @@ int db_chardev_handler_publish_status(struct db_chardev_handler_s *h)
   s.configured       = h->configured;
   s.motor_l_bound    = drivebase_motor_is_initialised();
   s.motor_r_bound    = drivebase_motor_is_initialised();
-  s.imu_present      = 0;          /* commit #10 wires this  */
-  s.use_gyro         = 0;
+
+  /* Phase 3b (#148) — surface IMU + use_gyro state to userspace.  The
+   * union aliases use_gyro and use_gyro_requested at the same byte, so
+   * we write the requested slot once.  imu_present reflects whether
+   * the daemon attached an IMU instance via db_drivebase_attach_imu().
+   */
+
+  if (h->db != NULL)
+    {
+      s.imu_present        = (h->db->imu != NULL) ? 1 : 0;
+      s.use_gyro_requested = h->db->use_gyro_requested;
+      s.use_gyro_latched   = h->db->use_gyro_latched;
+      s.last_set_gyro_rc   = h->db->last_set_gyro_rc;
+    }
   s.daemon_attached  = 1;
   s.tick_count       = 0;          /* RT task tracks this    */
   s.tick_overrun_count = 0;

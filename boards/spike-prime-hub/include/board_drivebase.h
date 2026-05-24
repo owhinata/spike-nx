@@ -278,9 +278,23 @@ struct drivebase_status_s
   uint8_t  motor_l_bound;
   uint8_t  motor_r_bound;
   uint8_t  imu_present;
-  uint8_t  use_gyro;
+
+  /* Phase 3b (#148) repurposed the legacy `use_gyro` slot as
+   * `use_gyro_requested` (the user-requested mode) and gave it a
+   * preferred name via a union — existing consumers reading `use_gyro`
+   * see the same byte and stay source-compatible.  `use_gyro_latched`
+   * and `last_set_gyro_rc` land in the prior `reserved[2]` slot so
+   * struct size and offsets stay frozen (see _Static_assert below).
+   */
+
+  union
+  {
+    uint8_t use_gyro;             /* legacy name (since #141)              */
+    uint8_t use_gyro_requested;   /* Phase 3b preferred name               */
+  };
   uint8_t  daemon_attached;
-  uint8_t  reserved[2];
+  uint8_t  use_gyro_latched;      /* mode the in-flight motion locked in   */
+  int8_t   last_set_gyro_rc;      /* rc of the last SET_USE_GYRO attempt   */
 
   uint32_t tick_count;
   uint32_t tick_overrun_count;
@@ -387,6 +401,24 @@ _Static_assert(offsetof(struct drivebase_state_s, tick_seq) == 16,
                "drivebase_state_s.tick_seq offset");
 _Static_assert(offsetof(struct drivebase_status_s, attach_generation) == 40,
                "drivebase_status_s.attach_generation offset");
+
+/* Phase 3b (#148) ABI freeze — keep status struct layout pinned so a
+ * future field-rename or accidental insertion can't silently shift
+ * tick_count.  Status size must stay 60 (see top-level sizeof assert).
+ */
+
+_Static_assert(offsetof(struct drivebase_status_s, use_gyro)           == 4,
+               "drivebase_status_s.use_gyro offset");
+_Static_assert(offsetof(struct drivebase_status_s, use_gyro_requested) == 4,
+               "drivebase_status_s.use_gyro_requested offset");
+_Static_assert(offsetof(struct drivebase_status_s, daemon_attached)    == 5,
+               "drivebase_status_s.daemon_attached offset");
+_Static_assert(offsetof(struct drivebase_status_s, use_gyro_latched)   == 6,
+               "drivebase_status_s.use_gyro_latched offset");
+_Static_assert(offsetof(struct drivebase_status_s, last_set_gyro_rc)   == 7,
+               "drivebase_status_s.last_set_gyro_rc offset");
+_Static_assert(offsetof(struct drivebase_status_s, tick_count)         == 8,
+               "drivebase_status_s.tick_count offset");
 
 #ifdef __cplusplus
 }

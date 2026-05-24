@@ -34,6 +34,7 @@
 #include <syslog.h>
 
 #include "drivebase_drivebase.h"
+#include "drivebase_imu.h"         /* Phase 3b (#148) heading injection  */
 #include "drivebase_motor.h"
 #include "drivebase_rt.h"          /* DB_RT_TICK_MS_DEFAULT (Issue #120) */
 #include "drivebase_settings.h"
@@ -98,12 +99,18 @@ static int32_t diff_mm_to_heading_mdeg(int32_t diff_mm, uint32_t a_um)
  * (Algebraic simplification: π and 360 cancel out cleanly.)
  */
 
-static int64_t heading_mdeg_to_state_mdeg(int32_t heading_mdeg,
+static int64_t heading_mdeg_to_state_mdeg(int64_t heading_mdeg,
                                           uint32_t wheel_d_um,
                                           uint32_t axle_t_um)
 {
+  /* Phase 3b (#148) widened the input to int64 so the Madgwick-derived
+   * world heading (unwrapped over an entire run, ±2^63 mdeg headroom)
+   * can flow straight into the state-space PID without an int32 saturate.
+   * Encoder callers stay correct: int32 lossless to int64.
+   */
+
   if (wheel_d_um == 0) return 0;
-  return (int64_t)heading_mdeg * (int64_t)axle_t_um / (int64_t)wheel_d_um;
+  return heading_mdeg * (int64_t)axle_t_um / (int64_t)wheel_d_um;
 }
 
 /* Clamp helper for the L/R compose. */
@@ -170,6 +177,24 @@ static void db_drivebase_raw_state(const struct db_drivebase_s *db,
   *heading_mdeg = diff_mm_to_heading_mdeg(lR_mm - lL_mm, db->axle_t_um);
 }
 
+/* Phase 3b (#148) — guard for "can we trust the IMU right now?".
+ *   IMU attached, user requested gyro mode, calibrated, AND a fresh
+ *   sample arrived within the stale threshold.  Used to gate origin
+ *   capture and command-start latching so a boot-time pending
+ *   activation never wires up a stale baseline.
+ */
+
+static bool gyro_origin_capturable(const struct db_drivebase_s *db,
+                                   uint64_t now_us)
+{
+  if (db->imu == NULL) return false;
+  if (db->use_gyro_requested == DRIVEBASE_USE_GYRO_NONE) return false;
+  if (!db_imu_is_calibrated(db->imu)) return false;
+  if (db_imu_is_stale(db->imu, now_us,
+                      DB_IMU_DEFAULT_STALE_THRESHOLD_US)) return false;
+  return true;
+}
+
 int db_drivebase_reset(struct db_drivebase_s *db, uint64_t now_us)
 {
   int rc = db_servo_reset(&db->servo[DB_SIDE_LEFT], now_us);
@@ -197,11 +222,27 @@ int db_drivebase_reset(struct db_drivebase_s *db, uint64_t now_us)
   db->done             = true;
   db->stalled          = false;
   db->last_tick_us     = now_us;
+
+  /* Phase 3b (#148) — fresh origin means publish should read 0 mdeg
+   * once the IMU comes online; capture if possible, otherwise drop
+   * any stale baseline so the next command-start latch starts fresh.
+   */
+
+  if (gyro_origin_capturable(db, now_us))
+    {
+      db->gyro_origin_mdeg  = db_imu_get_heading_mdeg(db->imu);
+      db->gyro_origin_valid = true;
+    }
+  else
+    {
+      db->gyro_origin_valid = false;
+    }
   return 0;
 }
 
 void db_drivebase_set_origin(struct db_drivebase_s *db,
-                             int32_t distance_mm, int32_t angle_mdeg)
+                             int32_t distance_mm, int32_t angle_mdeg,
+                             uint64_t now_us)
 {
   int32_t raw_dist;
   int32_t raw_heading;
@@ -212,6 +253,132 @@ void db_drivebase_set_origin(struct db_drivebase_s *db,
 
   db->distance_mm = distance_mm;
   db->angle_mdeg  = angle_mdeg;
+
+  /* Phase 3b (#148) — re-evaluate the gyro origin so the published
+   * heading and the PID input stay coherent with the new motor-side
+   * origin.  See db_drivebase_set_use_gyro() for the full rationale.
+   * When the IMU is not ready (capturable false) we explicitly drop
+   * any stale baseline so a later command-start latch starts fresh.
+   */
+
+  if (gyro_origin_capturable(db, now_us))
+    {
+      db->gyro_origin_mdeg = db_imu_get_heading_mdeg(db->imu) -
+                             (int64_t)angle_mdeg;
+      db->gyro_origin_valid = true;
+    }
+  else
+    {
+      db->gyro_origin_valid = false;
+    }
+}
+
+void db_drivebase_attach_imu(struct db_drivebase_s *db,
+                             struct db_imu_s *imu)
+{
+  db->imu = imu;
+  /* Any cached origin is now meaningless — wait for the next set_use_gyro,
+   * set_origin, reset, or command-start latch to re-capture.
+   */
+
+  db->gyro_origin_valid = false;
+}
+
+int db_drivebase_set_use_gyro(struct db_drivebase_s *db, uint8_t mode,
+                              uint64_t now_us)
+{
+  /* Validation first — keep the active check after, so unsupported modes
+   * are rejected even while the drivebase is idle.
+   */
+
+  if (mode == DRIVEBASE_USE_GYRO_3D)
+    {
+      db->last_set_gyro_rc = -ENOSYS;
+      return -ENOSYS;
+    }
+  if (mode != DRIVEBASE_USE_GYRO_NONE && mode != DRIVEBASE_USE_GYRO_1D)
+    {
+      db->last_set_gyro_rc = -EINVAL;
+      return -EINVAL;
+    }
+
+  /* Refuse to flip the source mid-motion: the heading PID's state
+   * input would jump between encoder and gyro coordinates, blowing up
+   * the I-term.  Caller's option is stop → set-gyro → resume.
+   */
+
+  if (db->active_command != DRIVEBASE_ACTIVE_NONE)
+    {
+      db->last_set_gyro_rc = -EBUSY;
+      return -EBUSY;
+    }
+
+  /* Snapshot old state BEFORE mutating — needed for the same-mode-1D
+   * no-op below (Codex BLOCKING #1, Issue #148 implementation review).
+   */
+
+  uint8_t old_mode  = db->use_gyro_requested;
+  bool    old_valid = db->gyro_origin_valid;
+
+  bool mode_changed = (old_mode != mode);
+  db->use_gyro_requested = mode;
+
+  /* I-acc reset only on actual mode change.  Re-issuing the same mode
+   * is a no-op for the PID memory; the origin re-evaluation below still
+   * runs (subject to the same-mode preservation guard) so a stale
+   * baseline can't survive a same-mode re-issue from an invalid state.
+   */
+
+  if (mode_changed)
+    {
+      db_aggregate_control_reset(&db->control[DB_AXIS_HEADING]);
+    }
+
+  /* Origin re-snapshot / invalidation (Codex 6th + 7th review,
+   *   amended after implementation-round Codex BLOCKING #1).
+   *
+   *   - mode == NONE              → drop any cached origin so a future
+   *                                  re-enable can't silently pick up
+   *                                  a stale baseline.
+   *   - same mode 1D & valid &
+   *     capturable                → KEEP the existing origin as-is.
+   *                                  Re-deriving from `db->angle_mdeg`
+   *                                  would compute the baseline from
+   *                                  the encoder publish value while
+   *                                  the user-visible heading is
+   *                                  `raw - old_origin` (gyro-relative),
+   *                                  causing publish to snap.
+   *   - capturable                → snapshot vs encoder publish so the
+   *                                  next gyro publish lands at the
+   *                                  same place the encoder publish
+   *                                  was already showing.
+   *   - else                      → IMU not ready; drop the cache and
+   *                                  defer to the first command-start
+   *                                  latch.
+   */
+
+  if (mode == DRIVEBASE_USE_GYRO_NONE)
+    {
+      db->gyro_origin_valid = false;
+    }
+  else if (!mode_changed && mode == DRIVEBASE_USE_GYRO_1D && old_valid &&
+           gyro_origin_capturable(db, now_us))
+    {
+      /* No-op: preserve the existing origin so publish doesn't jump. */
+    }
+  else if (gyro_origin_capturable(db, now_us))
+    {
+      db->gyro_origin_mdeg =
+          db_imu_get_heading_mdeg(db->imu) - (int64_t)db->angle_mdeg;
+      db->gyro_origin_valid = true;
+    }
+  else
+    {
+      db->gyro_origin_valid = false;
+    }
+
+  db->last_set_gyro_rc = 0;
+  return 0;
 }
 
 /****************************************************************************
@@ -240,6 +407,94 @@ static void collect_aggregate_state(const struct db_drivebase_s *db,
 }
 
 /****************************************************************************
+ * Private Helpers — Phase 3b (#148) gyro injection
+ ****************************************************************************/
+
+/* Lock in the latched mode at the start of a motion.  Capturable ⇒
+ * latched = requested.  Else ⇒ latched = NONE (encoder-only this
+ * motion).  Per-tick injection consults the latched value so an IMU
+ * stall mid-motion can fall back to encoder without flipping the
+ * heading PID's intent mid-run.
+ */
+
+static void db_drivebase_latch_use_gyro(struct db_drivebase_s *db,
+                                        uint64_t now_us)
+{
+  if (gyro_origin_capturable(db, now_us))
+    {
+      db->use_gyro_latched = db->use_gyro_requested;
+    }
+  else
+    {
+      db->use_gyro_latched = DRIVEBASE_USE_GYRO_NONE;
+    }
+}
+
+/* Capture pre-motion aggregate state for the entry points and, when
+ * `do_latch` is true, also lock in use_gyro_latched and snapshot the
+ * gyro origin (in-place only when no valid origin exists yet).  Per-
+ * tick callers pass do_latch=false: they only fold the IMU heading
+ * into state->heading_x_mdeg when all runtime guards are satisfied,
+ * otherwise the encoder value collected by collect_aggregate_state
+ * passes through untouched (encoder fallback during transient IMU
+ * stalls or calibration loss).
+ */
+
+static void db_drivebase_capture_start_heading(
+    struct db_drivebase_s *db,
+    struct db_agg_state_s *state,
+    uint64_t now_us,
+    bool do_latch)
+{
+  if (do_latch)
+    {
+      db_drivebase_latch_use_gyro(db, now_us);
+
+      /* Origin in-place snapshot: only when there is no valid baseline
+       * yet.  An in-flight retarget (drive_forever re-arm in particular)
+       * must NOT clobber the origin captured at the original command-
+       * start, or the publish basis would jump under the user.
+       */
+
+      if (!db->gyro_origin_valid &&
+          db->use_gyro_latched == DRIVEBASE_USE_GYRO_1D &&
+          db->imu != NULL)
+        {
+          db->gyro_origin_mdeg =
+              db_imu_get_heading_mdeg(db->imu) - (int64_t)db->angle_mdeg;
+          db->gyro_origin_valid = true;
+        }
+    }
+
+  collect_aggregate_state(db, state);
+
+  /* Fold the IMU heading into the PID state input.  All guards re-
+   * checked per call so any transient (stale sample, lost cal) causes
+   * a one-tick encoder fallback rather than running on a stale IMU
+   * value.  Latched is the *intent*; the guards are the *trust check*.
+   */
+
+  if (db->use_gyro_latched == DRIVEBASE_USE_GYRO_1D &&
+      db->imu != NULL &&
+      db->gyro_origin_valid &&
+      db_imu_is_calibrated(db->imu) &&
+      !db_imu_is_stale(db->imu, now_us,
+                       DB_IMU_DEFAULT_STALE_THRESHOLD_US))
+    {
+      int64_t raw = db_imu_get_heading_mdeg(db->imu);
+      int64_t rel = raw - db->gyro_origin_mdeg;
+      state->heading_x_mdeg =
+          heading_mdeg_to_state_mdeg(rel, db->wheel_d_um,
+                                     db->axle_t_um);
+      /* heading_v_mdegps stays encoder-derived: LSM6DSL ODR/quantisation
+       * makes the per-tick gyro-rate-only D-term noisy.  Following the
+       * pybricks pattern, only the position term flips to IMU; the rate
+       * term keeps the encoder differential.
+       */
+    }
+}
+
+/****************************************************************************
  * Public Functions — drive primitives
  ****************************************************************************/
 
@@ -260,7 +515,7 @@ static int setup_position_move(struct db_drivebase_s *db,
                                uint8_t on_completion)
 {
   struct db_agg_state_s s;
-  collect_aggregate_state(db, &s);
+  db_drivebase_capture_start_heading(db, &s, now_us, true);
 
   const struct db_traj_limits_s *dl =
       db_settings_distance_limits(db->wheel_d_um);
@@ -341,7 +596,7 @@ int db_drivebase_turn(struct db_drivebase_s *db,
                       uint8_t on_completion)
 {
   int64_t heading_delta_mdeg =
-      heading_mdeg_to_state_mdeg(angle_deg * 1000,
+      heading_mdeg_to_state_mdeg((int64_t)angle_deg * 1000,
                                  db->wheel_d_um, db->axle_t_um);
 
   int32_t v_override = 0;
@@ -397,7 +652,7 @@ int db_drivebase_drive_curve(struct db_drivebase_s *db,
   int64_t dist_delta_mdeg = mm_to_motor_mdeg(dl_avg_mm, db->wheel_d_um);
 
   int64_t heading_delta_mdeg =
-      heading_mdeg_to_state_mdeg(angle_deg * 1000,
+      heading_mdeg_to_state_mdeg((int64_t)angle_deg * 1000,
                                  db->wheel_d_um, db->axle_t_um);
 
   /* Rounding can collapse one delta to zero even though the original
@@ -429,7 +684,7 @@ int db_drivebase_drive_curve(struct db_drivebase_s *db,
    */
 
   struct db_agg_state_s s;
-  collect_aggregate_state(db, &s);
+  db_drivebase_capture_start_heading(db, &s, now_us, true);
 
   const struct db_traj_limits_s *dl =
       db_settings_distance_limits(db->wheel_d_um);
@@ -561,8 +816,19 @@ int db_drivebase_drive_forever(struct db_drivebase_s *db,
                                int32_t speed_mmps,
                                int32_t turn_rate_dps)
 {
+  /* Phase 3b (#148) Codex BLOCKING #2: drive_forever supports
+   * in-flight retargeting (aggregate_control_drive_forever does NOT
+   * reset PID/trajectory).  Re-latching on every retarget would let a
+   * transient IMU stall flip use_gyro_latched to NONE mid-motion while
+   * the PID accumulator stays loaded — exactly the source-flip race
+   * `set_use_gyro` rejects with -EBUSY.  Only latch on the FIRST entry
+   * (active_command != FOREVER yet); retarget calls keep the existing
+   * latched mode and origin untouched.
+   */
+
+  bool is_retarget = (db->active_command == DRIVEBASE_ACTIVE_FOREVER);
   struct db_agg_state_s s;
-  collect_aggregate_state(db, &s);
+  db_drivebase_capture_start_heading(db, &s, now_us, !is_retarget);
 
   int32_t v_dist_mdegps = db_angle_mmps_to_mdegps(speed_mmps,
                                                   db->wheel_d_um);
@@ -594,7 +860,7 @@ int db_drivebase_stop(struct db_drivebase_s *db,
                       uint64_t now_us, uint8_t on_completion)
 {
   struct db_agg_state_s s;
-  collect_aggregate_state(db, &s);
+  db_drivebase_capture_start_heading(db, &s, now_us, false);
 
   db->active_command = DRIVEBASE_ACTIVE_STOP;
 
@@ -650,7 +916,7 @@ int db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us)
   /* 2. Collect aggregate state from per-servo cached x/v. */
 
   struct db_agg_state_s state;
-  collect_aggregate_state(db, &state);
+  db_drivebase_capture_start_heading(db, &state, now_us, false);
 
   /* 3. Compute dt_ms.  Like pre-#141 servo, prefer the nominal tick
    * (Issue #120) so PID gains stay tick-proportional under jitter.

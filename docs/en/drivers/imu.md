@@ -449,7 +449,70 @@ on a 51° tilted bench reads ≈ 360 000 mdeg.
 
 `bool db_imu_is_stale(im, now_us, threshold_us)` returns true when no drain
 has produced ≥ 1 sample within `threshold_us` (default
-`DB_IMU_DEFAULT_STALE_THRESHOLD_US = 50 ms`, 25 RT ticks). Phase 3b will use
+`DB_IMU_DEFAULT_STALE_THRESHOLD_US = 50 ms`, 25 RT ticks).  Phase 3b uses
 this as a guard in the heading PID injection path so a brief I²C recovery
 (Issue #102) falls back to encoder heading instead of integrating stale
 samples.
+
+## 14. Drivebase heading PID injection (Phase 3b, Issue [#148](https://github.com/owhinata/spike-nx/issues/148))
+
+After Phase 3a, `db_imu_get_heading_mdeg()` returns world-vertical robot
+heading and `drivebase _imu show` tracks manual rotation to ±0.003°.
+Phase 3b wires that into the drivebase aggregate heading PID's **state
+input** — encoder `(sR-sL)/2` alone cannot close the loop on wheel slip,
+gear backlash, or motor-to-motor mismatch.
+
+### Structure
+
+| Concept | Source | Where |
+|---|---|---|
+| `use_gyro_requested` | user-requested (`set-gyro` ioctl / cfg `use_gyro_plus1`) | `db_drivebase_s.use_gyro_requested` |
+| `use_gyro_latched` | captured at command-start when capturable | `db_drivebase_s.use_gyro_latched` |
+| `gyro_origin_mdeg` | snapshot of `raw - angle_mdeg` at `set-gyro` / `set_origin` / `reset` / latch | `db_drivebase_s.gyro_origin_mdeg` |
+| `gyro_origin_valid` | whether the baseline is trusted | `db_drivebase_s.gyro_origin_valid` |
+
+`db_drivebase_capture_start_heading(db, state, now_us, do_latch)` (in
+`drivebase_drivebase.c`) is called from four entry points
+(`setup_position_move` / `drive_curve` / `drive_forever` / `db_drivebase_
+stop`) and from the per-tick `db_drivebase_update`.  With do_latch=true it
+latches use_gyro and snapshots the origin in place if none is valid; with
+do_latch=false it just overwrites `state->heading_x_mdeg` with the
+origin-relative IMU value, gated on every runtime check passing — any
+transient (stale sample, lost calibration) lets the encoder value pass
+through for that tick.
+
+### Race protection by construction
+
+- The ioctl path only writes `requested`; it never touches `latched`.  Mid-
+  motion `set-gyro` returns `-EBUSY`.
+- A mid-motion IMU stall just bounces the per-tick injection to encoder
+  fallback without changing `latched`.  When the IMU recovers, gyro
+  injection resumes seamlessly on the next tick.
+- In-flight retargeting (`drive_forever` re-arm) re-uses the existing
+  origin instead of recapturing, so the publish baseline never jumps under
+  the user while a motion is running.
+
+### RT tick order
+
+```
+chardev → db_imu_drain_and_update → db_drivebase_update → publish overwrite
+```
+
+Pre-Phase-3b the IMU drain came after `db_drivebase_update`, so the PID
+read a one-tick-old IMU sample.  Phase 3b moves the drain ahead so the
+sample from this tick reaches the PID.
+
+### Publish overwrite
+
+`drivebase_daemon.c` overwrites `st.angle_mdeg` with `(int32_t)CLAMP(raw -
+gyro_origin_mdeg, INT32_MIN, INT32_MAX)` whenever `latched == 1D` (mid-
+motion) or `requested == 1D && origin_valid` (idle after `set-gyro`).  The
+PID and the user-visible publish share a single origin, so they stay in
+SSOT lock-step.
+
+### Out of scope (deferred Issues)
+
+- X/Y bias EMA temperature tracking — Phase 3a Codex CONCERN 2 territory
+- 3D mode (`set-gyro 3d`) — returns `-ENOSYS` until Phase 7
+- Evaluation of the I-term spike on IMU-stale → encoder fallback — bench
+  acceptance assumes no stalls; this is a follow-up Issue
