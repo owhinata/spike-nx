@@ -10,21 +10,23 @@
 #
 # This template lists every supported key set to its compiled default,
 # so loading it as-is is equivalent to not having a cfg file (`dmesg`
-# will report `loaded 37 config key(s) ... (0 rejected)`).  Copy this
+# will report `loaded 39 config key(s) ... (0 rejected)`).  Copy this
 # file to /mnt/flash/drivebase.cfg on the hub and edit the values you
 # want to override; comment out (or delete) everything else.
 #
-# Phase 3b (#148) added `use_gyro_plus1` as an OPTIONAL 38th key; when
+# Phase 3b (#148) added `use_gyro_plus1` as an OPTIONAL 40th key; when
 # absent it leaves the daemon at its DRIVEBASE_USE_GYRO_NONE default
-# (so the "loaded 37" line above stays accurate for the unedited
+# (so the "loaded 39" line above stays accurate for the unedited
 # template).  See the section near the bottom for the encoding.
 #
-# Phase 6 (#152) feed-forward keys:
+# Phase 6 (#152) feed-forward + battery keys:
 #   Step 6.1 added 4 linear FF gains (ff_{dist,head}_{kV,kA}).
 #   Step 6.2 added 3 per-motor friction keys (ff_motor_kS,
 #            ff_v_hyst_enter_mdegps, ff_v_hyst_exit_mdegps).
+#   Step 6.3 added 2 battery sag keys (battery_nominal_mv,
+#            battery_min_mv).
 # All default to 0/seed-only so the template is still a no-op load.
-# See the FF section near the bottom.
+# See the FF and battery sections near the bottom.
 
 # ----------------------------------------------------------------------
 # PID gains — distance axis (state_distance = (sL + sR) / 2 motor mdeg)
@@ -153,6 +155,28 @@ ff_head_kA = 0
 ff_motor_kS              = 0
 ff_v_hyst_enter_mdegps   = 5000
 ff_v_hyst_exit_mdegps    = 1000
+
+# ----------------------------------------------------------------------
+# Battery sag correction (Issue #152 Phase 6 Step 6.3)
+#
+# Compensates for the 8.3V (full) → 6.0V (empty) Li-Ion pack voltage
+# spread by scaling each motor's applied duty:
+#   duty_corrected = duty * battery_nominal_mv / max(vbat, battery_min_mv)
+#
+# At nominal vbat the factor is 1.0 (no-op).  At low vbat the factor
+# grows up to nominal / min, capped by the min_mv floor — default
+# 7200 / 6000 = 1.2× max boost.  vbat is updated by the daemon idle
+# thread every 200 ms (BATIOC_VOLTAGE on /dev/bat0), smoothed by an
+# EMA with τ ≈ 1.6 s; the RT thread reads a single _Atomic int32
+# snapshot with no locks.
+#
+# Bounds: both in [1, 12000] mV.  Convention min_mv < nominal_mv (the
+# setter does not cross-validate, same rationale as the FF hysteresis
+# thresholds — cfg load order would otherwise become load-bearing).
+# ----------------------------------------------------------------------
+
+battery_nominal_mv = 7200
+battery_min_mv     = 6000
 
 # ----------------------------------------------------------------------
 # Phase 3b (#148) boot-time gyro mode

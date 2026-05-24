@@ -34,6 +34,7 @@
 #include <syslog.h>
 
 #include "drivebase_drivebase.h"
+#include "drivebase_battery.h"     /* Phase 6 Step 6.3 sag correction    */
 #include "drivebase_imu.h"         /* Phase 3b (#148) heading injection  */
 #include "drivebase_motor.h"
 #include "drivebase_rt.h"          /* DB_RT_TICK_MS_DEFAULT (Issue #120) */
@@ -192,6 +193,7 @@ int db_drivebase_init(struct db_drivebase_s *db,
    */
 
   db->ff_motor = db_settings_ff_motor_friction();
+  db->battery  = db_settings_battery();
   return 0;
 }
 
@@ -1059,10 +1061,41 @@ int db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us)
       int32_t kS_L    = (int32_t)signL * kS_half;
       int32_t kS_R    = (int32_t)signR * kS_half;
 
-      int32_t left_duty  = clamp_i32(out_d.duty - out_h.duty + kS_L,
-                                     -10000, 10000);
-      int32_t right_duty = clamp_i32(out_d.duty + out_h.duty + kS_R,
-                                     -10000, 10000);
+      int32_t left_pre  = clamp_i32(out_d.duty - out_h.duty + kS_L,
+                                    -10000, 10000);
+      int32_t right_pre = clamp_i32(out_d.duty + out_h.duty + kS_R,
+                                    -10000, 10000);
+
+      /* Phase 6 Step 6.3 (#152) — battery sag correction (Plan D3).
+       *
+       * `duty_corrected = duty * V_NOM / V_bat` keeps the closed-loop
+       * mechanical output constant across the 8.3 V (full) → 6.0 V
+       * (empty) pack discharge.  V_bat is clamped to `battery_min_mv`
+       * (default 6 V → 1.2× boost ceiling) so a gauge under-read can't
+       * blow up the correction factor.
+       *
+       * Bounds: |duty_pre| <= 10000, nominal_mv <= 12000 → product
+       * <= 1.2e8, comfortably in int32.  The divide is variable but
+       * both operands are int32 (signed), so Cortex-M4 emits the
+       * single-cycle hardware SDIV instruction — NOT the 64-bit
+       * `__aeabi_ldivmod` helper that an int64 cast would force.
+       *
+       * The post-correction value flows to db_servo_apply, which is
+       * the same path that feeds the stall observer (servo.c:116-126
+       * reads `last_applied_duty`), so the stall judgement uses the
+       * corrected duty automatically — no extra hook needed.
+       */
+
+      int32_t vbat_mv = db_battery_get_mv();
+      int32_t vbat_min = db->battery->min_mv;
+      if (vbat_mv < vbat_min) vbat_mv = vbat_min;
+
+      int32_t vnom_mv = db->battery->nominal_mv;
+      int32_t left_corr  = (left_pre  * vnom_mv) / vbat_mv;
+      int32_t right_corr = (right_pre * vnom_mv) / vbat_mv;
+
+      int32_t left_duty  = clamp_i32(left_corr,  -10000, 10000);
+      int32_t right_duty = clamp_i32(right_corr, -10000, 10000);
 
       db_servo_apply(&db->servo[DB_SIDE_LEFT],  left_duty,
                      DRIVEBASE_ON_COMPLETION_HOLD);

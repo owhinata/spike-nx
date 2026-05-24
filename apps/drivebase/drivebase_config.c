@@ -185,6 +185,24 @@ static int set_ff_v_hyst_exit_mdegps(const char *value)
   return db_settings_set_ff_v_hyst_exit_mdegps(v);
 }
 
+/* Battery sag correction (Step 6.3). */
+
+static int set_battery_nominal_mv(const char *value)
+{
+  int32_t v;
+  int rc = parse_i32(value, &v);
+  if (rc < 0) return rc;
+  return db_settings_set_battery_nominal_mv(v);
+}
+
+static int set_battery_min_mv(const char *value)
+{
+  int32_t v;
+  int rc = parse_i32(value, &v);
+  if (rc < 0) return rc;
+  return db_settings_set_battery_min_mv(v);
+}
+
 static int set_stall_speed_mdegps(const char *value)
 {
   int32_t v;
@@ -294,6 +312,9 @@ static const struct db_config_entry_s g_config_table[] =
   { "ff_motor_kS",                    set_ff_motor_kS },
   { "ff_v_hyst_enter_mdegps",         set_ff_v_hyst_enter_mdegps },
   { "ff_v_hyst_exit_mdegps",          set_ff_v_hyst_exit_mdegps },
+
+  { "battery_nominal_mv",             set_battery_nominal_mv },
+  { "battery_min_mv",                 set_battery_min_mv },
 
   { "stall_speed_mdegps",             set_stall_speed_mdegps },
   { "stall_duty_min",                 set_stall_duty_min },

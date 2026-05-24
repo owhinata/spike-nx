@@ -517,6 +517,34 @@ cfg key (Step 6.2):
 
 `drivebase _alg settings` で `motor ff : kS=… v_hyst=[exit,enter]` を表示。
 
+#### 8.5.3 Battery sag correction (Step 6.3)
+
+SPIKE Prime Hub の 6S Li-Ion パックは 8.3V (満) → 6.0V (末) で同 duty が ~28% の機械出力差を生む。Phase 6 Step 6.3 では電圧モデルで補正:
+
+```
+duty_corrected = duty * battery_nominal_mv / max(vbat, battery_min_mv)
+```
+
+- **適用点**: compose 後 (kV/kA/kS 全部加算 + 1st clamp 後) → battery 補正 → 2nd clamp ±10000 → `db_servo_apply()`。`db_servo_apply` 経由で `last_applied_duty` がセットされ、`db_servo_update()` 内の stall observer が **補正後 duty** を見る (Plan D3 low-V thermal の stall hook 移動はこの経路で自動成立、明示的 hook 不要)
+- **polling 設計**:
+  - **owner**: daemon idle thread (既存 50ms wake)、`(poll_tick & 0x3) == 0` で 4 回に 1 回 = 200ms 周期
+  - **transfer**: `_Atomic int32_t vbat_mv` 1 個 (Cortex-M4 32-bit 整列 load は HW atomic、`memory_order_relaxed` で十分)
+  - **EMA**: daemon-local `prev_ema_mv` で `prev = (prev*7 + now)/8`、τ ≈ 1.6s。atomic に **read-modify-write はしない** (完成済み EMA を 1 度 store)
+- **cold start**: `db_battery_init(nominal_mv)` を `db_settings_freeze()` 直後 + `db_rt_start()` 前で呼び nominal を seed → 最初の poll 完了前は ×1 補正で no-op
+- **低電圧 cap**: `battery_min_mv = 6000` (default) で 1.2× cap、gauge アンダー値由来の暴走補正を防ぐ
+- **RT path の 32-bit divide**: `duty * nominal_mv` max = `10000 * 12000 = 1.2e8` で int32 安全、`/ vbat` は hardware 32-bit divide (`__aeabi_uidiv` ~12 cycles)、`__aeabi_ldivmod` は出ない
+
+cfg key (Step 6.3):
+
+| key | default | 範囲 | 意味 |
+|---|---|---|---|
+| `battery_nominal_mv` | 7200 | [1, 12000] mV | 補正の基準電圧 (gain チューニング時の vbat) |
+| `battery_min_mv` | 6000 | [1, 12000] mV | 補正分母の下限 (default 1.2× cap) |
+
+慣例 `min_mv < nominal_mv` だが setter は cross-key 検証しない (cfg load 順依存を回避)。
+
+`drivebase _alg settings` で `battery : vbat=… nominal=… min=…` を表示 (vbat は atomic snapshot)。
+
 ### 8.6 ランタイム設定上書き (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
 `drivebase start` 時に外部 W25Q256 NOR (LittleFS `/mnt/flash`) 上の text file から PID gain / completion / stall / wheel/axle/tick を読み込み、ビルド済みバイナリの default を rebuild なしで上書きできる。bench tuning iteration 短縮が目的。
@@ -556,6 +584,8 @@ cfg key (Step 6.2):
 | | `ff_motor_kS` (0) | int32 | [0, 1000] .01% duty 共通 friction、L/R 共通 (Step 6.2) |
 | | `ff_v_hyst_enter_mdegps` (5000) | int32 | [0, 100000] hysteresis enter |
 | | `ff_v_hyst_exit_mdegps` (1000) | int32 | [0, 100000] hysteresis exit (慣例 enter > exit) |
+| Battery | `battery_nominal_mv` (7200) | int32 | [1, 12000] mV — 補正基準電圧 (Step 6.3) |
+| | `battery_min_mv` (6000) | int32 | [1, 12000] mV — 補正分母下限 (default 1.2× cap、慣例 min < nominal) |
 | Stall | `stall_speed_mdegps` (30000) | int32 | [0, 1000000] |
 | | `stall_duty_min` (6000) | int32 | [0, 10000] |
 | | `stall_window_ms` (200) | uint32 | [0, 10000] |
@@ -593,7 +623,7 @@ wheel_d_um = 62000
 axle_t_um = 145000
 ```
 
-**完全テンプレート**: 全 37 key (Phase 6 Step 6.1 で FF 4 key、Step 6.2 で per-motor friction 3 key 追加) + コメントを `apps/drivebase/drivebase.cfg.sample` にコミットしてある。リポジトリから zmodem 等で `/mnt/flash/` にコピーするか、内容を `vi` で貼り付ければ「全 key を明示指定」の状態から start できる。tuning 中は使う key だけ残して他を `#` でコメントアウトする運用が見通しが良い。
+**完全テンプレート**: 全 39 key (Phase 6 Step 6.1 で FF 4 key、Step 6.2 で per-motor friction 3 key、Step 6.3 で battery 2 key 追加) + コメントを `apps/drivebase/drivebase.cfg.sample` にコミットしてある。リポジトリから zmodem 等で `/mnt/flash/` にコピーするか、内容を `vi` で貼り付ければ「全 key を明示指定」の状態から start できる。tuning 中は使う key だけ残して他を `#` でコメントアウトする運用が見通しが良い。
 
 ## 9. Linux への移植性 (FUSE)
 

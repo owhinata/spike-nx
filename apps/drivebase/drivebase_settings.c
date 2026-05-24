@@ -235,6 +235,18 @@ static struct db_ff_motor_friction_s g_ff_motor_friction =
   .v_hyst_exit_mdegps       = 1000,
 };
 
+/* Battery sag correction defaults (Issue #152 Phase 6 Step 6.3, Plan
+ * D3).  7200 mV = 6-cell Li-Ion nominal (SPIKE pack mid-voltage).
+ * 6000 mV = end-of-discharge cutoff where correction factor caps at
+ * 1.2× (above which we'd be amplifying noise on a depleted cell).
+ */
+
+static struct db_battery_settings_s g_battery_settings =
+{
+  .nominal_mv = 7200,
+  .min_mv     = 6000,
+};
+
 /* Bounds used by the per-key setters.  Kept here so config_load and the
  * defaults stay in sync.  out_max is bounded by the duty rail (10000 =
  * 100%) — heading axis defaults to 8000 but config may push it back up
@@ -268,6 +280,21 @@ static struct db_ff_motor_friction_s g_ff_motor_friction =
  */
 
 #define DB_FF_HYST_LIMIT_MDEGPS     100000
+
+/* Battery sag correction limits (Issue #152 Phase 6 Step 6.3).
+ *
+ *   1 mV  : implausibly small but prevents DIV/0; the RT side also
+ *           clamps live vbat to battery_min_mv before dividing.
+ *   12 V  : plausible upper bound for an over-charged 6S pack (the
+ *           SPIKE Hub real ceiling is ~8.4 V).  Wider than needed
+ *           leaves room for unusual cell chemistry experimentation.
+ *
+ * `nominal_mv * out_max = 12000 * 10000 = 1.2e8`, comfortably inside
+ * int32 even before the divide.
+ */
+
+#define DB_BATTERY_MV_MIN                 1
+#define DB_BATTERY_MV_MAX             12000
 
 /****************************************************************************
  * Distance / heading trajectory limits
@@ -338,6 +365,11 @@ db_settings_ff_axis_gains(enum db_axis_e axis)
 const struct db_ff_motor_friction_s *db_settings_ff_motor_friction(void)
 {
   return &g_ff_motor_friction;
+}
+
+const struct db_battery_settings_s *db_settings_battery(void)
+{
+  return &g_battery_settings;
 }
 
 const struct db_servo_gains_s *db_settings_servo_gains(void)
@@ -683,6 +715,18 @@ int db_settings_set_ff_v_hyst_exit_mdegps(int32_t value)
                           0, DB_FF_HYST_LIMIT_MDEGPS);
 }
 
+int db_settings_set_battery_nominal_mv(int32_t value)
+{
+  return set_in_range_i32(&g_battery_settings.nominal_mv, value,
+                          DB_BATTERY_MV_MIN, DB_BATTERY_MV_MAX);
+}
+
+int db_settings_set_battery_min_mv(int32_t value)
+{
+  return set_in_range_i32(&g_battery_settings.min_mv, value,
+                          DB_BATTERY_MV_MIN, DB_BATTERY_MV_MAX);
+}
+
 void db_settings_freeze(void)
 {
   g_settings_frozen = true;
@@ -722,6 +766,7 @@ void db_settings_reset_to_defaults(void)
   static struct db_completion_settings_s  cd0, ch0;
   static struct db_ff_axis_gains_s        ffd0, ffh0;
   static struct db_ff_motor_friction_s    ffm0;
+  static struct db_battery_settings_s     bat0;
 
   if (!captured)
     {
@@ -733,6 +778,7 @@ void db_settings_reset_to_defaults(void)
       ffd0     = g_ff_axis_gains_distance;
       ffh0     = g_ff_axis_gains_heading;
       ffm0     = g_ff_motor_friction;
+      bat0     = g_battery_settings;
       captured = true;
     }
   else
@@ -745,5 +791,6 @@ void db_settings_reset_to_defaults(void)
       g_ff_axis_gains_distance = ffd0;
       g_ff_axis_gains_heading  = ffh0;
       g_ff_motor_friction      = ffm0;
+      g_battery_settings       = bat0;
     }
 }

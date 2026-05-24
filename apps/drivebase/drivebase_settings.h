@@ -157,6 +157,24 @@ struct db_ff_state_s
   int8_t  sign_v_held;        /* -1, 0, +1                              */
 };
 
+/* Battery sag correction (Issue #152 Phase 6 Step 6.3).  See Plan D3.
+ *
+ * `nominal_mv` is the voltage at which the compiled PID / FF gains were
+ * tuned (SPIKE 6-cell Li-Ion: 7.2 V nominal).  Higher live vbat → no
+ * correction needed (the math would scale duty DOWN, which is correct
+ * for a constant control plant); lower live vbat → duty boosted by
+ * `nominal_mv / vbat`.  `min_mv` caps the boost so a sub-nominal gauge
+ * reading does not produce explosive overcorrection — at 6.0 V the
+ * factor is 7200/6000 = 1.2× which is the upper bound the controller
+ * sees regardless of how low vbat goes.
+ */
+
+struct db_battery_settings_s
+{
+  int32_t nominal_mv;
+  int32_t min_mv;
+};
+
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
@@ -212,6 +230,14 @@ const struct db_ff_axis_gains_s *db_settings_ff_axis_gains(enum db_axis_e axis);
  */
 
 const struct db_ff_motor_friction_s *db_settings_ff_motor_friction(void);
+
+/* Battery sag correction settings (Issue #152 Phase 6 Step 6.3).  Same
+ * lifetime contract as the other settings accessors — the returned
+ * pointer is cached at db_drivebase_init() and dereferenced read-only
+ * from the RT thread after db_settings_freeze().
+ */
+
+const struct db_battery_settings_s *db_settings_battery(void);
 
 /****************************************************************************
  * Runtime override API (Issue #143)
@@ -275,6 +301,15 @@ int db_settings_set_ff_kA(enum db_axis_e axis, int32_t value);
 int db_settings_set_ff_kS(int32_t value);
 int db_settings_set_ff_v_hyst_enter_mdegps(int32_t value);
 int db_settings_set_ff_v_hyst_exit_mdegps(int32_t value);
+
+/* Battery sag correction setters (Issue #152 Phase 6 Step 6.3).
+ * Bounds are independent per-key (cross-key relation `min < nominal` is
+ * a cfg convention, not a setter invariant — see the FF hysteresis
+ * setter rationale).  Both in millivolts.
+ */
+
+int db_settings_set_battery_nominal_mv(int32_t value);
+int db_settings_set_battery_min_mv(int32_t value);
 
 /* Mark settings immutable.  Subsequent setter calls return -EBUSY.
  * Called by the drivebase daemon between config load and RT-thread start.

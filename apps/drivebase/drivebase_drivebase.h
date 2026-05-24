@@ -166,6 +166,15 @@ struct db_drivebase_s
   const struct db_ff_motor_friction_s *ff_motor;
   struct db_ff_state_s                 ff_state_left;
   struct db_ff_state_s                 ff_state_right;
+
+  /* Phase 6 Step 6.3 (#152): battery sag correction settings.  Same
+   * lifetime contract as ff_motor — fetched once at db_drivebase_init
+   * after the settings module is frozen.  The live vbat reading comes
+   * from db_battery_get_mv() (drivebase_battery.h), updated by the
+   * daemon's 200 ms poll, not stored here.
+   */
+
+  const struct db_battery_settings_s  *battery;
 };
 
 /****************************************************************************

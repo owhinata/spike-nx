@@ -54,6 +54,7 @@
 #include "drivebase_rt.h"
 #include "drivebase_config.h"
 #include "drivebase_settings.h"
+#include "drivebase_battery.h"      /* Phase 6 Step 6.3 sag correction   */
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -315,9 +316,22 @@ static int daemon_task_main(int argc, char *argv[])
 
   db_settings_freeze();
 
+  /* Phase 6 Step 6.3 (#152) — seed the battery atomic with the live
+   * nominal_mv (the cfg may have overridden the compiled default just
+   * above) so the first RT tick reads ×1 correction.  Opening the
+   * battery fd is best-effort: failure leaves the snapshot at the seed
+   * value, which the RT side handles as ×1 (no correction).  Must run
+   * AFTER db_settings_freeze (settings now stable) and BEFORE
+   * db_rt_start (no concurrent reader yet).
+   */
+
+  const struct db_battery_settings_s *bat_cfg = db_settings_battery();
+  db_battery_init(bat_cfg->nominal_mv);
+  db_battery_open();
+
   rc = db_chardev_handler_attach(&d->handler, &d->db, port_l, port_r,
                                  DRIVEBASE_ON_COMPLETION_COAST);
-  if (rc < 0) goto fail_motor;
+  if (rc < 0) goto fail_battery;
   d->handler.configured = true;
   d->handler.wheel_d_um = d->wheel_d_um;
   d->handler.axle_t_um  = d->axle_t_um;
@@ -402,6 +416,7 @@ static int daemon_task_main(int argc, char *argv[])
    * 50 ms to publish status counters and check for stop request.
    */
 
+  uint32_t poll_tick = 0;
   while (atomic_load(&d->running))
     {
       usleep(50000);
@@ -428,6 +443,18 @@ static int daemon_task_main(int argc, char *argv[])
       struct drivebase_jitter_dump_s jdump;
       db_rt_get_jitter(&d->rt, &jdump);
       db_chardev_handler_publish_jitter(&d->handler, &jdump);
+
+      /* Phase 6 Step 6.3 (#152) — battery sag poll at 200 ms cadence
+       * (every 4th idle wake = 5 Hz).  The ioctl runs on the daemon
+       * thread so the RT path never sees mutex-protected upper-half
+       * latency; the EMA (τ ≈ 1.6 s) absorbs single-sample noise; the
+       * RT side reads a single _Atomic int32 with no locks.
+       */
+
+      if ((++poll_tick & 0x3) == 0)
+        {
+          db_battery_poll();   /* failures already log + auto-suppress */
+        }
     }
 
   atomic_store(&d->state, DB_DAEMON_TEARDOWN);
@@ -448,6 +475,7 @@ static int daemon_task_main(int argc, char *argv[])
   drivebase_motor_select_mode(DB_SIDE_LEFT,  0);
   drivebase_motor_select_mode(DB_SIDE_RIGHT, 0);
   if (d->imu_open) db_imu_close(&d->imu);
+  db_battery_close();
   db_chardev_handler_detach(&d->handler);
   drivebase_motor_deinit();
 
@@ -459,6 +487,8 @@ static int daemon_task_main(int argc, char *argv[])
 fail_chardev:
   if (d->imu_open) db_imu_close(&d->imu);
   db_chardev_handler_detach(&d->handler);
+fail_battery:
+  db_battery_close();
 fail_motor:
   drivebase_motor_deinit();
 fail:

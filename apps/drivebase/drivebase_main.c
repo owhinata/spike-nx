@@ -48,6 +48,7 @@
 #include "drivebase_chardev_handler.h"
 #include "drivebase_imu.h"
 #include "drivebase_daemon.h"
+#include "drivebase_battery.h"
 
 #include <pthread.h>
 #include <time.h>
@@ -1537,6 +1538,8 @@ static int do_alg_settings(int argc, FAR char *argv[])
       db_settings_ff_axis_gains(DB_AXIS_HEADING);
   const struct db_ff_motor_friction_s  *ffm =
       db_settings_ff_motor_friction();
+  const struct db_battery_settings_s   *bat =
+      db_settings_battery();
 
   printf("wheel_d=%g mm  axle_t=%g mm\n", wheel_mm, axle_mm);
   printf("dist gains : kp_pos=%ld ki_pos=%ld kd_pos=%ld "
@@ -1579,6 +1582,9 @@ static int do_alg_settings(int argc, FAR char *argv[])
   printf("motor ff   : kS=%ld v_hyst=[%ld,%ld] mdeg/s (per-side, /2 applied)\n",
          (long)ffm->kS, (long)ffm->v_hyst_exit_mdegps,
          (long)ffm->v_hyst_enter_mdegps);
+  printf("battery    : vbat=%ld mV nominal=%ld mV min=%ld mV\n",
+         (long)db_battery_get_mv(),
+         (long)bat->nominal_mv, (long)bat->min_mv);
   return 0;
 }
 

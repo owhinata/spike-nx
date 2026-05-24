@@ -518,6 +518,34 @@ Convention is `enter > exit`, but the setters do not enforce a cross-key invaria
 
 `drivebase _alg settings` prints `motor ff : kS=… v_hyst=[exit,enter]` for the live values.
 
+#### 8.5.3 Battery sag correction (Step 6.3)
+
+SPIKE Prime Hub's 6S Li-Ion pack sags from ~8.3 V (full) to ~6.0 V (empty), giving the same commanded duty up to a 28 % mechanical output spread.  Phase 6 Step 6.3 corrects for this with a per-motor voltage model:
+
+```
+duty_corrected = duty * battery_nominal_mv / max(vbat, battery_min_mv)
+```
+
+- **Application point**: post-compose (after PID + kV + kA + kS + 1st clamp) → battery correction → 2nd clamp ±10000 → `db_servo_apply()`.  The stall observer reads `last_applied_duty` set inside `db_servo_apply`, so it automatically sees the post-correction value — no explicit hook change required for the Plan D3 "stall uses corrected duty" guarantee.
+- **Polling design**:
+  - **Owner**: daemon idle thread (existing 50 ms wake), `(poll_tick & 0x3) == 0` triggers the BATIOC_VOLTAGE ioctl every 4th wake = 200 ms (5 Hz).  RT thread never issues the ioctl.
+  - **Transfer**: a single `_Atomic int32_t vbat_mv`.  Cortex-M4 32-bit aligned loads are HW atomic; `memory_order_relaxed` is sufficient (one scalar, no inter-field consistency).
+  - **EMA**: daemon-local `prev_ema_mv` with `prev = (prev*7 + now)/8` (τ ≈ 1.6 s).  The atomic is store-only, never RMW.
+- **Cold start**: `db_battery_init(nominal_mv)` runs right after `db_settings_freeze()` and before `db_rt_start()`, so the first few RT ticks (before any poll completes) see ×1 correction.
+- **Low-V cap**: `battery_min_mv = 6000` clamps the divisor at 6 V → 1.2× maximum boost.  Protects against gauge under-reads producing explosive correction.
+- **RT-path 32-bit divide**: `duty * nominal_mv` peaks at `10000 * 12000 = 1.2e8` (int32-safe); the `/ vbat` becomes a hardware 32-bit divide (`__aeabi_uidiv` ~12 cycles), not the 64-bit `__aeabi_ldivmod`.
+
+cfg keys (Step 6.3):
+
+| key | default | range | meaning |
+|---|---|---|---|
+| `battery_nominal_mv` | 7200 | [1, 12000] mV | reference voltage (vbat at which gains were tuned) |
+| `battery_min_mv` | 6000 | [1, 12000] mV | divisor floor (default 1.2× cap) |
+
+Convention is `min_mv < nominal_mv` but setters do not cross-validate (cfg load order would otherwise become load-bearing).
+
+`drivebase _alg settings` prints `battery : vbat=… nominal=… min=…` for the live snapshot.
+
 ### 8.6 Runtime config override (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
 At `drivebase start` the daemon reads a text file on the external W25Q256 NOR (LittleFS at `/mnt/flash`) and applies any recognised key=value pairs to PID gains / completion / stall / wheel/axle/tick before launching the RT thread.  This shortens bench-tuning iteration: no rebuild required.
@@ -557,6 +585,8 @@ At `drivebase start` the daemon reads a text file on the external W25Q256 NOR (L
 | | `ff_motor_kS` (0) | int32 | [0, 1000] .01% duty friction, left=right (Step 6.2) |
 | | `ff_v_hyst_enter_mdegps` (5000) | int32 | [0, 100000] hysteresis enter |
 | | `ff_v_hyst_exit_mdegps` (1000) | int32 | [0, 100000] hysteresis exit (convention enter > exit) |
+| Battery | `battery_nominal_mv` (7200) | int32 | [1, 12000] mV — correction reference voltage (Step 6.3) |
+| | `battery_min_mv` (6000) | int32 | [1, 12000] mV — divisor floor (default 1.2× cap, convention min < nominal) |
 | Stall | `stall_speed_mdegps` (30000) | int32 | [0, 1000000] |
 | | `stall_duty_min` (6000) | int32 | [0, 10000] |
 | | `stall_window_ms` (200) | uint32 | [0, 10000] |
@@ -594,7 +624,7 @@ wheel_d_um = 62000
 axle_t_um = 145000
 ```
 
-**Full template**: a fully annotated cfg listing all 37 supported keys (Phase 6 Step 6.1 added 4 linear FF keys; Step 6.2 added 3 per-motor friction keys) at their compiled defaults is checked in at `apps/drivebase/drivebase.cfg.sample`.  Either zmodem it onto the hub or paste its contents into `vi /mnt/flash/drivebase.cfg`.  When iterating, keep only the keys you are tuning and comment out the rest — that keeps `dmesg` informative about what changed.
+**Full template**: a fully annotated cfg listing all 39 supported keys (Phase 6 Step 6.1 added 4 linear FF keys; Step 6.2 added 3 per-motor friction keys; Step 6.3 added 2 battery sag keys) at their compiled defaults is checked in at `apps/drivebase/drivebase.cfg.sample`.  Either zmodem it onto the hub or paste its contents into `vi /mnt/flash/drivebase.cfg`.  When iterating, keep only the keys you are tuning and comment out the rest — that keeps `dmesg` informative about what changed.
 
 ## 9. Linux portability (FUSE)
 
