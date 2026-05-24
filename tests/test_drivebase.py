@@ -206,7 +206,9 @@ def test_drivebase_start_with_tick_arg(p):
     _ensure_stopped(p)
     start = p.sendCommand("drivebase start 56 112 5", timeout=8)
     assert "started" in start, f"start failed: {start!r}"
-    assert "tick=5 ms" in start, (
+    # Issue #143 (b501935) changed the banner from "tick=5 ms" to the
+    # microseconds form, so 5 ms = "tick=5000 us".
+    assert "tick=5000 us" in start, (
         f"missing tick echo in start banner: {start!r}"
     )
     time.sleep(1.0)
