@@ -476,10 +476,10 @@ drive_speed default は wheel_diameter から算出 (`v_max_mdegps`、`accel = v
 
 - **注入点**: `db_pid_update()` 内、saturation clamp の **直前** で `out_unsat += duty_ff`。1 回 clamp で anti-windup の `sat_high/sat_low` flag が FF 込みの output を反映 (FF で rail-pin している間も I が誤って積算しない)
 - **単位スケーリング**: trajectory ref は `mdeg/s` / `mdeg/s²`、gain は `.01% per (deg/s)` / `.01% per (deg/s²)`。RT path に `__aeabi_ldivmod` を **構造的に出さない** ため `/1000` を int32 領域で先に実行 → 乗算。kV/kA は ±1000 に bound されており、`kV × v_dps` max 1.11e6 / `kA × a_dps2` max 8e5 で int32 内安全
-- **per-motor kS friction**: Step 6.2 で別途追加。L/R compose は線形 (kV/kA は per-axis 等価) だが `sign(v) × kS` は非線形 (pivot で aggregate per-axis vs per-motor が一致しない) ため compose 後に分離。Step 6.1 では kV/kA のみ実装
+- **per-motor kS friction**: Step 6.2 で追加 (下記参照)。L/R compose は線形 (kV/kA は per-axis 等価) だが `sign(v) × kS` は非線形 (pivot で aggregate per-axis vs per-motor が一致しない) ため compose 後に分離
 - **defaults**: kV=0 / kA=0 で behavioural no-op。bench で `ff_dist_kV = 9` を試すと straight 300 brake が settling 4.6 秒 → 1.8 秒、post-target 巻き戻し挙動 (`i_acc` 解放) 消失を確認 (#152 bench)
 
-cfg key:
+cfg key (Step 6.1):
 
 | key | default | 範囲 | 意味 |
 |---|---|---|---|
@@ -488,7 +488,34 @@ cfg key:
 | `ff_head_kV` | 0 | [-1000, +1000] | heading 軸の速度 FF |
 | `ff_head_kA` | 0 | [-1000, +1000] | heading 軸の加速度 FF |
 
-`drivebase _alg settings` で `dist ff : kV=… kA=…` / `hdg ff : …` を表示。
+#### 8.5.2 Per-motor friction FF (Step 6.2)
+
+kS friction 項は **L/R compose 後に per-motor で適用**する。`vL_ref = D - H, vR_ref = D + H` から各輪 `sign(v) × kS / 2` を duty に加算 (Plan D1)。
+
+- **per-motor 必要性**: pivot `vD = vH > 0` のとき aggregate per-axis 分配では `left = kS - kS = 0, right = kS + kS = 2kS` となり片輪に **2 倍補正**が乗ってしまう。per-motor で `sign(vL_ref) / sign(vR_ref)` を独立評価して `left = 0, right = kS` に揃える (Codex Round 1 BLOCKING で plan 反映)
+- **`/2` 減衰**: pybricks `lib/pbio/src/observer.c:250` の `torque_friction / 2 * sign(rate_ref)` と同形。終端 decel で `v_ref` が `enter` を下回るまで held sign が full kS を維持する → done 直前 duty step + overshoot のリスクを抑える
+- **sign hysteresis**: `v_ref` が 0 跨ぎで `sign·kS` が flip → ±2·kS 跳躍 (kS=700 なら ~14% duty step)。state machine:
+
+| 条件 (上から評価) | 新 sign |
+|---|---|
+| `v_ref >=  enter` | +1 (前状態無関係に commit、逆方向追従) |
+| `v_ref <= -enter` | -1 (同上) |
+| `|v_ref| <  exit` | 0 (kS off、FB の I で埋める) |
+| 上記以外 (`exit <= |v_ref| < enter`) | prev (hold) |
+
+defaults: `enter = 5000 mdegps (5 dps)`、`exit = 1000 mdegps (1 dps)`。`db_ff_state_s::sign_v_held` を per-side で `db_drivebase_s::ff_state_left/right` に保持、`drivebase_drivebase.c` の compose 直前で更新。
+
+cfg key (Step 6.2):
+
+| key | default | 範囲 | 意味 |
+|---|---|---|---|
+| `ff_motor_kS` | 0 | [0, 1000] | .01% duty 共通 (left=right、`/2` 適用) |
+| `ff_v_hyst_enter_mdegps` | 5000 | [0, 100000] mdeg/s | hysteresis 強閾値 |
+| `ff_v_hyst_exit_mdegps` | 1000 | [0, 100000] mdeg/s | hysteresis 弱閾値 |
+
+慣例 `enter > exit` を保つが、setter は cross-key 検証しない (cfg load 順依存を回避)。hysteresis 関数自体は任意順序で deterministic に動作。
+
+`drivebase _alg settings` で `motor ff : kS=… v_hyst=[exit,enter]` を表示。
 
 ### 8.6 ランタイム設定上書き (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
@@ -526,6 +553,9 @@ cfg key:
 | | `ff_dist_kA` (0) | int32 | [-1000, +1000] .01% per (deg/s²)、distance 軸 |
 | | `ff_head_kV` (0) | int32 | [-1000, +1000] .01% per (deg/s)、heading 軸 |
 | | `ff_head_kA` (0) | int32 | [-1000, +1000] .01% per (deg/s²)、heading 軸 |
+| | `ff_motor_kS` (0) | int32 | [0, 1000] .01% duty 共通 friction、L/R 共通 (Step 6.2) |
+| | `ff_v_hyst_enter_mdegps` (5000) | int32 | [0, 100000] hysteresis enter |
+| | `ff_v_hyst_exit_mdegps` (1000) | int32 | [0, 100000] hysteresis exit (慣例 enter > exit) |
 | Stall | `stall_speed_mdegps` (30000) | int32 | [0, 1000000] |
 | | `stall_duty_min` (6000) | int32 | [0, 10000] |
 | | `stall_window_ms` (200) | uint32 | [0, 10000] |
@@ -563,7 +593,7 @@ wheel_d_um = 62000
 axle_t_um = 145000
 ```
 
-**完全テンプレート**: 全 34 key (Phase 6 Step 6.1 で FF 4 key 追加) + コメントを `apps/drivebase/drivebase.cfg.sample` にコミットしてある。リポジトリから zmodem 等で `/mnt/flash/` にコピーするか、内容を `vi` で貼り付ければ「全 key を明示指定」の状態から start できる。tuning 中は使う key だけ残して他を `#` でコメントアウトする運用が見通しが良い。
+**完全テンプレート**: 全 37 key (Phase 6 Step 6.1 で FF 4 key、Step 6.2 で per-motor friction 3 key 追加) + コメントを `apps/drivebase/drivebase.cfg.sample` にコミットしてある。リポジトリから zmodem 等で `/mnt/flash/` にコピーするか、内容を `vi` で貼り付ければ「全 key を明示指定」の状態から start できる。tuning 中は使う key だけ残して他を `#` でコメントアウトする運用が見通しが良い。
 
 ## 9. Linux への移植性 (FUSE)
 

@@ -477,10 +477,10 @@ A linear feed-forward `duty_ff = kV·v_ref + kA·a_ref` is summed into the aggre
 
 - **Injection point**: inside `db_pid_update()`, BEFORE the saturation clamp: `out_unsat += duty_ff`.  A single clamp makes the anti-windup `sat_high/sat_low` flags reflect the FF-inclusive output, so I never accumulates while FF alone is pinning the rail.
 - **Unit scaling**: trajectory ref is `mdeg/s` / `mdeg/s²`, gains are `.01% per (deg/s)` / `.01% per (deg/s²)`.  To structurally keep `__aeabi_ldivmod` out of the RT path, the `/1000` conversion runs in int32 BEFORE the multiplication.  With kV/kA bounded to ±1000, `kV × v_dps` peaks at 1.11e6 and `kA × a_dps2` at 8e5 — comfortably inside int32.
-- **Per-motor kS friction**: added in Step 6.2 separately.  L/R compose is linear for kV/kA (per-axis is equivalent to per-motor), but `sign(v) × kS` is non-linear (pivot makes per-axis and per-motor disagree), so kS must apply after the compose.  Step 6.1 ships kV/kA only.
+- **Per-motor kS friction**: added in Step 6.2 (see below).  L/R compose is linear for kV/kA (per-axis is equivalent to per-motor), but `sign(v) × kS` is non-linear (pivot makes per-axis and per-motor disagree), so kS must apply after the compose.
 - **Defaults**: kV=0 / kA=0 = behavioural no-op.  Bench with `ff_dist_kV = 9` reduced `straight 300 brake` settling from 4.6 s to 1.8 s and eliminated the post-target backward swing (anti-windup `i_acc` release artefact) — see #152 bench notes.
 
-cfg keys:
+cfg keys (Step 6.1):
 
 | key | default | range | meaning |
 |---|---|---|---|
@@ -489,7 +489,34 @@ cfg keys:
 | `ff_head_kV` | 0 | [-1000, +1000] | heading-axis velocity FF |
 | `ff_head_kA` | 0 | [-1000, +1000] | heading-axis acceleration FF |
 
-`drivebase _alg settings` prints `dist ff : kV=… kA=…` and `hdg ff : …` for the live values.
+#### 8.5.2 Per-motor friction FF (Step 6.2)
+
+The kS friction term applies **per-motor after the L/R compose**.  From the per-axis ref-velocity exports (Step 6.1) we form `vL_ref = D - H` and `vR_ref = D + H`, then add `sign(v) × kS / 2` to each side before the per-side clamp (Plan D1).
+
+- **Why per-motor**: on a pivot `vD = vH > 0`, per-axis distribution would yield `left = kS - kS = 0`, `right = kS + kS = 2 × kS` — double the intended correction on one wheel.  Per-motor evaluation of `sign(vL_ref) / sign(vR_ref)` gives the correct `left = 0, right = kS` instead (Codex Round 1 BLOCKING, captured in the plan).
+- **`/2` attenuation**: mirrors pybricks `lib/pbio/src/observer.c:250` (`torque_friction / 2 * sign(rate_ref)`).  During final decel, `v_ref` may stay above the hysteresis `enter` threshold for a while; the half-strength kS keeps the resulting duty step small enough that anti-windup behaves and the move does not overshoot.
+- **Sign hysteresis**: a naive `sign(v_ref) × kS` flips by `±2 × kS` (~14% duty for `kS=700`) whenever `v_ref` crosses 0.  Hysteresis state machine:
+
+| condition (top-down) | new sign |
+|---|---|
+| `v_ref >=  enter` | +1 (commits, overrides held — reverse-direction follow-through) |
+| `v_ref <= -enter` | -1 (same) |
+| `|v_ref| <  exit` | 0 (kS off, FB's I fills in if needed) |
+| else (`exit <= |v_ref| < enter`) | prev (hold) |
+
+Defaults: `enter = 5000 mdeg/s (5 dps)`, `exit = 1000 mdeg/s (1 dps)`.  `db_ff_state_s::sign_v_held` lives per-side on `db_drivebase_s::ff_state_left/right`; `drivebase_drivebase.c`'s compose path updates it each tick.
+
+cfg keys (Step 6.2):
+
+| key | default | range | meaning |
+|---|---|---|---|
+| `ff_motor_kS` | 0 | [0, 1000] | .01% duty friction (left = right common, `/2` applied) |
+| `ff_v_hyst_enter_mdegps` | 5000 | [0, 100000] | hysteresis enter (mdeg/s) |
+| `ff_v_hyst_exit_mdegps` | 1000 | [0, 100000] | hysteresis exit (mdeg/s) |
+
+Convention is `enter > exit`, but the setters do not enforce a cross-key invariant (that would make cfg load order load-bearing).  The hysteresis function tolerates any ordering deterministically.
+
+`drivebase _alg settings` prints `motor ff : kS=… v_hyst=[exit,enter]` for the live values.
 
 ### 8.6 Runtime config override (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
@@ -527,6 +554,9 @@ At `drivebase start` the daemon reads a text file on the external W25Q256 NOR (L
 | | `ff_dist_kA` (0) | int32 | [-1000, +1000] .01% per (deg/s²), distance axis |
 | | `ff_head_kV` (0) | int32 | [-1000, +1000] .01% per (deg/s), heading axis |
 | | `ff_head_kA` (0) | int32 | [-1000, +1000] .01% per (deg/s²), heading axis |
+| | `ff_motor_kS` (0) | int32 | [0, 1000] .01% duty friction, left=right (Step 6.2) |
+| | `ff_v_hyst_enter_mdegps` (5000) | int32 | [0, 100000] hysteresis enter |
+| | `ff_v_hyst_exit_mdegps` (1000) | int32 | [0, 100000] hysteresis exit (convention enter > exit) |
 | Stall | `stall_speed_mdegps` (30000) | int32 | [0, 1000000] |
 | | `stall_duty_min` (6000) | int32 | [0, 10000] |
 | | `stall_window_ms` (200) | uint32 | [0, 10000] |
@@ -564,7 +594,7 @@ wheel_d_um = 62000
 axle_t_um = 145000
 ```
 
-**Full template**: a fully annotated cfg listing all 34 supported keys (Phase 6 Step 6.1 added 4 FF keys) at their compiled defaults is checked in at `apps/drivebase/drivebase.cfg.sample`.  Either zmodem it onto the hub or paste its contents into `vi /mnt/flash/drivebase.cfg`.  When iterating, keep only the keys you are tuning and comment out the rest — that keeps `dmesg` informative about what changed.
+**Full template**: a fully annotated cfg listing all 37 supported keys (Phase 6 Step 6.1 added 4 linear FF keys; Step 6.2 added 3 per-motor friction keys) at their compiled defaults is checked in at `apps/drivebase/drivebase.cfg.sample`.  Either zmodem it onto the hub or paste its contents into `vi /mnt/flash/drivebase.cfg`.  When iterating, keep only the keys you are tuning and comment out the rest — that keeps `dmesg` informative about what changed.
 
 ## 9. Linux portability (FUSE)
 

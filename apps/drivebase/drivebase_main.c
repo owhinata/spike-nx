@@ -1535,6 +1535,8 @@ static int do_alg_settings(int argc, FAR char *argv[])
       db_settings_ff_axis_gains(DB_AXIS_DISTANCE);
   const struct db_ff_axis_gains_s      *ffh =
       db_settings_ff_axis_gains(DB_AXIS_HEADING);
+  const struct db_ff_motor_friction_s  *ffm =
+      db_settings_ff_motor_friction();
 
   printf("wheel_d=%g mm  axle_t=%g mm\n", wheel_mm, axle_mm);
   printf("dist gains : kp_pos=%ld ki_pos=%ld kd_pos=%ld "
@@ -1574,6 +1576,9 @@ static int do_alg_settings(int argc, FAR char *argv[])
          (long)ffd->kV, (long)ffd->kA);
   printf("hdg  ff    : kV=%ld kA=%ld (.01%% per deg/s, deg/s^2)\n",
          (long)ffh->kV, (long)ffh->kA);
+  printf("motor ff   : kS=%ld v_hyst=[%ld,%ld] mdeg/s (per-side, /2 applied)\n",
+         (long)ffm->kS, (long)ffm->v_hyst_exit_mdegps,
+         (long)ffm->v_hyst_enter_mdegps);
   return 0;
 }
 

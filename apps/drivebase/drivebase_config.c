@@ -157,6 +157,34 @@ DEF_PID_SETTER_I32(ff_dist_kA, DB_AXIS_DISTANCE, db_settings_set_ff_kA)
 DEF_PID_SETTER_I32(ff_head_kV, DB_AXIS_HEADING,  db_settings_set_ff_kV)
 DEF_PID_SETTER_I32(ff_head_kA, DB_AXIS_HEADING,  db_settings_set_ff_kA)
 
+/* Per-motor friction FF (Step 6.2).  Common to both motors, no axis
+ * argument — the setter signature stays the simple one-value form.
+ */
+
+static int set_ff_motor_kS(const char *value)
+{
+  int32_t v;
+  int rc = parse_i32(value, &v);
+  if (rc < 0) return rc;
+  return db_settings_set_ff_kS(v);
+}
+
+static int set_ff_v_hyst_enter_mdegps(const char *value)
+{
+  int32_t v;
+  int rc = parse_i32(value, &v);
+  if (rc < 0) return rc;
+  return db_settings_set_ff_v_hyst_enter_mdegps(v);
+}
+
+static int set_ff_v_hyst_exit_mdegps(const char *value)
+{
+  int32_t v;
+  int rc = parse_i32(value, &v);
+  if (rc < 0) return rc;
+  return db_settings_set_ff_v_hyst_exit_mdegps(v);
+}
+
 static int set_stall_speed_mdegps(const char *value)
 {
   int32_t v;
@@ -263,6 +291,9 @@ static const struct db_config_entry_s g_config_table[] =
   { "ff_dist_kA",                     set_ff_dist_kA },
   { "ff_head_kV",                     set_ff_head_kV },
   { "ff_head_kA",                     set_ff_head_kA },
+  { "ff_motor_kS",                    set_ff_motor_kS },
+  { "ff_v_hyst_enter_mdegps",         set_ff_v_hyst_enter_mdegps },
+  { "ff_v_hyst_exit_mdegps",          set_ff_v_hyst_exit_mdegps },
 
   { "stall_speed_mdegps",             set_stall_speed_mdegps },
   { "stall_duty_min",                 set_stall_duty_min },

@@ -48,6 +48,7 @@
 #include "drivebase_internal.h"
 #include "drivebase_servo.h"
 #include "drivebase_aggregate.h"
+#include "drivebase_settings.h"  /* db_ff_motor_friction_s + db_ff_state_s */
 
 #ifdef __cplusplus
 extern "C"
@@ -153,6 +154,18 @@ struct db_drivebase_s
                                 /* from raw IMU heading to obtain the      */
                                 /* user-visible / PID-state value          */
   bool               gyro_origin_valid;
+
+  /* Phase 6 Step 6.2 (#152): per-motor friction FF.  `ff_motor` points
+   * at the live db_settings instance, fetched once at db_drivebase_init
+   * (settings is frozen before the RT thread launches).  Per-side
+   * `ff_state_left/right.sign_v_held` tracks the hysteresised sign of
+   * v_ref so that small oscillation around 0 does not chatter the
+   * kS contribution.  See Plan D1 + D4 + D6.
+   */
+
+  const struct db_ff_motor_friction_s *ff_motor;
+  struct db_ff_state_s                 ff_state_left;
+  struct db_ff_state_s                 ff_state_right;
 };
 
 /****************************************************************************

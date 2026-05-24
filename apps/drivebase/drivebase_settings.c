@@ -216,6 +216,25 @@ static struct db_ff_axis_gains_s g_ff_axis_gains_heading =
   .kA = 0,
 };
 
+/* Per-motor friction FF (Issue #127 Phase 6 Step 6.2, Plan D1+D6).
+ *
+ * Default kS=0 keeps this Step a behavioural no-op; Step 6.5 seeds it
+ * from `_sysid ramp-ks` results (Plan target ~700, applied as
+ * sign·kS/2 so effective per-side is ~350 at full breakaway).  The
+ * hysteresis enter/exit defaults are 5 dps / 1 dps (Plan D4): tight
+ * enough that any non-trivial trajectory is well past the enter
+ * threshold the moment it leaves the start segment, and wide enough
+ * that v_ref oscillation around 0 (the only failure mode the
+ * hysteresis exists for) never flips the held sign.
+ */
+
+static struct db_ff_motor_friction_s g_ff_motor_friction =
+{
+  .kS                       = 0,
+  .v_hyst_enter_mdegps      = 5000,
+  .v_hyst_exit_mdegps       = 1000,
+};
+
 /* Bounds used by the per-key setters.  Kept here so config_load and the
  * defaults stay in sync.  out_max is bounded by the duty rail (10000 =
  * 100%) — heading axis defaults to 8000 but config may push it back up
@@ -241,6 +260,14 @@ static struct db_ff_axis_gains_s g_ff_axis_gains_heading =
  */
 
 #define DB_FF_GAIN_LIMIT              1000
+
+/* Hysteresis threshold limit (Issue #127 Phase 6 Step 6.2, Plan D4).
+ * 100 deg/s is well past the SPIKE Medium Motor's stall speed and lets
+ * even a paranoid configurator pick a wide deadband if needed; the
+ * compiled defaults sit at 5 dps (enter) / 1 dps (exit).
+ */
+
+#define DB_FF_HYST_LIMIT_MDEGPS     100000
 
 /****************************************************************************
  * Distance / heading trajectory limits
@@ -306,6 +333,11 @@ db_settings_ff_axis_gains(enum db_axis_e axis)
 {
   return (axis == DB_AXIS_HEADING) ? &g_ff_axis_gains_heading
                                    : &g_ff_axis_gains_distance;
+}
+
+const struct db_ff_motor_friction_s *db_settings_ff_motor_friction(void)
+{
+  return &g_ff_motor_friction;
 }
 
 const struct db_servo_gains_s *db_settings_servo_gains(void)
@@ -620,6 +652,37 @@ int db_settings_set_ff_kA(enum db_axis_e axis, int32_t value)
                           -DB_FF_GAIN_LIMIT, DB_FF_GAIN_LIMIT);
 }
 
+int db_settings_set_ff_kS(int32_t value)
+{
+  /* kS is friction torque magnitude; the sign is applied at use time
+   * via the per-side hysteresis state, so the gain itself must be
+   * non-negative.  Upper bound matches DB_FF_GAIN_LIMIT for symmetry.
+   */
+  return set_in_range_i32(&g_ff_motor_friction.kS, value,
+                          0, DB_FF_GAIN_LIMIT);
+}
+
+int db_settings_set_ff_v_hyst_enter_mdegps(int32_t value)
+{
+  /* The cross-key relation `enter > exit` is documented in the cfg
+   * template, not enforced at setter time — pairs of writes through
+   * db_config_load() can arrive in either order, and the hysteresis
+   * function (ff_sign_with_hysteresis in drivebase_drivebase.c)
+   * tolerates `enter <= exit` deterministically (it just collapses or
+   * inverts the held-zone semantics, with no risk of getting stuck).
+   * Enforcing the cross-key invariant per-setter would make load
+   * order load-bearing, which is fragile.
+   */
+  return set_in_range_i32(&g_ff_motor_friction.v_hyst_enter_mdegps, value,
+                          0, DB_FF_HYST_LIMIT_MDEGPS);
+}
+
+int db_settings_set_ff_v_hyst_exit_mdegps(int32_t value)
+{
+  return set_in_range_i32(&g_ff_motor_friction.v_hyst_exit_mdegps, value,
+                          0, DB_FF_HYST_LIMIT_MDEGPS);
+}
+
 void db_settings_freeze(void)
 {
   g_settings_frozen = true;
@@ -658,6 +721,7 @@ void db_settings_reset_to_defaults(void)
   static struct db_stall_settings_s       s0;
   static struct db_completion_settings_s  cd0, ch0;
   static struct db_ff_axis_gains_s        ffd0, ffh0;
+  static struct db_ff_motor_friction_s    ffm0;
 
   if (!captured)
     {
@@ -668,6 +732,7 @@ void db_settings_reset_to_defaults(void)
       ch0      = g_completion_heading;
       ffd0     = g_ff_axis_gains_distance;
       ffh0     = g_ff_axis_gains_heading;
+      ffm0     = g_ff_motor_friction;
       captured = true;
     }
   else
@@ -679,5 +744,6 @@ void db_settings_reset_to_defaults(void)
       g_completion_heading     = ch0;
       g_ff_axis_gains_distance = ffd0;
       g_ff_axis_gains_heading  = ffh0;
+      g_ff_motor_friction      = ffm0;
     }
 }

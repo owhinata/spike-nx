@@ -10,18 +10,21 @@
 #
 # This template lists every supported key set to its compiled default,
 # so loading it as-is is equivalent to not having a cfg file (`dmesg`
-# will report `loaded 34 config key(s) ... (0 rejected)`).  Copy this
+# will report `loaded 37 config key(s) ... (0 rejected)`).  Copy this
 # file to /mnt/flash/drivebase.cfg on the hub and edit the values you
 # want to override; comment out (or delete) everything else.
 #
-# Phase 3b (#148) added `use_gyro_plus1` as an OPTIONAL 35th key; when
+# Phase 3b (#148) added `use_gyro_plus1` as an OPTIONAL 38th key; when
 # absent it leaves the daemon at its DRIVEBASE_USE_GYRO_NONE default
-# (so the "loaded 34" line above stays accurate for the unedited
+# (so the "loaded 37" line above stays accurate for the unedited
 # template).  See the section near the bottom for the encoding.
 #
-# Phase 6 Step 6.1 (#127) added 4 feed-forward gains (ff_dist_kV,
-# ff_dist_kA, ff_head_kV, ff_head_kA).  All default to 0 so the template
-# is still a no-op load.  See the FF section near the bottom.
+# Phase 6 (#152) feed-forward keys:
+#   Step 6.1 added 4 linear FF gains (ff_{dist,head}_{kV,kA}).
+#   Step 6.2 added 3 per-motor friction keys (ff_motor_kS,
+#            ff_v_hyst_enter_mdegps, ff_v_hyst_exit_mdegps).
+# All default to 0/seed-only so the template is still a no-op load.
+# See the FF section near the bottom.
 
 # ----------------------------------------------------------------------
 # PID gains — distance axis (state_distance = (sL + sR) / 2 motor mdeg)
@@ -124,6 +127,32 @@ ff_dist_kV = 0
 ff_dist_kA = 0
 ff_head_kV = 0
 ff_head_kA = 0
+
+# ----------------------------------------------------------------------
+# Per-motor friction FF (Issue #152 Phase 6 Step 6.2)
+#
+# kS is non-linear in the L/R compose (sign(D)±sign(H) differs from
+# sign(D±H)), so it applies per-motor AFTER the compose, not per-axis
+# like kV/kA.  Gain is common across left and right (same SPIKE Medium
+# Motor on both sides).  Applied as `sign(vL_or_R_ref) * kS / 2`
+# (pybricks-style /2 attenuation, see observer.c:250) so a seed of
+# kS=700 yields ~3.5% rail-step per side at breakaway.
+#
+# A sign hysteresis state machine suppresses chatter when v_ref
+# oscillates near 0:
+#   |v_ref| >= enter             -> commit sign (overrides held)
+#   |v_ref| <  exit              -> kS off (held sign cleared to 0)
+#   exit <= |v_ref| < enter      -> hold previous sign
+#
+# Conventionally enter > exit so the hysteresis zone is non-empty; the
+# setter accepts any ordering and the hysteresis function tolerates
+# degenerate orderings deterministically.  Bounds: kS in [0, 1000];
+# enter/exit in [0, 100000] mdeg/s.
+# ----------------------------------------------------------------------
+
+ff_motor_kS              = 0
+ff_v_hyst_enter_mdegps   = 5000
+ff_v_hyst_exit_mdegps    = 1000
 
 # ----------------------------------------------------------------------
 # Phase 3b (#148) boot-time gyro mode

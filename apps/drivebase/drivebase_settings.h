@@ -121,6 +121,42 @@ struct db_ff_axis_gains_s
   int32_t kA;                 /* .01% duty per (deg/s^2)                 */
 };
 
+/* Per-motor friction FF (Issue #127 Phase 6 Step 6.2).  Plan D1 + D6:
+ * `sign(v) * kS` is non-linear in the L/R compose, so it must apply
+ * per-motor AFTER the compose (`vL_ref = D - H`, `vR_ref = D + H`) and
+ * not per-axis like kV/kA.  Gain itself is common (one kS), since the
+ * SPIKE Medium Motor is identical on left and right.  Plan D4 prescribes
+ * a sign-with-hysteresis state machine to suppress kS chatter around
+ * v_ref=0; pybricks-style /2 attenuation (lib/pbio/src/observer.c:250)
+ * keeps the rail-step on entry from looking like a kS-only saturation.
+ *
+ * Defaults are 0 (behavioural no-op).  Step 6.4 SysId measures kS from
+ * the duty floor at which both wheels start to move; Step 6.5 seeds it.
+ * Convention is `v_hyst_enter_mdegps > v_hyst_exit_mdegps > 0`, but the
+ * setters do not enforce a cross-key invariant — pairs of writes via
+ * db_config_load() can arrive in either order, and the hysteresis
+ * function in drivebase_drivebase.c tolerates degenerate orderings
+ * deterministically.  See db_settings_set_ff_v_hyst_enter_mdegps for
+ * the rationale.
+ */
+
+struct db_ff_motor_friction_s
+{
+  int32_t kS;                       /* .01% duty, left = right common  */
+  int32_t v_hyst_enter_mdegps;      /* enter: commit sign regardless   */
+  int32_t v_hyst_exit_mdegps;       /* exit:  fall back to 0           */
+};
+
+/* Per-side hysteresis state for sign(v_ref).  Only sign history, no
+ * gain value — the gain lives in db_ff_motor_friction_s above.  Plan
+ * D6: 2 instances on db_drivebase_s, one per motor side.
+ */
+
+struct db_ff_state_s
+{
+  int8_t  sign_v_held;        /* -1, 0, +1                              */
+};
+
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
@@ -167,6 +203,15 @@ const struct db_completion_settings_s *db_settings_completion(void);
  */
 
 const struct db_ff_axis_gains_s *db_settings_ff_axis_gains(enum db_axis_e axis);
+
+/* Per-motor friction FF (Issue #127 Phase 6 Step 6.2).  Same lifetime
+ * contract as db_settings_ff_axis_gains() — the returned pointer is
+ * cached at db_drivebase_init() time and dereferenced read-only from
+ * the RT thread after db_settings_freeze().  Single common instance
+ * (left == right == same physical motor model).
+ */
+
+const struct db_ff_motor_friction_s *db_settings_ff_motor_friction(void);
 
 /****************************************************************************
  * Runtime override API (Issue #143)
@@ -215,6 +260,21 @@ int db_settings_set_stall_window_ms(uint32_t value);
 
 int db_settings_set_ff_kV(enum db_axis_e axis, int32_t value);
 int db_settings_set_ff_kA(enum db_axis_e axis, int32_t value);
+
+/* Per-motor friction FF setters (Issue #127 Phase 6 Step 6.2).  kS is
+ * bounded to [0, DB_FF_GAIN_LIMIT] (Plan D4 — kS is friction torque
+ * sign-multiplied at apply time, so the gain itself is non-negative).
+ * The hysteresis enter / exit thresholds are each bounded independently
+ * to [0, DB_FF_HYST_LIMIT_MDEGPS]; the cross-key relation
+ * `v_hyst_enter > v_hyst_exit` is a convention enforced by the cfg
+ * template, NOT by the setter (which would make cfg load order
+ * load-bearing).  See drivebase_drivebase.c::ff_sign_with_hysteresis
+ * for the tolerance to degenerate orderings.
+ */
+
+int db_settings_set_ff_kS(int32_t value);
+int db_settings_set_ff_v_hyst_enter_mdegps(int32_t value);
+int db_settings_set_ff_v_hyst_exit_mdegps(int32_t value);
 
 /* Mark settings immutable.  Subsequent setter calls return -EBUSY.
  * Called by the drivebase daemon between config load and RT-thread start.

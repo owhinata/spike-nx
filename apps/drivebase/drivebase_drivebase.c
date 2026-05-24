@@ -122,6 +122,37 @@ static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
   return v;
 }
 
+/* Phase 6 Step 6.2 (#152) per-motor friction FF sign hysteresis.
+ *
+ * Plan D4 spec — evaluate top-down:
+ *   |v_ref| >=  enter           → +1 (commit, ignore prev state)
+ *   |v_ref| <= -enter           → -1
+ *   |v_ref|  <  exit            →  0 (kS contribution off, safe zone)
+ *   else (exit <= |v_ref| < enter) → prev (hold)
+ *
+ * Strong signals (`|v_ref| >= enter`) override the held sign so a
+ * direction reversal cannot get stuck.  Centre deadband (`|v_ref| <
+ * exit`) zeros out kS so v_ref oscillating around 0 does not chatter
+ * the friction term.  The hysteresis zone holds the previous sign so
+ * a brief dip below `enter` (e.g. trapezoidal cruise modulation) does
+ * not drop kS to 0 and then re-add the rail step on the next tick.
+ *
+ * The function is tolerant of arbitrary `enter`/`exit` orderings (the
+ * setter does not enforce `enter > exit` — see drivebase_settings.c
+ * for the cfg load-order rationale).  Degenerate orderings collapse
+ * the hysteresis zone but never deadlock.
+ */
+
+static int8_t ff_sign_with_hysteresis(int32_t v_ref_mdegps, int8_t prev,
+                                      int32_t enter, int32_t exit)
+{
+  if (v_ref_mdegps >=  enter) return +1;
+  if (v_ref_mdegps <= -enter) return -1;
+  int32_t mag = v_ref_mdegps < 0 ? -v_ref_mdegps : v_ref_mdegps;
+  if (mag < exit) return 0;
+  return prev;
+}
+
 /****************************************************************************
  * Public Functions — lifecycle
  ****************************************************************************/
@@ -153,6 +184,14 @@ int db_drivebase_init(struct db_drivebase_s *db,
                             DB_AXIS_DISTANCE, tick_ms);
   db_aggregate_control_init(&db->control[DB_AXIS_HEADING],
                             DB_AXIS_HEADING,  tick_ms);
+
+  /* Phase 6 Step 6.2 (#152): cache the per-motor friction FF pointer
+   * for the RT thread.  Settings are frozen before the RT thread
+   * starts so the dereference is single-writer / many-reader.  The
+   * memset above already zeroed ff_state_left/right.sign_v_held.
+   */
+
+  db->ff_motor = db_settings_ff_motor_friction();
   return 0;
 }
 
@@ -983,11 +1022,46 @@ int db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us)
     {
       /* 6. Compose per-side duty (spike-nx convention: state_heading
        *    = (sR - sL) / 2, so heading-positive → R faster → CCW yaw).
+       *
+       * Phase 6 Step 6.2 (#152) — per-motor friction FF (Plan D1+D4):
+       * kV/kA already lives inside the aggregate PID output via the
+       * duty_ff plumbing (Step 6.1).  kS is non-linear in the compose
+       * (`sign(D)±sign(H)` differs from `sign(D±H)`, e.g. a pivot
+       * `vD=vH>0` makes per-axis kS apply 2·kS to one wheel and 0 to
+       * the other, vs. the correct kS to each), so kS must apply
+       * per-motor AFTER the compose.  Compute `vL_ref = D - H` and
+       * `vR_ref = D + H` from the per-axis ref_v exports (added in
+       * Step 6.1), drive the hysteresis state machine independently
+       * per side, then add `sign·kS/2` before the per-side clamp.
+       *
+       * The /2 attenuation mirrors pybricks (lib/pbio/src/observer.c
+       * L250: `torque_friction / 2 * sign(rate_ref)`) and keeps the
+       * entry rail-step small enough that anti-windup behaves and
+       * final-approach decel does not overshoot the target.
        */
 
-      int32_t left_duty  = clamp_i32(out_d.duty - out_h.duty,
+      int32_t vL_ref_mdegps = out_d.ref_v_mdegps - out_h.ref_v_mdegps;
+      int32_t vR_ref_mdegps = out_d.ref_v_mdegps + out_h.ref_v_mdegps;
+
+      int32_t enter = db->ff_motor->v_hyst_enter_mdegps;
+      int32_t exit  = db->ff_motor->v_hyst_exit_mdegps;
+
+      int8_t signL = ff_sign_with_hysteresis(vL_ref_mdegps,
+                                             db->ff_state_left.sign_v_held,
+                                             enter, exit);
+      int8_t signR = ff_sign_with_hysteresis(vR_ref_mdegps,
+                                             db->ff_state_right.sign_v_held,
+                                             enter, exit);
+      db->ff_state_left.sign_v_held  = signL;
+      db->ff_state_right.sign_v_held = signR;
+
+      int32_t kS_half = db->ff_motor->kS / 2;   /* pybricks /2 attenuation */
+      int32_t kS_L    = (int32_t)signL * kS_half;
+      int32_t kS_R    = (int32_t)signR * kS_half;
+
+      int32_t left_duty  = clamp_i32(out_d.duty - out_h.duty + kS_L,
                                      -10000, 10000);
-      int32_t right_duty = clamp_i32(out_d.duty + out_h.duty,
+      int32_t right_duty = clamp_i32(out_d.duty + out_h.duty + kS_R,
                                      -10000, 10000);
 
       db_servo_apply(&db->servo[DB_SIDE_LEFT],  left_duty,
