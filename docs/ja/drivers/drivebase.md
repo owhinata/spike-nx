@@ -481,7 +481,12 @@ drive_speed default は wheel_diameter から算出 (`v_max_mdegps`、`accel = v
 - **SysId 実測値 (Step 6.4)**: `ff_dist_kV ≈ 6` (plan seed 9 より低い、real motor 値)、`ff_dist_kA ≈ 1`。詳細は §8.5.4 SysId CLI 参照
 - **kA contribution 計算式**: trajectory peak accel × kA / 1000 [in .01% duty 単位]。distance axis default accel = 1833 deg/s² で `ff_dist_kA=1` だと **18.3% duty 追加 (accel/decel phase only、cruise は 0)**、heading axis default accel = 916 deg/s² で `ff_head_kA=1` だと **9.2% duty 追加**
 - **axis 分離**: `ff_dist_*` は straight/forever/curve の distance 成分のみ、`ff_head_*` は turn/curve の heading 成分のみ
-- **heading 軸 FF は production 不採用**: heading 軸の kV は **一度も bench 検証されていない** (Phase 6.1 は dist kV のみ追加、turn 90 baseline は head kV=0 で問題なく動作)。Step 6.5 で `head kV=6 + head kA=1` を試したが kA との組合せで regression 観測、kV 単独効果は未確認のまま。当面 `ff_head_*` は default 0 維持 (Phase 6.6 で heading 軸専用 bench を独立に実施するなら再評価)
+- **heading 軸 FF は production 不採用 (bench で regression 確定)**: Step 6.5 で turn 90 brake を 3 構成で比較:
+  - head kV=0 + kA=0 (Phase 6.2 baseline): angle +0.04 〜 +1.57° / done 1.35-1.45 s
+  - head kV=6 + kA=1 (Step 6.5 initial): angle -2.3 〜 -2.9° / done 1.97-2.08 s (3 秒内未 done もあり)
+  - **head kV=6 + kA=0**: angle -0.71° / **84° で 730 ms stall** → ki 積上げで再加速 → done 2.29 s
+  - → **kV=6 単独で regression、kA はそれを悪化させるだけ**。Root cause: decel phase で `kV × v_ref` が duty から引かれて motor が trajectory より速く減速、target 手前で stop、静止摩擦に trap、ki で復帰待ち
+- **production cfg**: `ff_head_*` 全部 default 0 維持。heading 軸 FF を入れるには redesign (例: asymmetric kV = accel phase のみ contribute) または heading 軸専用 SysId が必要
 - **Step 6.5 評価結論: kA=0 維持 (production 推奨)**: SysId 実測 kA=1 を **dist+head 両軸に投入すると bench で undershoot regression** を観測:
   - straight 300 brake: target 300 mm / 実達 289-295 mm、**done 立たず** (3 秒 timeout)
   - turn 90 brake: target 90° / 実達 84-87°、done 遅延または立たず

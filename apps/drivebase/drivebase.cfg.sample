@@ -154,13 +154,22 @@ ff_head_kA = 0
 # the bench-validated production value through Phase 6.5.
 # ff_dist_kV = 9
 #
-# Heading-axis FF is NOT recommended for production.  The heading
-# axis has never been bench-confirmed to benefit from kV — Phase
-# 6.2 (head kV=0) drives `turn 90 brake` cleanly to within ±1.6°,
-# and Step 6.5 evaluation added `ff_head_kV=6 + ff_head_kA=1` together
-# with the kA test below; the regression is reported as one combined
-# effect.  Leave head kV/kA at 0 (compiled default) until a dedicated
-# heading-axis bench confirms each gain independently.
+# Heading-axis FF is NOT recommended for production.  Phase 6.2
+# baseline (head kV=0, kA=0) drives `turn 90 brake` cleanly to within
+# ±1.6° in 1.35-1.45 s.  Step 6.5 bench compared three head-FF
+# configurations and confirmed regression in both:
+#   head kV=6 + kA=1: angle -2.3 to -2.9°, done 1.97-2.08 s
+#                     (some runs never reach done in 3 s)
+#   head kV=6 + kA=0: angle -0.7°, stops at 84° for ~730 ms before
+#                     PID's i_acc finally drags it past, done 2.29 s
+# So kV=6 alone is enough to trigger the regression — kA only makes
+# it worse.  The motor over-decelerates during the trajectory's
+# ramp-down: kV * v_ref subtracts duty as v_ref drops, the motor
+# decelerates faster than the trajectory, and once it stops short
+# the static-friction floor (~25%) keeps it pinned.  Production cfg
+# keeps `ff_head_*` at 0 until a redesign (e.g. asymmetric kV that
+# only contributes during accel) or a dedicated heading-axis SysId
+# justifies a different value.
 #
 # kA = 0 is the production recommendation (Step 6.5 bench finding).
 # The SysId measurement gives kA ≈ 1 (.01% per deg/s²), and the

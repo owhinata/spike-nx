@@ -482,7 +482,12 @@ A linear feed-forward `duty_ff = kV·v_ref + kA·a_ref` is summed into the aggre
 - **SysId measurements (Step 6.4)**: `ff_dist_kV ≈ 6` (lower than the plan's seed of 9 — the real motor needs less back-EMF compensation), `ff_dist_kA ≈ 1`.  See §8.5.4 below for the bench data.
 - **kA contribution formula**: `peak_accel × kA / 1000` in .01% duty.  With the default distance-axis trajectory accel = 1833 deg/s², `ff_dist_kA=1` adds **18.3% duty during accel/decel phases** (zero in cruise).  The heading-axis default accel is 916 deg/s² so `ff_head_kA=1` adds **9.2%** instead.
 - **Per-axis routing**: `ff_dist_*` only affects the distance component of straight / drive_forever / curve commands; `ff_head_*` only affects the heading component of turn / curve.
-- **Heading-axis FF stays at 0 in production**: the heading kV has never been bench-validated as beneficial.  Phase 6.1 only added dist kV; turn 90 baseline runs (head kV=0) reached target cleanly.  Step 6.5 tried `head kV=6 + head kA=1` together and saw regression, but cannot separate which gain caused it — kV's independent contribution is unverified, so the safer default is to leave `ff_head_*` at 0 until a dedicated heading-axis SysId / bench run confirms each gain independently.
+- **Heading-axis FF stays at 0 in production (bench-confirmed regression)**: Step 6.5 ran `turn 90 brake` in three configurations:
+  - head kV=0 + kA=0 (Phase 6.2 baseline): angle +0.04 to +1.57°, done in 1.35-1.45 s
+  - head kV=6 + kA=1: angle -2.3 to -2.9°, done in 1.97-2.08 s (some runs never `done` within 3 s)
+  - **head kV=6 + kA=0**: angle -0.71°, motor stops at 84° for ~730 ms before PID's i_acc drags it past, done at 2.29 s
+  - kV=6 alone is enough to trigger the regression — kA only worsens it.  Root cause: during the trajectory's ramp-down, `kV × v_ref` subtracts duty from the motor command faster than the motor can decelerate, so the motor lands short of target and the ~25% static-friction floor traps it until PID's ki accumulates enough to break out.
+- **Production**: `ff_head_*` all stay at default 0.  Enabling heading-axis FF needs either an asymmetric-kV redesign (only contribute during accel) or a dedicated heading-axis SysId + bench cycle.
 - **Step 6.5 evaluation — DO NOT enable kA in production**: The SysId-measured `kA=1` looked promising (contribution well above plan OQ1's 2% threshold), but bench on both axes showed regression:
     `straight 300 brake` @ kA=1: dist = 289-295 mm (target 300), `done=0` for the full 3 s observation window.
     `turn 90 brake` @ kA=1: angle = 84-87° (target 90°), `done` late or never.
