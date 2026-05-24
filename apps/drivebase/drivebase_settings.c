@@ -194,6 +194,28 @@ static struct db_servo_gains_s g_pid_gains_heading =
   .out_max       =  8000,
 };
 
+/* Feed-forward gain — per-axis (Issue #127 Phase 6 Step 6.1, Plan D6).
+ *
+ * Defaults are 0 so this Step is a behavioural no-op until cfg overrides
+ * land — the existing PID stack keeps full responsibility for actuation.
+ * Step 6.5 will seed kV from the Issue #127 spec (~9) and kA from the
+ * SysId fit.  Per-motor kS friction is in a separate struct added in
+ * Step 6.2 (it is non-linear in the L/R compose, so cannot share the
+ * per-axis plumbing — Plan D1 Codex BLOCKING).
+ */
+
+static struct db_ff_axis_gains_s g_ff_axis_gains_distance =
+{
+  .kV = 0,
+  .kA = 0,
+};
+
+static struct db_ff_axis_gains_s g_ff_axis_gains_heading =
+{
+  .kV = 0,
+  .kA = 0,
+};
+
 /* Bounds used by the per-key setters.  Kept here so config_load and the
  * defaults stay in sync.  out_max is bounded by the duty rail (10000 =
  * 100%) — heading axis defaults to 8000 but config may push it back up
@@ -208,6 +230,17 @@ static struct db_servo_gains_s g_pid_gains_heading =
 #define DB_SPEED_TOL_LIMIT_MDEGPS  1000000   /* 1000 dps = generous */
 #define DB_DONE_WINDOW_LIMIT_MS      10000
 #define DB_STALL_WINDOW_LIMIT_MS     10000
+
+/* Feed-forward gain limit (Issue #127 Phase 6 Step 6.1, Plan D7).  Both
+ * |kV| and |kA| are capped at 1000 so that the RT-path math
+ *   kV * (v_mdegps / 1000)        max  1000 * 1110 = 1.11e6
+ *   kA * (a_mdegps2 / 1000)       max  1000 *  800 = 8.0e5
+ * stays comfortably inside int32 (1.11e6 + 8.0e5 ~= 2e6 << 2^31).
+ * The v_mdegps / a_mdegps2 ceilings used here are taken from the
+ * compiled-in trajectory limits (SPIKE Medium Motor at 56 mm wheel).
+ */
+
+#define DB_FF_GAIN_LIMIT              1000
 
 /****************************************************************************
  * Distance / heading trajectory limits
@@ -266,6 +299,13 @@ const struct db_servo_gains_s *db_settings_pid_gains(enum db_axis_e axis)
 {
   return (axis == DB_AXIS_HEADING) ? &g_pid_gains_heading
                                    : &g_pid_gains_distance;
+}
+
+const struct db_ff_axis_gains_s *
+db_settings_ff_axis_gains(enum db_axis_e axis)
+{
+  return (axis == DB_AXIS_HEADING) ? &g_ff_axis_gains_heading
+                                   : &g_ff_axis_gains_distance;
 }
 
 const struct db_servo_gains_s *db_settings_servo_gains(void)
@@ -560,6 +600,26 @@ int db_settings_set_stall_window_ms(uint32_t value)
                           DB_STALL_WINDOW_LIMIT_MS);
 }
 
+static struct db_ff_axis_gains_s *ff_axis_mut(enum db_axis_e axis)
+{
+  return (axis == DB_AXIS_HEADING) ? &g_ff_axis_gains_heading
+                                   : &g_ff_axis_gains_distance;
+}
+
+int db_settings_set_ff_kV(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  return set_in_range_i32(&ff_axis_mut(axis)->kV, value,
+                          -DB_FF_GAIN_LIMIT, DB_FF_GAIN_LIMIT);
+}
+
+int db_settings_set_ff_kA(enum db_axis_e axis, int32_t value)
+{
+  if (axis >= DB_AXIS_NUM) return -EINVAL;
+  return set_in_range_i32(&ff_axis_mut(axis)->kA, value,
+                          -DB_FF_GAIN_LIMIT, DB_FF_GAIN_LIMIT);
+}
+
 void db_settings_freeze(void)
 {
   g_settings_frozen = true;
@@ -597,6 +657,7 @@ void db_settings_reset_to_defaults(void)
   static struct db_servo_gains_s          d0, h0;
   static struct db_stall_settings_s       s0;
   static struct db_completion_settings_s  cd0, ch0;
+  static struct db_ff_axis_gains_s        ffd0, ffh0;
 
   if (!captured)
     {
@@ -605,14 +666,18 @@ void db_settings_reset_to_defaults(void)
       s0       = g_stall;
       cd0      = g_completion_distance;
       ch0      = g_completion_heading;
+      ffd0     = g_ff_axis_gains_distance;
+      ffh0     = g_ff_axis_gains_heading;
       captured = true;
     }
   else
     {
-      g_pid_gains_distance  = d0;
-      g_pid_gains_heading   = h0;
-      g_stall               = s0;
-      g_completion_distance = cd0;
-      g_completion_heading  = ch0;
+      g_pid_gains_distance     = d0;
+      g_pid_gains_heading      = h0;
+      g_stall                  = s0;
+      g_completion_distance    = cd0;
+      g_completion_heading     = ch0;
+      g_ff_axis_gains_distance = ffd0;
+      g_ff_axis_gains_heading  = ffh0;
     }
 }

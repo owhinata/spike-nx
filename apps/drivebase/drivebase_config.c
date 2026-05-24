@@ -148,6 +148,15 @@ DEF_COMP_SETTER_I32(comp_head_smart_continue_mdeg, DB_AXIS_HEADING, db_settings_
 DEF_COMP_SETTER_U32(comp_head_done_window_ms,      DB_AXIS_HEADING, db_settings_set_comp_done_window_ms)
 DEF_COMP_SETTER_U32(comp_head_smart_passive_hold_ms, DB_AXIS_HEADING, db_settings_set_comp_smart_passive_hold_ms)
 
+/* Feed-forward gains (Issue #127 Phase 6 Step 6.1).  Reuse the same
+ * (axis, setter) wrapper macro pattern as PID gains.
+ */
+
+DEF_PID_SETTER_I32(ff_dist_kV, DB_AXIS_DISTANCE, db_settings_set_ff_kV)
+DEF_PID_SETTER_I32(ff_dist_kA, DB_AXIS_DISTANCE, db_settings_set_ff_kA)
+DEF_PID_SETTER_I32(ff_head_kV, DB_AXIS_HEADING,  db_settings_set_ff_kV)
+DEF_PID_SETTER_I32(ff_head_kA, DB_AXIS_HEADING,  db_settings_set_ff_kA)
+
 static int set_stall_speed_mdegps(const char *value)
 {
   int32_t v;
@@ -249,6 +258,11 @@ static const struct db_config_entry_s g_config_table[] =
   { "comp_head_smart_continue_mdeg",  set_comp_head_smart_continue_mdeg },
   { "comp_head_done_window_ms",       set_comp_head_done_window_ms },
   { "comp_head_smart_passive_hold_ms", set_comp_head_smart_passive_hold_ms },
+
+  { "ff_dist_kV",                     set_ff_dist_kV },
+  { "ff_dist_kA",                     set_ff_dist_kA },
+  { "ff_head_kV",                     set_ff_head_kV },
+  { "ff_head_kA",                     set_ff_head_kA },
 
   { "stall_speed_mdegps",             set_stall_speed_mdegps },
   { "stall_duty_min",                 set_stall_duty_min },

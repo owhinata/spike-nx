@@ -177,7 +177,16 @@ void db_pid_update(struct db_pid_state_s *st,
     }
   int64_t kpv     = (int64_t)g->kp_speed * speed_err / 1000;
 
-  int64_t out_unsat = p_term + d_term + kpv + (st->i_acc / DB_IACC_SCALE);
+  /* Feed-forward duty (Issue #127 Phase 6 Step 6.1 — Plan D2).  Sum
+   * inside the PID body BEFORE saturation so anti-windup's sat_high /
+   * sat_low flags reflect the full output: otherwise FF that already
+   * pins the rail would let I keep accumulating (false negative on the
+   * "saturated in same direction as error" gate).  pybricks `servo.c:
+   * 103-112` follows the same pattern (torque_ff summed before clamp).
+   */
+
+  int64_t out_unsat = p_term + d_term + kpv + (st->i_acc / DB_IACC_SCALE)
+                      + (int64_t)in->duty_ff;
 
   /* Clamp in int64 first then cast — casting out_unsat to int32 before
    * clamping is implementation-defined when it overflows, and a large

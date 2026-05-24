@@ -10,14 +10,18 @@
 #
 # This template lists every supported key set to its compiled default,
 # so loading it as-is is equivalent to not having a cfg file (`dmesg`
-# will report `loaded 30 config key(s) ... (0 rejected)`).  Copy this
+# will report `loaded 34 config key(s) ... (0 rejected)`).  Copy this
 # file to /mnt/flash/drivebase.cfg on the hub and edit the values you
 # want to override; comment out (or delete) everything else.
 #
-# Phase 3b (#148) added `use_gyro_plus1` as an OPTIONAL 31st key; when
+# Phase 3b (#148) added `use_gyro_plus1` as an OPTIONAL 35th key; when
 # absent it leaves the daemon at its DRIVEBASE_USE_GYRO_NONE default
-# (so the "loaded 30" line above stays accurate for the unedited
+# (so the "loaded 34" line above stays accurate for the unedited
 # template).  See the section near the bottom for the encoding.
+#
+# Phase 6 Step 6.1 (#127) added 4 feed-forward gains (ff_dist_kV,
+# ff_dist_kA, ff_head_kV, ff_head_kA).  All default to 0 so the template
+# is still a no-op load.  See the FF section near the bottom.
 
 # ----------------------------------------------------------------------
 # PID gains — distance axis (state_distance = (sL + sR) / 2 motor mdeg)
@@ -100,6 +104,26 @@ stall_window_ms    = 200
 wheel_d_um = 56000    # SPIKE Medium Motor wheel = 56 mm
 axle_t_um  = 112000   # SPIKE drivebase axle    = 112 mm
 tick_us    = 2000     # RT tick = 2 ms (range 1000..20000)
+
+# ----------------------------------------------------------------------
+# Feed-forward gains — distance + heading (Issue #127 Phase 6 Step 6.1)
+#
+#   duty_ff = kV * (v_ref_mdegps / 1000)
+#           + kA * (a_ref_mdegps2 / 1000)
+#
+# Units: kV in .01% duty per (deg/s); kA in .01% duty per (deg/s^2).
+# duty_ff is summed inside db_pid_update BEFORE saturation so the anti-
+# windup gate reacts to the full output (PID + FF), not just the PID
+# part.  Both gains default to 0 — Phase 6 Step 6.1 plumbs the math;
+# values are seeded from SysId (Step 6.4) in Step 6.5.  Range for each:
+# [-1000, +1000] (validated by setter to keep the RT-path math in int32).
+# Per-motor kS friction is added in Step 6.2 with its own keys.
+# ----------------------------------------------------------------------
+
+ff_dist_kV = 0
+ff_dist_kA = 0
+ff_head_kV = 0
+ff_head_kA = 0
 
 # ----------------------------------------------------------------------
 # Phase 3b (#148) boot-time gyro mode

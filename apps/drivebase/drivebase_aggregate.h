@@ -91,6 +91,16 @@ struct db_aggregate_control_s
   const struct db_servo_gains_s        *gains;
   const struct db_completion_settings_s *completion;
 
+  /* Per-axis feed-forward gain pointer (Issue #127 Phase 6 Step 6.1).
+   * Same lifetime contract as `gains`: the settings module is frozen
+   * before the RT thread starts, after which the dereference is racing
+   * only with itself.  Per-motor kS friction (Step 6.2) lives on the
+   * drivebase top-level, not here, because the L/R compose makes the
+   * kS distribution non-linear in axis space (Plan D1 Codex BLOCKING).
+   */
+
+  const struct db_ff_axis_gains_s      *ff_axis;
+
   /* Reference-time pause for trajectory anti-windup (Issue #142, Phase 5
    * D).  Mirrors pybricks `pbio_position_integrator` (lib/pbio/src/
    * integrator.c L142-218): when the proportional output is pinned at
@@ -112,6 +122,11 @@ struct db_aggregate_control_s
 struct db_aggregate_output_s
 {
   int32_t  duty;                 /* signed PWM duty in .01 % units     */
+  int32_t  ref_v_mdegps;         /* trajectory reference speed this    */
+                                 /* tick, exported for Step 6.2 per-   */
+                                 /* motor kS friction FF (the L/R      */
+                                 /* compose needs both axes' v_ref to  */
+                                 /* form sign(vL_ref) / sign(vR_ref)). */
   uint8_t  actuation;            /* enum drivebase_on_completion_e —    */
                                  /* what the aggregator should do      */
                                  /* (DRIVE_DUTY / COAST / BRAKE / HOLD) */

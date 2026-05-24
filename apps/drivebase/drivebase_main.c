@@ -1531,6 +1531,10 @@ static int do_alg_settings(int argc, FAR char *argv[])
       db_settings_completion_axis(DB_AXIS_DISTANCE);
   const struct db_completion_settings_s *ch =
       db_settings_completion_axis(DB_AXIS_HEADING);
+  const struct db_ff_axis_gains_s      *ffd =
+      db_settings_ff_axis_gains(DB_AXIS_DISTANCE);
+  const struct db_ff_axis_gains_s      *ffh =
+      db_settings_ff_axis_gains(DB_AXIS_HEADING);
 
   printf("wheel_d=%g mm  axle_t=%g mm\n", wheel_mm, axle_mm);
   printf("dist gains : kp_pos=%ld ki_pos=%ld kd_pos=%ld "
@@ -1566,6 +1570,10 @@ static int do_alg_settings(int argc, FAR char *argv[])
          (long)ch->smart_continue_window_mdeg,
          (unsigned long)ch->done_window_ms,
          (unsigned long)ch->smart_passive_hold_ms);
+  printf("dist ff    : kV=%ld kA=%ld (.01%% per deg/s, deg/s^2)\n",
+         (long)ffd->kV, (long)ffd->kA);
+  printf("hdg  ff    : kV=%ld kA=%ld (.01%% per deg/s, deg/s^2)\n",
+         (long)ffh->kV, (long)ffh->kA);
   return 0;
 }
 

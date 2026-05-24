@@ -79,6 +79,8 @@ struct db_pid_input_s
 
   int64_t  ref_x_mdeg;
   int32_t  ref_v_mdegps;
+  int32_t  ref_a_mdegps2;     /* trajectory accel ref; consumed by FF   */
+                              /* (Issue #127 Phase 6 Step 6.1).         */
 
   /* Actual (from observer) */
 
@@ -93,6 +95,17 @@ struct db_pid_input_s
 
   const struct db_servo_gains_s        *gains;
   const struct db_completion_settings_s *completion;
+
+  /* Feed-forward duty pre-computed by the caller (Issue #127 Phase 6
+   * Step 6.1).  Plan D2: summed inside db_pid_update before saturation
+   * so the anti-windup gate sees the saturated/un-saturated state of
+   * the *full* output and freezes I correctly.  Caller is responsible
+   * for kV/kA math; per-motor kS (Step 6.2) is applied OUTSIDE this
+   * struct after the L/R compose.  Defaults to 0 if the caller leaves
+   * the field at its designated-initializer zero.
+   */
+
+  int32_t  duty_ff;
 
   /* Trajectory done flag (derived externally — control just consumes  */
   /* it for completion / smart logic).                                 */

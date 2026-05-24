@@ -34,6 +34,7 @@ static void aggregate_refresh_settings(struct db_aggregate_control_s *ctl)
 {
   ctl->gains      = db_settings_pid_gains(ctl->axis);
   ctl->completion = db_settings_completion_axis(ctl->axis);
+  ctl->ff_axis    = db_settings_ff_axis_gains(ctl->axis);
 }
 
 /* Reference-time pause helpers (Issue #142, Phase 5 D).  Ports pybricks
@@ -275,9 +276,10 @@ void db_aggregate_control_update(struct db_aggregate_control_s *ctl,
 
   if (!ctl->trajectory_active && !ctl->pid.latched_passive_done)
     {
-      out->duty      = 0;
-      out->actuation = DRIVEBASE_ON_COMPLETION_COAST;
-      out->done      = ctl->pid.done;
+      out->duty         = 0;
+      out->ref_v_mdegps = 0;
+      out->actuation    = DRIVEBASE_ON_COMPLETION_COAST;
+      out->done         = ctl->pid.done;
       return;
     }
 
@@ -301,24 +303,54 @@ void db_aggregate_control_update(struct db_aggregate_control_s *ctl,
       ref.done      = true;
     }
 
+  /* Feed-forward (Issue #127 Phase 6 Step 6.1, Plan D7).  kV/kA are
+   * per-axis here; the (non-linear) per-motor kS friction term is added
+   * by drivebase_drivebase.c after the L/R compose.
+   *
+   * Unit-scaling note: trajectory ref is in mdeg/s and mdeg/s^2; the
+   * settings gains are in .01% per (deg/s) and .01% per (deg/s^2).  To
+   * avoid a 1000x scaling error AND to keep the entire calculation in
+   * int32 (no __aeabi_ldivmod in the RT path — Plan D7 Codex Round 3
+   * BLOCKING), do the /1000 conversion FIRST in int32, then multiply.
+   *
+   *   gain * (mdeg/s / 1000) -> .01% * deg/s = .01% duty
+   *
+   * Bounds (with DB_FF_GAIN_LIMIT=1000, v_max~=1110, a_max~=800):
+   *   |kV * v_dps|  <= 1000 * 1110 = 1.11e6  (int32 OK)
+   *   |kA * a_dps2| <= 1000 *  800 = 8.0e5   (int32 OK)
+   *   sum <= ~2e6 << 2^31, no int64 needed.
+   */
+
+  int32_t duty_ff = 0;
+  if (ctl->ff_axis != NULL && ctl->trajectory_active)
+    {
+      int32_t v_dps  = ref.v_mdegps  / 1000;
+      int32_t a_dps2 = ref.a_mdegps2 / 1000;
+      duty_ff        = ctl->ff_axis->kV * v_dps
+                     + ctl->ff_axis->kA * a_dps2;
+    }
+
   struct db_pid_input_s in =
     {
       .ref_x_mdeg      = ref.x_mdeg,
       .ref_v_mdegps    = ref.v_mdegps,
+      .ref_a_mdegps2   = ref.a_mdegps2,
       .act_x_mdeg      = state_x_mdeg,
       .act_v_mdegps    = state_v_mdegps,
       .dt_ms           = dt_ms ? dt_ms : ctl->tick_ms,
       .gains           = ctl->gains,
       .completion      = ctl->completion,
+      .duty_ff         = duty_ff,
       .trajectory_done = ref.done,
       .on_completion   = ctl->on_completion,
     };
 
   struct db_pid_output_s pout;
   db_pid_update(&ctl->pid, &in, &pout);
-  out->duty      = pout.duty;
-  out->actuation = pout.actuation;
-  out->done      = pout.done;
+  out->duty         = pout.duty;
+  out->ref_v_mdegps = ref.v_mdegps;
+  out->actuation    = pout.actuation;
+  out->done         = pout.done;
 
   /* Reference-time pause decision (Issue #142, Phase 5 D).  Mirrors
    * pybricks `lib/pbio/src/control.c:302-319`.  Pause if and only if:

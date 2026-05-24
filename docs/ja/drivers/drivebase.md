@@ -470,6 +470,26 @@ ki_pos=15 は SPIKE duty 直駆動 + feed-forward なし環境で静摩擦 (~12-
 
 drive_speed default は wheel_diameter から算出 (`v_max_mdegps`、`accel = v_max × 4 / 1` = 1/4 sec で max speed)。`drivebase _alg settings` でダンプ可能。
 
+#### 8.5.1 Feed-forward (Issue [#152](https://github.com/owhinata/spike-nx/issues/152) Phase 6 Step 6.1)
+
+`duty_ff = kV·v_ref + kA·a_ref` の線形 FF を集約 PID per-axis (distance / heading) に注入する。WPILib `SimpleMotorFeedforward` の duty 移植、整数演算のみ (Madgwick 以外 FPU 禁止方針継続)。
+
+- **注入点**: `db_pid_update()` 内、saturation clamp の **直前** で `out_unsat += duty_ff`。1 回 clamp で anti-windup の `sat_high/sat_low` flag が FF 込みの output を反映 (FF で rail-pin している間も I が誤って積算しない)
+- **単位スケーリング**: trajectory ref は `mdeg/s` / `mdeg/s²`、gain は `.01% per (deg/s)` / `.01% per (deg/s²)`。RT path に `__aeabi_ldivmod` を **構造的に出さない** ため `/1000` を int32 領域で先に実行 → 乗算。kV/kA は ±1000 に bound されており、`kV × v_dps` max 1.11e6 / `kA × a_dps2` max 8e5 で int32 内安全
+- **per-motor kS friction**: Step 6.2 で別途追加。L/R compose は線形 (kV/kA は per-axis 等価) だが `sign(v) × kS` は非線形 (pivot で aggregate per-axis vs per-motor が一致しない) ため compose 後に分離。Step 6.1 では kV/kA のみ実装
+- **defaults**: kV=0 / kA=0 で behavioural no-op。bench で `ff_dist_kV = 9` を試すと straight 300 brake が settling 4.6 秒 → 1.8 秒、post-target 巻き戻し挙動 (`i_acc` 解放) 消失を確認 (#152 bench)
+
+cfg key:
+
+| key | default | 範囲 | 意味 |
+|---|---|---|---|
+| `ff_dist_kV` | 0 | [-1000, +1000] | distance 軸の速度 FF (.01% per deg/s) |
+| `ff_dist_kA` | 0 | [-1000, +1000] | distance 軸の加速度 FF (.01% per deg/s²) |
+| `ff_head_kV` | 0 | [-1000, +1000] | heading 軸の速度 FF |
+| `ff_head_kA` | 0 | [-1000, +1000] | heading 軸の加速度 FF |
+
+`drivebase _alg settings` で `dist ff : kV=… kA=…` / `hdg ff : …` を表示。
+
 ### 8.6 ランタイム設定上書き (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
 `drivebase start` 時に外部 W25Q256 NOR (LittleFS `/mnt/flash`) 上の text file から PID gain / completion / stall / wheel/axle/tick を読み込み、ビルド済みバイナリの default を rebuild なしで上書きできる。bench tuning iteration 短縮が目的。
@@ -502,6 +522,10 @@ drive_speed default は wheel_diameter から算出 (`v_max_mdegps`、`accel = v
 | | `comp_dist_done_window_ms` (50) | uint32 | [0, 10000] |
 | | `comp_dist_smart_passive_hold_ms` (100) | uint32 | [0, 10000] |
 | | `comp_head_*` | 同上 |
+| FF | `ff_dist_kV` (0) | int32 | [-1000, +1000] .01% per (deg/s)、distance 軸 (Step 6.1) |
+| | `ff_dist_kA` (0) | int32 | [-1000, +1000] .01% per (deg/s²)、distance 軸 |
+| | `ff_head_kV` (0) | int32 | [-1000, +1000] .01% per (deg/s)、heading 軸 |
+| | `ff_head_kA` (0) | int32 | [-1000, +1000] .01% per (deg/s²)、heading 軸 |
 | Stall | `stall_speed_mdegps` (30000) | int32 | [0, 1000000] |
 | | `stall_duty_min` (6000) | int32 | [0, 10000] |
 | | `stall_window_ms` (200) | uint32 | [0, 10000] |
@@ -539,7 +563,7 @@ wheel_d_um = 62000
 axle_t_um = 145000
 ```
 
-**完全テンプレート**: 全 30 key + コメントを `apps/drivebase/drivebase.cfg.sample` にコミットしてある。リポジトリから zmodem 等で `/mnt/flash/` にコピーするか、内容を `vi` で貼り付ければ「全 key を明示指定」の状態から start できる。tuning 中は使う key だけ残して他を `#` でコメントアウトする運用が見通しが良い。
+**完全テンプレート**: 全 34 key (Phase 6 Step 6.1 で FF 4 key 追加) + コメントを `apps/drivebase/drivebase.cfg.sample` にコミットしてある。リポジトリから zmodem 等で `/mnt/flash/` にコピーするか、内容を `vi` で貼り付ければ「全 key を明示指定」の状態から start できる。tuning 中は使う key だけ残して他を `#` でコメントアウトする運用が見通しが良い。
 
 ## 9. Linux への移植性 (FUSE)
 

@@ -471,6 +471,26 @@ Defaults targeted at SPIKE Medium Motor (per-axis, aggregated since Issue #141 P
 
 drive_speed defaults are derived from `wheel_diameter` (`v_max_mdegps`, `accel = v_max × 4 / 1` = reach max speed in 1/4 s).  `drivebase _alg settings` dumps the live values.
 
+#### 8.5.1 Feed-forward (Issue [#152](https://github.com/owhinata/spike-nx/issues/152) Phase 6 Step 6.1)
+
+A linear feed-forward `duty_ff = kV·v_ref + kA·a_ref` is summed into the aggregate per-axis PID (distance / heading).  Port of the WPILib `SimpleMotorFeedforward` shape to duty output, integer-only (FPU stays off-limits outside Madgwick).
+
+- **Injection point**: inside `db_pid_update()`, BEFORE the saturation clamp: `out_unsat += duty_ff`.  A single clamp makes the anti-windup `sat_high/sat_low` flags reflect the FF-inclusive output, so I never accumulates while FF alone is pinning the rail.
+- **Unit scaling**: trajectory ref is `mdeg/s` / `mdeg/s²`, gains are `.01% per (deg/s)` / `.01% per (deg/s²)`.  To structurally keep `__aeabi_ldivmod` out of the RT path, the `/1000` conversion runs in int32 BEFORE the multiplication.  With kV/kA bounded to ±1000, `kV × v_dps` peaks at 1.11e6 and `kA × a_dps2` at 8e5 — comfortably inside int32.
+- **Per-motor kS friction**: added in Step 6.2 separately.  L/R compose is linear for kV/kA (per-axis is equivalent to per-motor), but `sign(v) × kS` is non-linear (pivot makes per-axis and per-motor disagree), so kS must apply after the compose.  Step 6.1 ships kV/kA only.
+- **Defaults**: kV=0 / kA=0 = behavioural no-op.  Bench with `ff_dist_kV = 9` reduced `straight 300 brake` settling from 4.6 s to 1.8 s and eliminated the post-target backward swing (anti-windup `i_acc` release artefact) — see #152 bench notes.
+
+cfg keys:
+
+| key | default | range | meaning |
+|---|---|---|---|
+| `ff_dist_kV` | 0 | [-1000, +1000] | distance-axis velocity FF (.01% per deg/s) |
+| `ff_dist_kA` | 0 | [-1000, +1000] | distance-axis acceleration FF (.01% per deg/s²) |
+| `ff_head_kV` | 0 | [-1000, +1000] | heading-axis velocity FF |
+| `ff_head_kA` | 0 | [-1000, +1000] | heading-axis acceleration FF |
+
+`drivebase _alg settings` prints `dist ff : kV=… kA=…` and `hdg ff : …` for the live values.
+
 ### 8.6 Runtime config override (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
 At `drivebase start` the daemon reads a text file on the external W25Q256 NOR (LittleFS at `/mnt/flash`) and applies any recognised key=value pairs to PID gains / completion / stall / wheel/axle/tick before launching the RT thread.  This shortens bench-tuning iteration: no rebuild required.
@@ -503,6 +523,10 @@ At `drivebase start` the daemon reads a text file on the external W25Q256 NOR (L
 | | `comp_dist_done_window_ms` (50) | uint32 | [0, 10000] |
 | | `comp_dist_smart_passive_hold_ms` (100) | uint32 | [0, 10000] |
 | | `comp_head_*` | mirrors |
+| FF | `ff_dist_kV` (0) | int32 | [-1000, +1000] .01% per (deg/s), distance axis (Step 6.1) |
+| | `ff_dist_kA` (0) | int32 | [-1000, +1000] .01% per (deg/s²), distance axis |
+| | `ff_head_kV` (0) | int32 | [-1000, +1000] .01% per (deg/s), heading axis |
+| | `ff_head_kA` (0) | int32 | [-1000, +1000] .01% per (deg/s²), heading axis |
 | Stall | `stall_speed_mdegps` (30000) | int32 | [0, 1000000] |
 | | `stall_duty_min` (6000) | int32 | [0, 10000] |
 | | `stall_window_ms` (200) | uint32 | [0, 10000] |
@@ -540,7 +564,7 @@ wheel_d_um = 62000
 axle_t_um = 145000
 ```
 
-**Full template**: a fully annotated cfg listing every supported key at its compiled default is checked in at `apps/drivebase/drivebase.cfg.sample`.  Either zmodem it onto the hub or paste its contents into `vi /mnt/flash/drivebase.cfg`.  When iterating, keep only the keys you are tuning and comment out the rest — that keeps `dmesg` informative about what changed.
+**Full template**: a fully annotated cfg listing all 34 supported keys (Phase 6 Step 6.1 added 4 FF keys) at their compiled defaults is checked in at `apps/drivebase/drivebase.cfg.sample`.  Either zmodem it onto the hub or paste its contents into `vi /mnt/flash/drivebase.cfg`.  When iterating, keep only the keys you are tuning and comment out the rest — that keeps `dmesg` informative about what changed.
 
 ## 9. Linux portability (FUSE)
 

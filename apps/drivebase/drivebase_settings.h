@@ -99,6 +99,28 @@ struct db_completion_settings_s
   uint32_t smart_passive_hold_ms;  /* COAST_SMART / BRAKE_SMART hold    */
 };
 
+/* Feed-forward gain — per-axis linear FF (Issue #127 Phase 6 Step 6.1).
+ * Plan D6: kV/kA are per-axis (distance / heading), and the resulting
+ * `duty_ff = kV * v_dps + kA * a_dps2` is summed inside db_pid_update
+ * before saturation so anti-windup sees the full output.
+ *
+ * Units (Plan D7): kV is .01% duty per (deg/s), kA is .01% duty per
+ * (deg/s^2).  Trajectory reference is in mdeg/s and mdeg/s^2; converted
+ * to deg/{s,s^2} via /1000 in int32 BEFORE the multiplication so the
+ * RT path never invokes __aeabi_ldivmod.  Setter validates each gain to
+ * [-DB_FF_GAIN_LIMIT, +DB_FF_GAIN_LIMIT] = [-1000, +1000] to keep the
+ * `gain * v_dps` product comfortably inside int32 (max |1000 * 1110| =
+ * 1.11e6 for v, |1000 * 800| = 8e5 for a).
+ *
+ * Per-motor kS friction lives in a separate struct (added in Step 6.2).
+ */
+
+struct db_ff_axis_gains_s
+{
+  int32_t kV;                 /* .01% duty per (deg/s)                   */
+  int32_t kA;                 /* .01% duty per (deg/s^2)                 */
+};
+
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
@@ -137,6 +159,14 @@ const struct db_completion_settings_s *
  */
 
 const struct db_completion_settings_s *db_settings_completion(void);
+
+/* Per-axis feed-forward gain (Issue #127 Phase 6 Step 6.1).  Returns the
+ * live mutable instance — caller treats the returned pointer as a
+ * snapshot whose contents are stable for the RT thread lifetime once
+ * db_settings_freeze() has been called.
+ */
+
+const struct db_ff_axis_gains_s *db_settings_ff_axis_gains(enum db_axis_e axis);
 
 /****************************************************************************
  * Runtime override API (Issue #143)
@@ -177,6 +207,14 @@ int db_settings_set_comp_smart_passive_hold_ms(enum db_axis_e axis,
 int db_settings_set_stall_speed_mdegps(int32_t value);
 int db_settings_set_stall_duty_min(int32_t value);
 int db_settings_set_stall_window_ms(uint32_t value);
+
+/* Feed-forward gain setters (Issue #127 Phase 6 Step 6.1).  Both gains
+ * are bounded to [-DB_FF_GAIN_LIMIT, +DB_FF_GAIN_LIMIT] so the FF math
+ * stays in int32 — see db_settings.c for the limit and the rationale.
+ */
+
+int db_settings_set_ff_kV(enum db_axis_e axis, int32_t value);
+int db_settings_set_ff_kA(enum db_axis_e axis, int32_t value);
 
 /* Mark settings immutable.  Subsequent setter calls return -EBUSY.
  * Called by the drivebase daemon between config load and RT-thread start.
