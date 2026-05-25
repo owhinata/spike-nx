@@ -482,24 +482,24 @@ A linear feed-forward `duty_ff = kV·v_ref + kA·a_ref` is summed into the aggre
 - **SysId measurements (Step 6.4)**: `ff_dist_kV ≈ 6` (lower than the plan's seed of 9 — the real motor needs less back-EMF compensation), `ff_dist_kA ≈ 1`.  See §8.5.4 below for the bench data.
 - **kA contribution formula**: `peak_accel × kA / 1000` in .01% duty.  With the default distance-axis trajectory accel = 1833 deg/s², `ff_dist_kA=1` adds **18.3% duty during accel/decel phases** (zero in cruise).  The heading-axis default accel is 916 deg/s² so `ff_head_kA=1` adds **9.2%** instead.
 - **Per-axis routing**: `ff_dist_*` only affects the distance component of straight / drive_forever / curve commands; `ff_head_*` only affects the heading component of turn / curve.
-- **Heading-axis FF stays at 0 in production (bench-confirmed regression)**: Step 6.5 ran `turn 90 brake` in three configurations:
+- **Heading-axis kV was shelved at Step 6.5, then overturned in Phase 7 (§8.5.7 / §8.5.8)**: Step 6.5 ran `turn 90 brake` in three configurations:
   - head kV=0 + kA=0 (Phase 6.2 baseline): angle +0.04 to +1.57°, done in 1.35-1.45 s
   - head kV=6 + kA=1: angle -2.3 to -2.9°, done in 1.97-2.08 s (some runs never `done` within 3 s)
   - **head kV=6 + kA=0**: angle -0.71°, motor stops at 84° for ~730 ms before PID's i_acc drags it past, done at 2.29 s
-  - kV=6 alone is enough to trigger the regression — kA only worsens it.  Root cause: during the trajectory's ramp-down, `kV × v_ref` subtracts duty from the motor command faster than the motor can decelerate, so the motor lands short of target and the ~25% static-friction floor traps it until PID's ki accumulates enough to break out.
-- **Production**: `ff_head_*` all stay at default 0.  Enabling heading-axis FF needs either an asymmetric-kV redesign (only contribute during accel) or a dedicated heading-axis SysId + bench cycle.
+  - At Step 6.5 this read as "kV=6 regresses turn 90", so heading FF was left at 0.  Phase 7 (§8.5.7) showed it was a **move-length confound**: kV=6 fixes the long move (turn 180, #156); the turn-90 regression is the short-move static-friction trap (shared with `straight 50`, #155), not a heading-FF-model fault.  **Production now ships `ff_head_kV=6` paired with the terminal breakaway floor (§8.5.8).**
+- **kA still stays at 0** on both axes — the decel-phase over-deceleration described below is genuine and axis-independent; only the heading-`kV` conclusion was overturned.
 - **Step 6.5 evaluation — DO NOT enable kA in production**: The SysId-measured `kA=1` looked promising (contribution well above plan OQ1's 2% threshold), but bench on both axes showed regression:
     `straight 300 brake` @ kA=1: dist = 289-295 mm (target 300), `done=0` for the full 3 s observation window.
     `turn 90 brake` @ kA=1: angle = 84-87° (target 90°), `done` late or never.
   Root cause: kA is symmetric across the trajectory accel/decel phases, so the negative `kA × a_ref` during decel subtracts from PID output and stops the motor short of target.  Once stopped, static friction (~25%) traps it; PID alone (ki=10) ramps too slowly to break out before the observation ends.  The Phase 6.2 baseline (kA=0) reaches target cleanly in 1.5–1.8 s.  Per plan OQ1 spirit ("ship a contribution only if the bench confirms it helps"), kA stays at default 0 in production cfg, the verb stays for forward-compat, and Phase 6.6 will revisit kA together with ki / kS so the decel/PID balance can be tuned as one set.
 
-cfg keys (Step 6.1):
+cfg keys (Step 6.1; "default" = current compiled default after the Phase 6.6 / Phase 7 retunes — these keys were introduced at 0):
 
 | key | default | range | meaning |
 |---|---|---|---|
-| `ff_dist_kV` | 0 | [-1000, +1000] | distance-axis velocity FF (.01% per deg/s) |
+| `ff_dist_kV` | 9 | [-1000, +1000] | distance-axis velocity FF (.01% per deg/s) |
 | `ff_dist_kA` | 0 | [-1000, +1000] | distance-axis acceleration FF (.01% per deg/s²) |
-| `ff_head_kV` | 0 | [-1000, +1000] | heading-axis velocity FF |
+| `ff_head_kV` | 6 | [-1000, +1000] | heading-axis velocity FF (Phase 7, §8.5.8) |
 | `ff_head_kA` | 0 | [-1000, +1000] | heading-axis acceleration FF |
 
 #### 8.5.2 Per-motor friction FF (Step 6.2)
@@ -678,9 +678,32 @@ The sign of kV=6's effect flips with move length: **it nearly resolves #156 on t
 
 **Conclusion and follow-up**:
 
-- `ff_head_kV=6` is the correct plant value (SysId = distance axis) and fixes turn 180, but adopting it alone breaks turn 90 → **production default stays 0 for now**.
-- The follow-up Phase 7 body = adopt `ff_head_kV=6` **paired with a short-move static-friction fix** (shared with #155), which also resolves #156.
+- `ff_head_kV=6` is the correct plant value (SysId = distance axis) and fixes turn 180, but adopting it alone breaks turn 90 → resolved in §8.5.8 by pairing it with a terminal breakaway.
+- The follow-up Phase 7 body = adopt `ff_head_kV=6` **paired with a short-move static-friction fix** (shared with #155), which also resolves #156 — see §8.5.8.
 - The §8.5.6 decel-decouple idea is deprioritised since kV=6 already removes the turn-180 overshoot.
+
+#### 8.5.8 Phase 7 body: terminal static-friction breakaway (Issue [#158](https://github.com/owhinata/spike-nx/issues/158))
+
+The §8.5.7 follow-up landed: `ff_head_kV=6` is adopted, **paired with a per-motor terminal static-friction breakaway floor** that clears the short-move trap shared by `straight 50` (#155) and `turn 90` (the regression kV=6 alone would otherwise cause).
+
+**Mechanism** (`apply_breakaway_floor`, `drivebase_drivebase.c`, inside the L/R compose):
+
+- kS (§8.5.2) is the in-motion Coulomb assist; its sign gates to 0 as `v_ref→0` and it is capped at 10 % anyway, so it cannot break a dead-stopped wheel free (static friction ≈ 25 %).
+- When a finite move's trajectory is done but a wheel is still outside the 3000-mdeg deadband, the floor raises that wheel's pre-clamp duty to at least `ff_terminal_breakaway` (.01 % units) **toward the per-wheel position error** (`D∓H` compose, int64 — the same per-motor correctness as kS, Plan D1).
+- **Saturating, not additive**: a wheel already commanding ≥ floor in the right direction is untouched, so cruise/normal settling is unaffected and the term can never stack to the duty rail.
+- **One-shot per move**: an episode starts when the floor is first applied and is consumed when the wheel reaches the deadband or crosses the target (error sign flip), so a single inertial overshoot is left to the PID — no reverse re-fire / buzz.  An opposite-sign command (the PID actively braking an approaching wheel via the speed term while `v_ref=0`) is respected, not overridden.
+- New cfg key `ff_terminal_breakaway` (bounds `[0, 3000]`; the 30 % cap deliberately exceeds the 10 % FF gain limit so it can clear static friction).  Compiled default is **2600**; set 0 to disable the mechanism.  No new RT-path 64-bit divide.
+
+**Bench sweep** (`ff_head_kV=6`, brake, 2 runs each, vbat ≈ 8.57-8.59 V):
+
+| `ff_terminal_breakaway` | straight 50 | turn 90 | turn 180 |
+|---|---|---|---|
+| 0 | 43-45 mm, **done✗** | 86.0/86.6°, done✓ 2.24 s | 181.5/181.9°, done✓ |
+| 2000 | 47-50 mm, done✓ 0.82 s | 86.3/**89.5°**, done✓ (**inconsistent**) | 181.1/181.5°, done✓ |
+| 2400 | 50-51 mm, done✓ 0.82 s | 89.4/89.6°, done✓ 1.43 s | 181.1/181.7°, done✓ |
+| 2600 | 49-51 mm, done✓ 0.82 s | 89.4/89.6°, done✓ 1.43 s | 181.0/181.2°, done✓ |
+
+2000 sits below the breakaway threshold (at a fresh pack the battery latch scales applied duty down by ≈ ×0.84, so 2000 → ~17 % effective, under the ~18-20 % real breakaway) and leaves turn 90 inconsistent.  2400 and 2600 are equivalent and consistent; **2600 is the compiled default**, for margin over motor-friction / battery drift.  This resolves #155 and #156 together.
 
 ### 8.6 Runtime config override (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 

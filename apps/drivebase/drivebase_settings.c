@@ -212,13 +212,15 @@ static struct db_servo_gains_s g_pid_gains_heading =
  *
  * Distance-axis kV defaults to the Phase 6 production value (9) so a
  * fresh build with no /mnt/flash/drivebase.cfg gets the same behaviour
- * the bench-tuned cfg gives.  Heading-axis FF stays at 0 — Phase 6.5
- * bench showed `ff_head_kV=6` alone causes turn 90 brake to stop short
- * of target (decel-phase over-correction); the heading axis needs an
- * asymmetric-kV redesign or its own SysId before any non-zero gain.
- * kA stays at 0 on both axes — the symmetric `kA × a_ref` term
- * over-decelerates during the trajectory's decel phase, regardless of
- * axis (Phase 6.5 bench finding).
+ * the bench-tuned cfg gives.  Heading-axis kV is 6 (Issue #158 Phase 7).
+ * Phase 6.5 had shelved `ff_head_kV=6` as "unfit", but #158 showed that
+ * was a move-length confound: kV=6 fixes the turn 180 overshoot (#156)
+ * and only regressed turn 90 because the short move ended in the same
+ * static-friction trap as straight 50 (#155).  That trap is now handled
+ * by the per-motor terminal breakaway floor (ff_motor_friction.terminal_
+ * breakaway, below), so heading kV=6 is adopted.  kA stays 0 on both
+ * axes — the symmetric `kA × a_ref` term over-decelerates during the
+ * trajectory's decel phase, regardless of axis (Phase 6.5 bench finding).
  */
 
 static struct db_ff_axis_gains_s g_ff_axis_gains_distance =
@@ -229,8 +231,8 @@ static struct db_ff_axis_gains_s g_ff_axis_gains_distance =
 
 static struct db_ff_axis_gains_s g_ff_axis_gains_heading =
 {
-  .kV = 0,
-  .kA = 0,
+  .kV = 6,   /* Issue #158 Phase 7: fixes turn 180 (#156); the turn-90 */
+  .kA = 0,   /* trap it would cause is covered by terminal_breakaway.  */
 };
 
 /* Per-motor friction FF (Issue #127 Phase 6 Step 6.2, Plan D1+D6).
@@ -254,7 +256,16 @@ static struct db_ff_motor_friction_s g_ff_motor_friction =
   .kS                       = 700,
   .v_hyst_enter_mdegps      = 5000,
   .v_hyst_exit_mdegps       = 1000,
-  .terminal_breakaway       = 0,    /* Phase 7: no-op until bench-swept */
+  .terminal_breakaway       = 2600, /* Issue #158 Phase 7 bench sweep:  */
+                                    /* {0,2000,2400,2600} x straight 50 */
+                                    /* / turn 90 / turn 180.  2000 left */
+                                    /* turn 90 inconsistent (86-89 deg, */
+                                    /* below the breakaway threshold);  */
+                                    /* 2400 and 2600 both reached 89.5  */
+                                    /* deg consistently with straight   */
+                                    /* 50 done at 49-51 mm and no buzz.  */
+                                    /* 2600 chosen for margin over      */
+                                    /* motor-friction / battery drift.  */
 };
 
 /* Battery sag correction defaults (Issue #152 Phase 6 Step 6.3, Plan

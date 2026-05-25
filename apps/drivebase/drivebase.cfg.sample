@@ -30,13 +30,17 @@
 #                         for the per-scenario bench numbers)
 #   ff_dist_kV      = 9  (back-EMF cancel for distance axis)
 #   ff_dist_kA      = 0  (kA over-decelerates symmetrically — Step 6.5)
-#   ff_head_*       = 0  (heading FF needs redesign — Step 6.5)
+#   ff_head_kV      = 6  (Issue #158 Phase 7 — fixes turn 180, #156)
+#   ff_head_kA      = 0  (kA over-decelerates symmetrically — Step 6.5)
 #   ff_motor_kS     = 700 (3.5%/side breakaway assist)
+#   ff_terminal_breakaway = 2600 (Issue #158 Phase 7 — short-move
+#                         static-friction floor; clears straight 50,
+#                         #155, and the turn-90 trap kV=6 would cause)
 #   battery_*       = 7200/6000 (Phase 6.3 sag correction)
-# Long-motion (straight 300, turn 90) lands within ±1 mm / ±0.1° of
-# target with this set.  Short-motion (straight 50) and large turns
-# (turn 180) have known limitations: see drivebase.md §8.5 for the
-# detail and Phase 7 candidates.
+# With this set, straight 50 / turn 90 / turn 180 (brake) all complete
+# within tolerance: straight 50 -> 49-51 mm, turn 90 -> ~89.5 deg, turn
+# 180 -> ~181 deg, none hang.  See drivebase.md §8.5 for the Phase 7
+# breakaway design and the bench sweep that picked 2600.
 
 # ----------------------------------------------------------------------
 # PID gains — distance axis (state_distance = (sL + sR) / 2 motor mdeg)
@@ -134,41 +138,31 @@ stall_window_ms    = 200
 # SysId measurement was kV ≈ 6 (real motor's back-EMF); 6 and 9
 # both work in practice and 9 is the bench-validated value.
 #
-# Heading-axis FF stays at 0 — Step 6.5 bench confirmed `ff_head_kV=6`
-# alone causes turn 90 brake to stop 6° short of target before PID's
-# ki ramps it past (see drivebase.md §8.5.1 for the trace).  kA was
-# similarly evaluated and over-decelerates symmetrically, so all the
-# `ff_head_*` and `ff_*_kA` keys stay 0 until a future redesign
-# (asymmetric kV / dedicated heading SysId) lands.
+# Heading-axis kV is 6 (Issue #158 Phase 7).  Step 6.5 had shelved
+# `ff_head_kV=6` as unfit, but #158 showed that was a move-length
+# confound (drivebase.md §8.5.7): kV=6 fixes the turn 180 overshoot
+# (#156) and only regressed turn 90 because the short move hit the same
+# static-friction trap as straight 50 (#155).  That trap is handled by
+# the terminal breakaway floor below, so kV=6 is now production.  kA
+# stays 0 on both axes (symmetric `kA * a_ref` over-decelerates — Step
+# 6.5).
 # ----------------------------------------------------------------------
 
 ff_dist_kV = 9
 ff_dist_kA = 0
-ff_head_kV = 0
+ff_head_kV = 6
 ff_head_kA = 0
-# Recommended distance-axis FF override (uncomment after benching).
-# Phase 6.1 confirmed ff_dist_kV=9 cuts `straight 300 brake` settling
-# from 4.6 s to 1.8 s with no regression.  SysId measured kV ≈ 6 on
-# the reference drivebase; either 6 or 9 works in practice but 9 is
-# the bench-validated production value through Phase 6.5.
-# ff_dist_kV = 9
+# Distance-axis kV=9 cuts `straight 300 brake` settling from 4.6 s to
+# 1.8 s (Phase 6.1).  SysId measured kV ≈ 6 on both axes (the plant is
+# axis-independent, #158); distance uses 9 (bench-validated through
+# Phase 6.5), heading uses the measured 6.
 #
-# Heading-axis FF is NOT recommended for production.  Phase 6.2
-# baseline (head kV=0, kA=0) drives `turn 90 brake` cleanly to within
-# ±1.6° in 1.35-1.45 s.  Step 6.5 bench compared three head-FF
-# configurations and confirmed regression in both:
-#   head kV=6 + kA=1: angle -2.3 to -2.9°, done 1.97-2.08 s
-#                     (some runs never reach done in 3 s)
-#   head kV=6 + kA=0: angle -0.7°, stops at 84° for ~730 ms before
-#                     PID's i_acc finally drags it past, done 2.29 s
-# So kV=6 alone is enough to trigger the regression — kA only makes
-# it worse.  The motor over-decelerates during the trajectory's
-# ramp-down: kV * v_ref subtracts duty as v_ref drops, the motor
-# decelerates faster than the trajectory, and once it stops short
-# the static-friction floor (~25%) keeps it pinned.  Production cfg
-# keeps `ff_head_*` at 0 until a redesign (e.g. asymmetric kV that
-# only contributes during accel) or a dedicated heading-axis SysId
-# justifies a different value.
+# Heading-axis kV=6 is paired with ff_terminal_breakaway (below).  On
+# its own, kV=6 fixes turn 180 (brake) — Phase 6.2 baseline overshot
+# +7-8° and never reached done; with kV=6 it lands ~+1° in ~2.0 s — but
+# regresses turn 90, which ends short and traps on static friction just
+# like straight 50.  The terminal breakaway clears that trap, so the two
+# are adopted together.  See drivebase.md §8.5.8 for the bench data.
 #
 # kA = 0 is the production recommendation (Step 6.5 bench finding).
 # The SysId measurement gives kA ≈ 1 (.01% per deg/s²), and the
@@ -251,18 +245,17 @@ ff_v_hyst_exit_mdegps    = 1000
 # [0, 3000] = 0..30% duty — the cap exceeds the FF gain limit (10%) on
 # purpose, since the SPIKE Medium Motor's static friction is ~25%.
 #
-# Default 0 = OFF (behavioural no-op).  Bench-sweep {2000,2200,2400,2600}
-# with `ff_head_kV=6` on straight 50 / turn 90 / turn 180 (brake), then
-# pin the winner.  Watch the terminal per-tick pos_err trace for a single
-# clean approach (the one-shot prevents reverse buzz, but too high a
-# floor on a short move can overshoot tolerance once).
+# Production default is 2600 (Issue #158 Phase 7 bench sweep, paired
+# with ff_head_kV=6 above).  The sweep ran {0,2000,2400,2600} x straight
+# 50 / turn 90 / turn 180 (brake): 0 left straight 50 trapped (43-45 mm,
+# never done) and turn 90 short/slow; 2000 fixed straight 50 but turn 90
+# was inconsistent (86-89.5°, the floor sat below the breakaway
+# threshold); 2400 and 2600 both reached turn 90 ~89.5° consistently
+# with straight 50 at 49-51 mm and no buzz.  2600 is chosen for margin
+# over motor-friction / battery drift.  Set 0 to disable the mechanism.
 # ----------------------------------------------------------------------
 
-ff_terminal_breakaway    = 0
-# Phase 7 production candidate (uncomment + pair with ff_head_kV=6 after
-# the bench sweep picks the magnitude):
-# ff_terminal_breakaway  = 2400
-# ff_head_kV             = 6
+ff_terminal_breakaway    = 2600
 
 # ----------------------------------------------------------------------
 # Battery sag correction (Issue #152 Phase 6 Step 6.3)

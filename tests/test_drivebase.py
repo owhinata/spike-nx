@@ -432,16 +432,22 @@ _MOTOR_FF_RE = re.compile(
     re.MULTILINE,
 )
 
+_HDG_FF_RE = re.compile(
+    r"^hdg\s+ff\s*:\s*kV=(?P<kv>-?\d+)\s+kA=(?P<ka>-?\d+)", re.MULTILINE
+)
 
-def test_alg_settings_reports_terminal_breakaway(p):
-    """D-FF-BK-1: `_alg settings` prints the Phase 7 breakaway floor.
 
-    Issue #158: the per-motor terminal static-friction breakaway floor is
-    a new tunable (`ff_terminal_breakaway`) that ships OFF (compiled
-    default 0).  `_alg settings` reads compiled defaults without a daemon
-    (geometry falls back to 56/112 mm), so this validates the field +
-    `motor ff` print wiring deterministically.  A regression that dropped
-    the field, mis-wired the printf, or shipped a non-zero default would
+def test_alg_settings_reports_phase7_defaults(p):
+    """D-FF-BK-1: `_alg settings` reports the Phase 7 production defaults.
+
+    Issue #158 Step 7b adopts the heading feed-forward + terminal
+    static-friction breakaway as compiled defaults: `ff_head_kV=6` (fixes
+    turn 180, #156) paired with `ff_terminal_breakaway=2600` (clears the
+    short-move trap, #155, and the turn-90 trap kV=6 would otherwise
+    cause).  `_alg settings` reads compiled defaults without a daemon
+    (geometry falls back to 56/112 mm), so this validates both values +
+    the `motor ff` print wiring deterministically.  A regression that
+    dropped a field, mis-wired the printf, or reverted a default would
     fail here.
     """
     _ensure_stopped(p)
@@ -449,9 +455,16 @@ def test_alg_settings_reports_terminal_breakaway(p):
     m = _MOTOR_FF_RE.search(out)
     assert m, f"_alg settings missing 'motor ff' breakaway field: {out!r}"
     bk = int(m.group("bk"))
-    assert bk == 0, (
-        f"compiled-default ff_terminal_breakaway={bk}, expected 0 (Phase 7 "
-        f"ships the mechanism OFF until the bench sweep): {out!r}"
+    assert bk == 2600, (
+        f"compiled-default ff_terminal_breakaway={bk}, expected 2600 "
+        f"(Phase 7 Step 7b production value): {out!r}"
+    )
+    mh = _HDG_FF_RE.search(out)
+    assert mh, f"_alg settings missing 'hdg ff' line: {out!r}"
+    kv = int(mh.group("kv"))
+    assert kv == 6, (
+        f"compiled-default ff_head_kV={kv}, expected 6 (Phase 7 Step 7b "
+        f"adopts heading kV=6 paired with the breakaway floor): {out!r}"
     )
 
 
