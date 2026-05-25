@@ -26,7 +26,9 @@ argument-hint: <plan | PR number | file path | design description>
 4. 以下の「3面レビュー観点」に基づいてレビュープロンプトを構成する
 5. `mcp__codex__codex` ツールで Codex にレビューを依頼する
 6. Codex の結果を整理してユーザーに報告する
-7. **plan レビューの場合**: 3面すべてで問題なしなら「実装着手 OK」、問題ありなら具体的な修正提案を示す
+7. **plan レビューの場合**: 3面すべてで問題なしなら「実装着手 OK」とし、`touch ~/.claude/.plan-codex-reviewed` で marker を更新する。問題ありなら具体的な修正提案を示し、**marker は更新しない**（BLOCKING/CONCERN を解消し再 review して LGTM に至ってから touch する）。
+   - この marker は `ExitPlanMode` の PreToolUse gate（`.claude/settings.json`）が確認する。marker が無い/古い（2h 超）と ExitPlanMode は block され、plan を確定できない。つまり **plan review を通さずに ExitPlanMode することは構造的に防がれる**。
+   - trivial plan で codex-review を skip すると判断した場合も、user 承認を得てから `touch ~/.claude/.plan-codex-reviewed` すれば gate を通過できる（CLAUDE.md「skip すべきと判断する場合もユーザに必ず確認」と整合）。
 
 ## 3面レビュー観点
 
