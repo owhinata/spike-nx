@@ -643,8 +643,42 @@ Phase 6 で追加した FF / battery / SysId stack と Step 6.6 の ki sweep を
 
 - **`straight 50` boundary fix**: dynamic kS for short moves / tolerance auto-widen / kp boost
 - **`turn 180` overshoot**: asymmetric kA design / heading-specific SysId / trajectory shaping
-- **Heading-axis FF redesign**: symmetric `kV × v_ref` が heading で機能しない原因の root cause (慣性比? 摩擦特性?) 究明
+- **Heading-axis FF redesign**: symmetric `kV × v_ref` が heading で機能しない原因の root cause (慣性比? 摩擦特性?) 究明 → **§8.5.7 で究明済 (move-length 交絡だった)**
 - **Issue #153/#154 系の race 解決**: rcS auto-start attach race / mid-bench `-ENOTCONN` の chardev cleanup 改善
+
+#### 8.5.7 Phase 7 診断: heading FF は move-length 交絡だった (Issue [#158](https://github.com/owhinata/spike-nx/issues/158))
+
+Phase 7 を「診断先行」で着手し、§8.5.6 の "Heading-axis FF redesign" の root cause を実機で究明した。結論: **symmetric `kV × v_ref` が heading で機能しないという Step 6.5 の観測は、distance を長 move (`straight 300`)・heading を短 move (`turn 90`) で test した move-length の交絡**だった。
+
+**診断ツール (commit `e9edcb6`)**:
+
+- **SysId pivot mode**: `drivebase _sysid {ramp-ks|ramp-kv|ramp-ka} ... pivot` で `L=-duty / R=+duty` のその場旋回を駆動し heading 軸の kV/kA を実測。対称 pivot では state-space 速度 `(sR-sL)/2` = 片輪速度なので per-wheel fit がそのまま `ff_head_*` になる (axle/wheel 変換不要)。`uL`/`uR` バッファを分離 (左は適用 duty `-d`)、`ramp-ka` は magnitude 平均で左輪逆回転を相殺しない。
+- **`drivebase _alg ff-trace {straight|turn}`**: trajectory + FF duty の offline sampled replay (nominal/unsaturated、RT path 不触・ABI 不変)。`heading_mdeg_to_state_mdeg` を `drivebase_angle.h` の inline 化して RT path と単一実装を共有。
+
+**SysId 実測 (接地, vbat ~8.5V)**:
+
+| param | distance (§8.5.4) | heading (pivot) |
+|---|---|---|
+| kV nominal | 6 | 6 (同一) |
+| kS breakaway | ~25% | ~25% (同一) |
+| kA | 1 (τ=128ms) | 0 (τ=77ms) |
+
+→ heading 軸の plant 同定値は distance と本質的に同一。「heading は別 FF model が要る」根拠は plant 側に無い。
+
+**閉ループ A/B bench (`ff_head_kV` 0 vs 6, turn brake, 各 2 run)**:
+
+| | turn 90 (短 move) | turn 180 (長 move) |
+|---|---|---|
+| kV=0 | +0.8/+1.5°, done✓ ~1.5s | +7.4/+8.0°, **done✗** (=#156) |
+| kV=6 | +6.8°, **done✗** (停滞→windup lurch) | +0.3/+0.5°, **done✓ ~2.0s** |
+
+kV=6 の効果が move 長で完全反転: **長 move では #156 をほぼ解消、短 move では悪化** (終端で v_ref→0 → kV 寄与消失 → 25% stiction trap → ki windup lurch、`straight 50` #155 と同じ病理)。
+
+**結論と follow-up**:
+
+- `ff_head_kV=6` は正しい plant 値 (SysId = distance と同一) で turn 180 を直すが、単独採用は turn 90 を壊す → **production default は当面 0 据え置き**
+- follow-up Phase 7 本体 = `ff_head_kV=6` 採用 **+ 短 move stiction 対策** (#155 と共通) をセットで実施 → これにより #156 も解消
+- §8.5.6 の decel-decouple 案は kV=6 が overshoot を直したため優先度低下
 
 ### 8.6 ランタイム設定上書き (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 

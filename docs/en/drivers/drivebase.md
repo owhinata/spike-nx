@@ -645,8 +645,42 @@ Production defaults after the Phase 6 FF / battery / SysId stack plus the Step 6
 
 - **`straight 50` boundary fix**: dynamic kS for short moves / pos_tolerance auto-widen / kp_pos boost.
 - **`turn 180` overshoot**: asymmetric kA design / heading-specific SysId / trajectory shaping.
-- **Heading-axis FF redesign**: root-cause why the symmetric `kV × v_ref` works on distance but regresses on heading (inertia ratio?  friction characteristics?).
+- **Heading-axis FF redesign**: root-cause why the symmetric `kV × v_ref` works on distance but regresses on heading (inertia ratio?  friction characteristics?) → **resolved in §8.5.7 (it was a move-length confound)**.
 - **Issue #153 / #154 race fixes**: rcS auto-start attach race and mid-bench `-ENOTCONN` are open follow-ups for the chardev cleanup path.
+
+#### 8.5.7 Phase 7 diagnosis: heading FF was a move-length confound (Issue [#158](https://github.com/owhinata/spike-nx/issues/158))
+
+Phase 7 was started "diagnostic-first" to root-cause the §8.5.6 "Heading-axis FF redesign" item on hardware.  Conclusion: **Step 6.5's observation that symmetric `kV × v_ref` does not work on heading was a move-length confound** — distance was tested on a long move (`straight 300`) and heading on a short move (`turn 90`).
+
+**Diagnostic tools (commit `e9edcb6`)**:
+
+- **SysId pivot mode**: `drivebase _sysid {ramp-ks|ramp-kv|ramp-ka} ... pivot` drives `L=-duty / R=+duty` (in-place rotation) to identify the HEADING axis.  In a symmetric pivot the state-space velocity `(sR-sL)/2` equals the per-wheel speed, so the per-wheel fit maps straight onto `ff_head_*` with no axle/wheel conversion.  `uL`/`uR` buffers are separated (left applied duty is `-d`) and `ramp-ka` averages magnitudes so the sign-flipped left wheel does not cancel the rise-time estimate.
+- **`drivebase _alg ff-trace {straight|turn}`**: offline, sampled, nominal/unsaturated replay of the per-axis trajectory + FF duty (no RT-path change, no ABI change).  `heading_mdeg_to_state_mdeg` moved to a `drivebase_angle.h` inline shared with the RT path.
+
+**SysId measurement (on ground, vbat ~8.5 V)**:
+
+| param | distance (§8.5.4) | heading (pivot) |
+|---|---|---|
+| kV nominal | 6 | 6 (identical) |
+| kS breakaway | ~25 % | ~25 % (identical) |
+| kA | 1 (τ=128 ms) | 0 (τ=77 ms) |
+
+→ the heading-axis plant parameters are essentially identical to the distance axis; there is no plant-side basis for a fundamentally different heading FF model.
+
+**Closed-loop A/B bench (`ff_head_kV` 0 vs 6, turn brake, 2 runs each)**:
+
+| | turn 90 (short move) | turn 180 (long move) |
+|---|---|---|
+| kV=0 | +0.8/+1.5°, done✓ ~1.5 s | +7.4/+8.0°, **done✗** (=#156) |
+| kV=6 | +6.8°, **done✗** (stall → windup lurch) | +0.3/+0.5°, **done✓ ~2.0 s** |
+
+The sign of kV=6's effect flips with move length: **it nearly resolves #156 on the long move but regresses the short move** (near the end v_ref→0, so the kV term vanishes, the motor is trapped by the ~25 % static friction, and ki winds up into a lurch — the same pathology as `straight 50` #155).
+
+**Conclusion and follow-up**:
+
+- `ff_head_kV=6` is the correct plant value (SysId = distance axis) and fixes turn 180, but adopting it alone breaks turn 90 → **production default stays 0 for now**.
+- The follow-up Phase 7 body = adopt `ff_head_kV=6` **paired with a short-move static-friction fix** (shared with #155), which also resolves #156.
+- The §8.5.6 decel-decouple idea is deprioritised since kV=6 already removes the turn-180 overshoot.
 
 ### 8.6 Runtime config override (`/mnt/flash/drivebase.cfg`, Issue [#143](https://github.com/owhinata/spike-nx/issues/143))
 
