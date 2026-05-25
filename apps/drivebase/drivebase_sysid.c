@@ -177,6 +177,35 @@ static int32_t sysid_normalise_to_nominal(int32_t measured, int32_t vbat_mv,
   return (int32_t)((num - nominal_mv / 2) / nominal_mv);
 }
 
+/* Extract a trailing/standalone `pivot` keyword from a verb's argv.
+ * Returns true and removes the token (shifting the remainder down +
+ * decrementing *argc) so the positional parsing below is unchanged
+ * whether or not pivot was given.  `pivot` is a distinct keyword that
+ * never collides with the numeric positional args, so a full scan is
+ * safe regardless of where the operator put it.
+ *
+ * Pivot mode drives L = -duty, R = +duty (a symmetric in-place
+ * rotation) to identify the HEADING axis instead of the distance axis.
+ * In a symmetric pivot the heading state velocity (sR - sL)/2 equals
+ * the per-wheel speed magnitude, so the per-wheel kV/kA the fit
+ * produces maps directly onto ff_head_kV/ff_head_kA with no
+ * axle/wheel conversion (Phase 7 / Issue #158).
+ */
+
+static bool sysid_extract_pivot(int *argc, char *argv[])
+{
+  for (int i = 0; i < *argc; i++)
+    {
+      if (strcmp(argv[i], "pivot") == 0)
+        {
+          for (int j = i; j < *argc - 1; j++) argv[j] = argv[j + 1];
+          (*argc)--;
+          return true;
+        }
+    }
+  return false;
+}
+
 /****************************************************************************
  * Daemon-attached gate
  ****************************************************************************/
@@ -262,7 +291,7 @@ static void sysid_obs_drain(struct sysid_obs_s *o, uint32_t duty_abs)
 }
 
 static void sysid_hold_duty(struct sysid_obs_s *o,
-                            int32_t duty, uint32_t ms)
+                            int32_t duty, uint32_t ms, bool pivot)
 {
   /* Abort already raised — return without commanding a new duty.
    * Without this guard the inner for-loop of ramp-kv (and any other
@@ -290,10 +319,19 @@ static void sysid_hold_duty(struct sysid_obs_s *o,
    * both motors via sysid_close_motors().  We don't coast here — the
    * verb may want to print partial results before the cleanup runs.
    */
+  /* Pivot drives the left wheel backward (-duty) so the chassis rotates
+   * in place; straight drives both the same.  The caller's uL_buf must
+   * match this (uL = pivot ? -d : d), or the kV fit's sign-aware kS
+   * subtraction is wrong.  motor invert is applied below us in
+   * drivebase_motor_set_duty, so use raw opposite signs here.
+   */
+
+  int16_t duty_left  = (int16_t)(pivot ? -duty : duty);
+  int16_t duty_right = (int16_t)duty;
   while (elapsed < ms && !g_sysid_abort)
     {
-      drivebase_motor_set_duty(DB_SIDE_LEFT,  (int16_t)duty);
-      drivebase_motor_set_duty(DB_SIDE_RIGHT, (int16_t)duty);
+      drivebase_motor_set_duty(DB_SIDE_LEFT,  duty_left);
+      drivebase_motor_set_duty(DB_SIDE_RIGHT, duty_right);
       sysid_sleep_us(5000);
       sysid_obs_drain(o, duty_abs);
       elapsed += 5;
@@ -376,11 +414,13 @@ static void sysid_close_motors(void)
 
 static int sysid_verb_ramp_ks(int argc, char *argv[])
 {
+  bool pivot = sysid_extract_pivot(&argc, argv);
+
   if (argc < 1)
     {
       fprintf(stderr,
               "usage: drivebase _sysid ramp-ks <step_pct01> "
-              "[max_pct01=6000] [hold_ms=200]\n"
+              "[max_pct01=6000] [hold_ms=200] [pivot]\n"
               "  step_pct01  : duty increment per step (e.g. 50 = 0.5%%)\n"
               "  max_pct01   : abort at this duty if neither wheel moves\n"
               "                (default 60%% — SPIKE Medium Motor's real\n"
@@ -411,9 +451,15 @@ static int sysid_verb_ramp_ks(int argc, char *argv[])
   const struct db_battery_settings_s *bat = db_settings_battery();
   int32_t nominal_mv = bat ? bat->nominal_mv : 7200;
 
-  printf("# ramp-ks: step=%ld max=%ld hold_ms=%lu vbat=%ld mV nominal=%ld mV\n",
+  printf("# ramp-ks: step=%ld max=%ld hold_ms=%lu vbat=%ld mV nominal=%ld mV "
+         "mode=%s\n",
          (long)step, (long)max_pct01, (unsigned long)hold_ms,
-         (long)vbat_mv, (long)nominal_mv);
+         (long)vbat_mv, (long)nominal_mv, pivot ? "PIVOT" : "straight");
+  if (pivot)
+    {
+      printf("# PIVOT MODE: drivebase rotates in place — ensure clearance to "
+             "spin, NOT 2 m straight\n");
+    }
   printf("# duty  vL_mdegps  vR_mdegps\n");
 
   /* Heap-allocate the observer pair — see the struct comment for why
@@ -433,18 +479,24 @@ static int sysid_verb_ramp_ks(int argc, char *argv[])
    * step sees a primed slope window.
    */
 
-  sysid_hold_duty(o, 0, 50);
+  sysid_hold_duty(o, 0, 50, pivot);
 
   int32_t kS_L = -1;
   int32_t kS_R = -1;
   for (int32_t d = step; d <= max_pct01; d += step)
     {
-      sysid_hold_duty(o, d, hold_ms);
+      sysid_hold_duty(o, d, hold_ms, pivot);
       int32_t vL = db_observer_v(&o->obs[DB_SIDE_LEFT]);
       int32_t vR = db_observer_v(&o->obs[DB_SIDE_RIGHT]);
       printf("%5ld  %9ld  %9ld\n", (long)d, (long)vL, (long)vR);
-      if (kS_L < 0 && vL >  SYSID_V_MOVE_MDEGPS) kS_L = d;
-      if (kS_R < 0 && vR >  SYSID_V_MOVE_MDEGPS) kS_R = d;
+      /* Breakaway = wheel started moving regardless of direction.  In
+       * pivot the left wheel runs backward (vL < 0), so gate on the
+       * magnitude, not the signed value.
+       */
+      int32_t vL_ab = vL < 0 ? -vL : vL;
+      int32_t vR_ab = vR < 0 ? -vR : vR;
+      if (kS_L < 0 && vL_ab >  SYSID_V_MOVE_MDEGPS) kS_L = d;
+      if (kS_R < 0 && vR_ab >  SYSID_V_MOVE_MDEGPS) kS_R = d;
       if (kS_L > 0 && kS_R > 0) break;
       if (g_sysid_abort) break;
     }
@@ -474,8 +526,22 @@ static int sysid_verb_ramp_ks(int argc, char *argv[])
          (long)kS_L, (long)kS_R, (long)kS_max);
   printf("kS_nominal : %ld .01%% duty (normalised vbat=%ld -> %ld mV)\n",
          (long)kS_nominal, (long)vbat_mv, (long)nominal_mv);
-  printf("# To apply: set ff_motor_kS = %ld in /mnt/flash/drivebase.cfg\n",
-         (long)kS_nominal);
+  if (pivot)
+    {
+      /* Pivot floor friction differs from straight rolling friction, so
+       * the heading kV fit must subtract the PIVOT breakaway, not the
+       * straight one.  This is a kS_subtract input for `ramp-kv pivot`,
+       * not the production ff_motor_kS (which is the common per-motor
+       * friction assist).
+       */
+      printf("# Pivot breakaway: feed as kS_subtract to "
+             "`drivebase _sysid ramp-kv ... pivot` (NOT ff_motor_kS)\n");
+    }
+  else
+    {
+      printf("# To apply: set ff_motor_kS = %ld in /mnt/flash/drivebase.cfg\n",
+             (long)kS_nominal);
+    }
   return 0;
 }
 
@@ -527,14 +593,19 @@ static bool sysid_fit_kv_pair(int32_t *kV_out, int *used_out,
 
 static int sysid_verb_ramp_kv(int argc, char *argv[])
 {
+  bool pivot = sysid_extract_pivot(&argc, argv);
+
   if (argc < 3)
     {
       fprintf(stderr,
               "usage: drivebase _sysid ramp-kv <max_pct01> <duration_ms> "
-              "<kS_subtract_pct01>\n"
+              "<kS_subtract_pct01> [pivot]\n"
               "  max_pct01         : peak signed duty (forward + reverse)\n"
               "  duration_ms       : total time per direction\n"
-              "  kS_subtract_pct01 : kS to subtract (run ramp-ks first)\n");
+              "  kS_subtract_pct01 : kS to subtract (run ramp-ks first;\n"
+              "                      with pivot, use the pivot ramp-ks)\n"
+              "  pivot             : identify HEADING axis (L=-duty,\n"
+              "                      R=+duty in-place rotation) -> ff_head_kV\n");
       return 1;
     }
 
@@ -560,10 +631,16 @@ static int sysid_verb_ramp_kv(int argc, char *argv[])
   int32_t nominal_mv = bat ? bat->nominal_mv : 7200;
 
   printf("# ramp-kv: max=%ld duration_ms=%lu seg_ms=%lu N_SEG=%d "
-         "kS_subtract=%ld vbat=%ld mV nominal=%ld mV\n",
+         "kS_subtract=%ld vbat=%ld mV nominal=%ld mV mode=%s\n",
          (long)max_pct01, (unsigned long)duration_ms,
          (unsigned long)seg_ms, N_SEG,
-         (long)kS_subtract, (long)vbat_mv, (long)nominal_mv);
+         (long)kS_subtract, (long)vbat_mv, (long)nominal_mv,
+         pivot ? "PIVOT" : "straight");
+  if (pivot)
+    {
+      printf("# PIVOT MODE: drivebase rotates in place — ensure clearance to "
+             "spin; FWD=+heading, REV=-heading\n");
+    }
   printf("# direction  duty  vL_mdegps  vR_mdegps\n");
 
   struct sysid_obs_s *o = calloc(1, sizeof(*o));
@@ -574,14 +651,21 @@ static int sysid_verb_ramp_kv(int argc, char *argv[])
       return ENOMEM;
     }
   sysid_obs_init(o);
-  sysid_hold_duty(o, 0, 100);
+  sysid_hold_duty(o, 0, 100, pivot);
 
   /* Capture both directions × 11 steps × 2 sides into a small static
    * buffer.  22 segments * 2 sides * 4 bytes = 176 bytes; file-scope
    * static avoids both stack pressure and a second heap allocation.
+   *
+   * Store the ACTUAL per-side applied duty (uL_buf/uR_buf), not the
+   * command magnitude.  In straight mode both sides get +d so the two
+   * buffers are identical; in pivot the left wheel is driven with -d,
+   * so its fit must see -d (otherwise sysid_fit_kv_pair's sign-aware
+   * kS subtraction is wrong and the fitted kV flips sign).
    */
 
-  static int32_t u_buf[2 * 11];           /* signed applied duty       */
+  static int32_t uL_buf[2 * 11];          /* signed applied LEFT  duty */
+  static int32_t uR_buf[2 * 11];          /* signed applied RIGHT duty */
   static int32_t vL_buf[2 * 11];
   static int32_t vR_buf[2 * 11];
   int             n = 0;
@@ -593,11 +677,12 @@ static int sysid_verb_ramp_kv(int argc, char *argv[])
       for (int k = 1; k <= N_SEG; k++)
         {
           int32_t d = sign * (max_pct01 * k) / N_SEG;
-          sysid_hold_duty(o, d, seg_ms);
+          sysid_hold_duty(o, d, seg_ms, pivot);
           if (g_sysid_abort) break;
           int32_t vL = db_observer_v(&o->obs[DB_SIDE_LEFT]);
           int32_t vR = db_observer_v(&o->obs[DB_SIDE_RIGHT]);
-          u_buf[n]  = d;
+          uL_buf[n] = pivot ? -d : d;
+          uR_buf[n] = d;
           vL_buf[n] = vL;
           vR_buf[n] = vR;
           n++;
@@ -607,7 +692,7 @@ static int sysid_verb_ramp_kv(int argc, char *argv[])
       /* Coast briefly between directions so the slope window is clean
        * before we reverse.
        */
-      sysid_hold_duty(o, 0, 200);
+      sysid_hold_duty(o, 0, 200, pivot);
       if (g_sysid_abort) break;
     }
 
@@ -627,8 +712,8 @@ static int sysid_verb_ramp_kv(int argc, char *argv[])
 
   int32_t kV_L = 0, kV_R = 0;
   int     used_L = 0, used_R = 0;
-  bool ok_L = sysid_fit_kv_pair(&kV_L, &used_L, u_buf, vL_buf, n, kS_subtract);
-  bool ok_R = sysid_fit_kv_pair(&kV_R, &used_R, u_buf, vR_buf, n, kS_subtract);
+  bool ok_L = sysid_fit_kv_pair(&kV_L, &used_L, uL_buf, vL_buf, n, kS_subtract);
+  bool ok_R = sysid_fit_kv_pair(&kV_R, &used_R, uR_buf, vR_buf, n, kS_subtract);
 
   printf("kV_fit usage: L=%d/%d samples R=%d/%d samples\n",
          used_L, n, used_R, n);
@@ -650,8 +735,12 @@ static int sysid_verb_ramp_kv(int argc, char *argv[])
          (long)kV_L, (long)kV_R, (long)kV_avg);
   printf("kV_nominal : %ld .01%% per deg/s (normalised vbat=%ld -> %ld mV)\n",
          (long)kV_nominal, (long)vbat_mv, (long)nominal_mv);
-  printf("# To apply: set ff_dist_kV = %ld in /mnt/flash/drivebase.cfg\n",
-         (long)kV_nominal);
+  /* In a symmetric pivot the heading state velocity (sR-sL)/2 equals
+   * the per-wheel speed, so the per-wheel kV fit IS the heading-axis kV
+   * with no axle/wheel conversion (Issue #158).
+   */
+  printf("# To apply: set %s = %ld in /mnt/flash/drivebase.cfg\n",
+         pivot ? "ff_head_kV" : "ff_dist_kV", (long)kV_nominal);
   return 0;
 }
 
@@ -661,14 +750,19 @@ static int sysid_verb_ramp_kv(int argc, char *argv[])
 
 static int sysid_verb_ramp_ka(int argc, char *argv[])
 {
+  bool pivot = sysid_extract_pivot(&argc, argv);
+
   if (argc < 3)
     {
       fprintf(stderr,
               "usage: drivebase _sysid ramp-ka <duty_pct01> <duration_ms> "
-              "<kV_pct01_per_dps>\n"
+              "<kV_pct01_per_dps> [pivot]\n"
               "  duty_pct01        : step duty applied open-loop\n"
               "  duration_ms       : observation window\n"
-              "  kV_pct01_per_dps  : kV from ramp-kv (drives kA formula)\n");
+              "  kV_pct01_per_dps  : kV from ramp-kv (drives kA formula;\n"
+              "                      with pivot, use the pivot ramp-kv)\n"
+              "  pivot             : identify HEADING axis (L=-duty,\n"
+              "                      R=+duty in-place rotation) -> ff_head_kA\n");
       return 1;
     }
 
@@ -699,9 +793,15 @@ static int sysid_verb_ramp_ka(int argc, char *argv[])
   if (n_samp > MAX_SAMP) n_samp = MAX_SAMP;
 
   int32_t vbat_mv = sysid_read_vbat_mv();
-  printf("# ramp-ka: duty=%ld duration_ms=%lu samp_ms=%d kV=%ld vbat=%ld mV\n",
+  printf("# ramp-ka: duty=%ld duration_ms=%lu samp_ms=%d kV=%ld vbat=%ld mV "
+         "mode=%s\n",
          (long)duty, (unsigned long)duration_ms, SAMP_DT_MS,
-         (long)kV_value, (long)vbat_mv);
+         (long)kV_value, (long)vbat_mv, pivot ? "PIVOT" : "straight");
+  if (pivot)
+    {
+      printf("# PIVOT MODE: drivebase rotates in place — ensure clearance to "
+             "spin; v_avg is magnitude (|vL|+|vR|)/2\n");
+    }
   printf("# t_ms  v_avg_mdegps\n");
 
   struct sysid_obs_s *o = calloc(1, sizeof(*o));
@@ -713,9 +813,13 @@ static int sysid_verb_ramp_ka(int argc, char *argv[])
     }
   sysid_obs_init(o);
 
-  /* Apply the step. */
+  /* Apply the step.  Pivot drives the left wheel backward (-duty) so the
+   * chassis rotates in place; the right wheel stays +duty.  Forgetting
+   * this direct-set path (it bypasses sysid_hold_duty) would silently
+   * run a straight step under a `pivot` request.
+   */
 
-  drivebase_motor_set_duty(DB_SIDE_LEFT,  (int16_t)duty);
+  drivebase_motor_set_duty(DB_SIDE_LEFT,  (int16_t)(pivot ? -duty : duty));
   drivebase_motor_set_duty(DB_SIDE_RIGHT, (int16_t)duty);
 
   uint64_t t0       = sysid_now_us();
@@ -726,7 +830,24 @@ static int sysid_verb_ramp_ka(int argc, char *argv[])
       sysid_obs_drain(o, (uint32_t)duty);
       int32_t vL = db_observer_v(&o->obs[DB_SIDE_LEFT]);
       int32_t vR = db_observer_v(&o->obs[DB_SIDE_RIGHT]);
-      int32_t va = (vL + vR) / 2;
+      /* Straight: both wheels share a sign, plain average is the body
+       * speed.  Pivot: vL and vR are opposite-signed, so the signed
+       * average is ~0 — average the magnitudes, which in a symmetric
+       * pivot equals the heading state speed (sR-sL)/2.  v_avg stays
+       * positive either way, so the 63.2 % rise detection below works
+       * unchanged.
+       */
+      int32_t va;
+      if (pivot)
+        {
+          int32_t vL_ab = vL < 0 ? -vL : vL;
+          int32_t vR_ab = vR < 0 ? -vR : vR;
+          va = (vL_ab + vR_ab) / 2;
+        }
+      else
+        {
+          va = (vL + vR) / 2;
+        }
       t_ms_buf[i]  = (int32_t)((sysid_now_us() - t0) / 1000);
       v_avg_buf[i] = va;
       printf("%5ld  %9ld\n", (long)t_ms_buf[i], (long)va);
@@ -788,8 +909,8 @@ static int sysid_verb_ramp_ka(int argc, char *argv[])
   printf("v_steady_avg = %ld mdeg/s\n",  (long)v_steady);
   printf("tau_ms       = %ld\n",          (long)tau_ms);
   printf("kA_estimate  = %ld .01%% per (deg/s^2)\n", (long)kA);
-  printf("# To apply: set ff_dist_kA = %ld in /mnt/flash/drivebase.cfg\n",
-         (long)kA);
+  printf("# To apply: set %s = %ld in /mnt/flash/drivebase.cfg\n",
+         pivot ? "ff_head_kA" : "ff_dist_kA", (long)kA);
   return 0;
 }
 
@@ -834,11 +955,15 @@ int drivebase_sysid_cli(int argc, char *argv[])
   if (argc < 1)
     {
       fprintf(stderr,
-              "usage: drivebase _sysid {ramp-ks|ramp-kv|ramp-ka|vbat} ...\n"
+              "usage: drivebase _sysid {ramp-ks|ramp-kv|ramp-ka|vbat} ... "
+              "[pivot]\n"
               "  Ground / safety contract:\n"
-              "    1) The drivebase MUST be on level ground with at\n"
-              "       least ~2 m of clear straight space.  Free-spin\n"
-              "       (wheels-up) measurements under-fit the real plant.\n"
+              "    1) The drivebase MUST be on level ground.  In straight\n"
+              "       mode (default) keep ~2 m of clear straight space; in\n"
+              "       `pivot` mode the chassis rotates IN PLACE, so the\n"
+              "       clearance you need is a clear circle to spin within,\n"
+              "       NOT 2 m straight.  Free-spin (wheels-up) measurements\n"
+              "       under-fit the real plant in both modes.\n"
               "    2) Have Ctrl-C ready — every verb coasts both motors\n"
               "       on a clean exit.  If your terminal swallows Ctrl-C\n"
               "       (e.g. picocom): run the verb in the background\n"
@@ -848,9 +973,15 @@ int drivebase_sysid_cli(int argc, char *argv[])
               "       leaves motors at their last duty).\n"
               "    3) Re-run at different battery voltages to confirm\n"
               "       vbat normalisation is converging on a stable value.\n"
+              "  Axis: default identifies the DISTANCE axis (both wheels\n"
+              "    forward) -> ff_dist_*.  Append `pivot` to identify the\n"
+              "    HEADING axis (L=-duty, R=+duty in-place rotation) ->\n"
+              "    ff_head_*.  Run the two axes as separate sweeps.\n"
               "  Verb order: ramp-ks  ->  ramp-kv  ->  ramp-ka.\n"
               "    ramp-kv subtracts the kS measured by ramp-ks.\n"
-              "    ramp-ka uses the kV measured by ramp-kv.\n");
+              "    ramp-ka uses the kV measured by ramp-kv.\n"
+              "    (In pivot, use the pivot ramp-ks/ramp-kv outputs — the\n"
+              "    pivot floor friction differs from straight rolling.)\n");
       return 1;
     }
 

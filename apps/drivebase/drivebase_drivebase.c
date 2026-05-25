@@ -85,34 +85,11 @@ static int32_t diff_mm_to_heading_mdeg(int32_t diff_mm, uint32_t a_um)
   return (int32_t)db_angle_div_round(pi_diff * DB_PI_DEN, DB_PI_NUM);
 }
 
-/* Convert a heading rotation in robot mdeg to a state_heading delta in
- * motor-mdeg (state-space = (sR - sL) / 2).  Derivation:
- *   per-wheel diff travel (mm)   = h_rad * axle_t = (h_mdeg / 1000) *
- *                                  π/180 * axle_t_mm
- *   per-wheel diff travel (motor mdeg)
- *                                = (per_wheel_mm × 360 × 1000) /
- *                                  (π × wheel_d_mm)
- *   state_heading_delta_mdeg     = per_wheel_diff_motor_mdeg / 2 ...
- *   but actually 2 × state_heading_delta = sR - sL = full diff, so
- *     state_heading_delta = (sR - sL) / 2
- *                         = h_mdeg × axle_t / wheel_d
- *
- * (Algebraic simplification: π and 360 cancel out cleanly.)
+/* heading_mdeg -> state_heading delta lives in drivebase_angle.h as
+ * db_angle_heading_mdeg_to_state_mdeg() so the offline _alg ff-trace
+ * verb (drivebase_main.c) can replay the heading trajectory in the same
+ * units the RT path uses (#158).  See that header for the derivation.
  */
-
-static int64_t heading_mdeg_to_state_mdeg(int64_t heading_mdeg,
-                                          uint32_t wheel_d_um,
-                                          uint32_t axle_t_um)
-{
-  /* Phase 3b (#148) widened the input to int64 so the Madgwick-derived
-   * world heading (unwrapped over an entire run, ±2^63 mdeg headroom)
-   * can flow straight into the state-space PID without an int32 saturate.
-   * Encoder callers stay correct: int32 lossless to int64.
-   */
-
-  if (wheel_d_um == 0) return 0;
-  return heading_mdeg * (int64_t)axle_t_um / (int64_t)wheel_d_um;
-}
 
 /* Clamp helper for the L/R compose. */
 
@@ -525,8 +502,8 @@ static void db_drivebase_capture_start_heading(
       int64_t raw = db_imu_get_heading_mdeg(db->imu);
       int64_t rel = raw - db->gyro_origin_mdeg;
       state->heading_x_mdeg =
-          heading_mdeg_to_state_mdeg(rel, db->wheel_d_um,
-                                     db->axle_t_um);
+          db_angle_heading_mdeg_to_state_mdeg(rel, db->wheel_d_um,
+                                              db->axle_t_um);
       /* heading_v_mdegps stays encoder-derived: LSM6DSL ODR/quantisation
        * makes the per-tick gyro-rate-only D-term noisy.  Following the
        * pybricks pattern, only the position term flips to IMU; the rate
@@ -637,8 +614,8 @@ int db_drivebase_turn(struct db_drivebase_s *db,
                       uint8_t on_completion)
 {
   int64_t heading_delta_mdeg =
-      heading_mdeg_to_state_mdeg((int64_t)angle_deg * 1000,
-                                 db->wheel_d_um, db->axle_t_um);
+      db_angle_heading_mdeg_to_state_mdeg((int64_t)angle_deg * 1000,
+                                          db->wheel_d_um, db->axle_t_um);
 
   int32_t v_override = 0;
   if (turn_rate_dps != 0)
@@ -693,8 +670,8 @@ int db_drivebase_drive_curve(struct db_drivebase_s *db,
   int64_t dist_delta_mdeg = mm_to_motor_mdeg(dl_avg_mm, db->wheel_d_um);
 
   int64_t heading_delta_mdeg =
-      heading_mdeg_to_state_mdeg((int64_t)angle_deg * 1000,
-                                 db->wheel_d_um, db->axle_t_um);
+      db_angle_heading_mdeg_to_state_mdeg((int64_t)angle_deg * 1000,
+                                          db->wheel_d_um, db->axle_t_um);
 
   /* Rounding can collapse one delta to zero even though the original
    * (radius, angle) pair is non-degenerate.  Route to the single-axis

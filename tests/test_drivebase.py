@@ -347,6 +347,86 @@ def test_drivebase_other_builtins_unaffected_by_daemon(p):
 
 
 # ---------------------------------------------------------------------------
+# Non-interactive: `_alg ff-trace` offline feed-forward replay (Phase 7,
+# Issue #158).  No motors, no daemon required — geometry falls back to the
+# compiled 56/112 mm SPIKE default when the daemon is stopped, so these
+# are deterministic.
+# ---------------------------------------------------------------------------
+
+
+_FF_AXIS_HDR_RE = re.compile(
+    r"^#\s+(?P<axis>distance|heading)\s+axis:\s+x1=(?P<x1>-?\d+)\s+"
+    r"v_peak=(?P<v>-?\d+).*kV=(?P<kv>-?\d+)\s+kA=(?P<ka>-?\d+)",
+    re.MULTILINE,
+)
+
+
+def test_alg_ff_trace_turn_state_space_conversion(p):
+    """D-FFTRACE-1: `_alg ff-trace turn` uses heading STATE-space units.
+
+    The decisive units check (Issue #158): a turn's heading state delta
+    is `deg * 1000 * axle_t / wheel_d`.  With the default 56/112 mm
+    geometry the axle/wheel ratio is exactly 2, so `turn 90` must report
+    x1 = 90000 * 2 = 180000 motor-mdeg.  A regression to chassis-degree
+    (x1 = 90000) or a wrong ratio would fail here.  Daemon stopped so the
+    compiled default geometry is used.
+    """
+    _ensure_stopped(p)
+    out = p.sendCommand("drivebase _alg ff-trace turn 90", timeout=5)
+    m = _FF_AXIS_HDR_RE.search(out)
+    assert m and m.group("axis") == "heading", (
+        f"ff-trace turn missing heading axis header: {out!r}"
+    )
+    x1 = int(m.group("x1"))
+    assert x1 == 180000, (
+        f"ff-trace turn 90 state-space x1={x1}, expected 180000 "
+        f"(= 90000 * axle/wheel=2): {out!r}"
+    )
+
+
+def test_alg_ff_trace_duty_ff_matches_gains(p):
+    """D-FFTRACE-2: duty_ff column equals kV*(v/1000)+kA*(a/1000).
+
+    Self-consistency check of the FF formula the trace shares with the
+    RT path.  Parse the header kV/kA and a cruise-phase row (a=0, v at
+    peak), then confirm the printed duty_ff matches kV*(v/1000) exactly.
+    Uses the distance axis where kV is non-zero in production.
+    """
+    _ensure_stopped(p)
+    out = p.sendCommand("drivebase _alg ff-trace straight 300", timeout=5)
+    m = _FF_AXIS_HDR_RE.search(out)
+    assert m and m.group("axis") == "distance", (
+        f"ff-trace straight missing distance axis header: {out!r}"
+    )
+    kv = int(m.group("kv"))
+    ka = int(m.group("ka"))
+
+    # Data rows: t_ms ref_x ref_v ref_a duty_ff  (5 signed ints).
+    row_re = re.compile(
+        r"^\s*(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s*$",
+        re.MULTILINE,
+    )
+    rows = [tuple(int(x) for x in g) for g in row_re.findall(out)]
+    assert rows, f"ff-trace straight produced no data rows: {out!r}"
+
+    def _div1000_trunc(n):
+        # C integer division truncates toward zero; mirror it exactly.
+        return -((-n) // 1000) if n < 0 else n // 1000
+
+    checked = 0
+    for _t, _x, v, a, duty_ff in rows:
+        v_dps = _div1000_trunc(v)
+        a_dps2 = _div1000_trunc(a)
+        expect = kv * v_dps + ka * a_dps2
+        assert duty_ff == expect, (
+            f"duty_ff={duty_ff} != kV*{v_dps}+kA*{a_dps2}={expect} "
+            f"(row v={v} a={a}): {out!r}"
+        )
+        checked += 1
+    assert checked >= 3, f"too few ff-trace rows to validate: {out!r}"
+
+
+# ---------------------------------------------------------------------------
 # Interactive: require physical motor pair (odd + even port)
 # ---------------------------------------------------------------------------
 

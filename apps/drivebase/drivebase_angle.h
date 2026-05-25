@@ -107,6 +107,38 @@ static inline int32_t db_angle_mmps_to_mdegps(int32_t mmps,
   return (int32_t)mdeg;
 }
 
+/* Heading rotation (robot mdeg) -> state_heading delta in motor-mdeg
+ * (state-space = (sR - sL) / 2).  Derivation:
+ *   per-wheel diff travel (mm) = h_rad * axle_t
+ *                              = (h_mdeg / 1000) * π/180 * axle_t_mm
+ *   per-wheel diff (motor mdeg) = per_wheel_mm * 360 * 1000 /
+ *                                 (π * wheel_d_mm)
+ *   2 * state_heading_delta = sR - sL = full diff, so
+ *     state_heading_delta = h_mdeg * axle_t / wheel_d   (π and 360
+ *     cancel cleanly).
+ *
+ * The same ratio converts a heading angular rate (mdeg/s) to a
+ * state-space velocity (motor-mdeg/s).  In a SYMMETRIC pivot the two
+ * wheels run at equal-and-opposite speed, so (sR - sL)/2 equals the
+ * per-wheel speed magnitude — which is why pivot-mode SysId can fit
+ * ff_head_kV/kA in per-wheel units with no axle/wheel scaling (#158).
+ *
+ * int64 input (Phase 3b #148) so the Madgwick-derived unwrapped world
+ * heading flows in without an int32 saturate; encoder int32 callers are
+ * lossless.
+ */
+
+static inline int64_t db_angle_heading_mdeg_to_state_mdeg(int64_t heading_mdeg,
+                                                          uint32_t wheel_d_um,
+                                                          uint32_t axle_t_um)
+{
+  if (wheel_d_um == 0)
+    {
+      return 0;
+    }
+  return heading_mdeg * (int64_t)axle_t_um / (int64_t)wheel_d_um;
+}
+
 #ifdef __cplusplus
 }
 #endif

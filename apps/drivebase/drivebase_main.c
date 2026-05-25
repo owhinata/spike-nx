@@ -1717,12 +1717,165 @@ static int do_alg_stretch(int argc, FAR char *argv[])
   return rc;
 }
 
+/* `drivebase _alg ff-trace` (Issue #158 Phase 7): offline replay of one
+ * axis's trapezoidal trajectory + the feed-forward duty the current
+ * gains would command.  The trace is SAMPLED (~80 points across the
+ * move, floored at the 5 ms RT tick) — short moves resolve every tick,
+ * long moves are summarised; the FF curve is piecewise-linear so the
+ * shape is preserved either way.  Diagnoses WHY the heading FF behaves
+ * as it does without instrumenting the RT path.
+ *
+ * NOMINAL, UNSATURATED trace.  db_trajectory_get_reference is the exact
+ * function the RT path samples, but the live aggregate applies a
+ * reference-time PAUSE when the PID output rails (anti-windup,
+ * drivebase_aggregate.c).  That pause is NOT replayed here, so under
+ * sustained saturation the live wall-clock FF duration/energy diverges
+ * from this trace.  For a clean (non-saturating) move it matches the
+ * live reference tick-for-tick.
+ *
+ * Runs in the CLI task, never the RT thread: no ABI change, no per-tick
+ * cost, free to use int64.  All positions/velocities are motor-mdeg
+ * STATE space (heading = (sR - sL)/2) — exactly what ff_head_kV consumes.
+ */
+
+static void ff_trace_one_axis(const char *axis,
+                              int64_t x1_mdeg, int32_t v_mdegps,
+                              int32_t accel, int32_t decel,
+                              const struct db_ff_axis_gains_s *ff)
+{
+  struct db_trajectory_s tr;
+  db_trajectory_init_position(&tr, 0, 0, x1_mdeg, v_mdegps, accel, decel);
+
+  printf("# %s axis: x1=%lld v_peak=%ld accel=%ld decel=%ld total=%llu us "
+         "kV=%ld kA=%ld\n",
+         axis, (long long)tr.x1_mdeg, (long)tr.v_peak_mdegps,
+         (long)accel, (long)decel,
+         (unsigned long long)tr.total_dt_us,
+         (long)ff->kV, (long)ff->kA);
+  printf("# t_ms  ref_x_mdeg  ref_v_mdegps  ref_a_mdegps2  duty_ff_pct01\n");
+
+  /* Sample ~80 points across the move + a 10 % tail (so the post-done
+   * FF=0 flat is visible), floored at the 5 ms RT tick so short moves
+   * still resolve the accel/decel ramps.
+   */
+
+  uint64_t span = tr.total_dt_us + tr.total_dt_us / 10;
+  uint64_t step = span / 80;
+  if (step < 5000) step = 5000;
+
+  for (uint64_t t = 0; t <= span; t += step)
+    {
+      struct db_trajectory_ref_s ref;
+      db_trajectory_get_reference(&tr, t, &ref);
+
+      /* Mirror drivebase_aggregate.c FF math exactly: 32-bit /1000 first
+       * (RT-safe form), then multiply.  Keeps the trace bit-aligned with
+       * what the live path computes for the same reference.
+       */
+
+      int32_t v_dps   = ref.v_mdegps  / 1000;
+      int32_t a_dps2  = ref.a_mdegps2 / 1000;
+      int32_t duty_ff = ff->kV * v_dps + ff->kA * a_dps2;
+
+      printf("%6ld  %10lld  %12ld  %13ld  %12ld\n",
+             (long)(t / 1000), (long long)ref.x_mdeg,
+             (long)ref.v_mdegps, (long)ref.a_mdegps2, (long)duty_ff);
+    }
+}
+
+static int do_alg_ff_trace(int argc, FAR char *argv[])
+{
+  if (argc < 2 ||
+      (strcmp(argv[0], "straight") != 0 && strcmp(argv[0], "turn") != 0))
+    {
+      fprintf(stderr,
+              "usage: drivebase _alg ff-trace "
+              "{straight <mm> [<mmps>] | turn <deg> [<dps>]}\n"
+              "  Offline NOMINAL replay of the per-axis trajectory + the\n"
+              "  feed-forward duty the current gains command.  SAMPLED\n"
+              "  (~80 points, >= 5 ms grid), not every RT tick.\n"
+              "  Values are motor-mdeg STATE space (heading = (sR-sL)/2).\n"
+              "  Reference-time pause (anti-windup) is NOT replayed, so\n"
+              "  under saturation the live FF diverges from this trace.\n"
+              "  Geometry comes from the running daemon, else 56/112 mm.\n");
+      return 1;
+    }
+
+  /* Resolve geometry from the live daemon, else compiled SPIKE default
+   * (same pattern as `_alg settings`).
+   */
+
+  uint32_t wheel_d_um = 56000;
+  uint32_t axle_t_um  = 112000;
+  int fd = open(DRIVEBASE_DEVPATH, O_RDONLY);
+  if (fd >= 0)
+    {
+      struct drivebase_status_s st;
+      memset(&st, 0, sizeof(st));
+      if (ioctl(fd, DRIVEBASE_GET_STATUS, (unsigned long)&st) == 0 &&
+          st.daemon_attached && st.wheel_d_um > 0 && st.axle_t_um > 0)
+        {
+          wheel_d_um = st.wheel_d_um;
+          axle_t_um  = st.axle_t_um;
+        }
+      close(fd);
+    }
+
+  printf("# ff-trace: wheel_d=%lu um axle_t=%lu um  (ref-time pause NOT "
+         "replayed)\n",
+         (unsigned long)wheel_d_um, (unsigned long)axle_t_um);
+
+  /* Fetch only the axis we need inside each branch — the limit
+   * accessors may hand back a recomputed static, so we must not hold a
+   * distance pointer across a heading call (or vice versa).
+   */
+
+  if (strcmp(argv[0], "straight") == 0)
+    {
+      const struct db_traj_limits_s *dl =
+          db_settings_distance_limits(wheel_d_um);
+      int32_t mm   = (int32_t)atol(argv[1]);
+      int32_t mmps = (argc >= 3) ? (int32_t)atol(argv[2]) : 0;
+      int64_t x1   = db_angle_mm_to_mdeg(mm, wheel_d_um);
+      int32_t v    = (mmps != 0)
+                     ? db_angle_mmps_to_mdegps(mmps < 0 ? -mmps : mmps,
+                                               wheel_d_um)
+                     : dl->v_max_mdegps;
+      ff_trace_one_axis("distance", x1, v,
+                        dl->accel_mdegps2, dl->decel_mdegps2,
+                        db_settings_ff_axis_gains(DB_AXIS_DISTANCE));
+    }
+  else /* turn */
+    {
+      const struct db_traj_limits_s *hl =
+          db_settings_heading_limits(wheel_d_um, axle_t_um);
+      int32_t deg = (int32_t)atol(argv[1]);
+      int32_t dps = (argc >= 3) ? (int32_t)atol(argv[2]) : 0;
+      int64_t x1  = db_angle_heading_mdeg_to_state_mdeg((int64_t)deg * 1000,
+                                                        wheel_d_um, axle_t_um);
+      /* Same heading-rate -> state-velocity conversion as
+       * db_drivebase_turn (v_state = dps * 1000 * axle_t / wheel_d).
+       */
+
+      int32_t v   = (dps != 0)
+                    ? (int32_t)((int64_t)(dps < 0 ? -dps : dps) * 1000 *
+                                (int64_t)axle_t_um / wheel_d_um)
+                    : hl->v_max_mdegps;
+      ff_trace_one_axis("heading", x1, v,
+                        hl->accel_mdegps2, hl->decel_mdegps2,
+                        db_settings_ff_axis_gains(DB_AXIS_HEADING));
+    }
+
+  return 0;
+}
+
 static int do_alg_subcmd(int argc, FAR char *argv[])
 {
   if (argc < 1)
     {
       fprintf(stderr,
-              "usage: drivebase _alg {traj|stretch|settings|angle} ...\n");
+              "usage: drivebase _alg "
+              "{traj|stretch|settings|angle|ff-trace} ...\n");
       return 1;
     }
   if (strcmp(argv[0], "traj") == 0)
@@ -1740,6 +1893,10 @@ static int do_alg_subcmd(int argc, FAR char *argv[])
   if (strcmp(argv[0], "angle") == 0)
     {
       return do_alg_angle(argc - 1, &argv[1]);
+    }
+  if (strcmp(argv[0], "ff-trace") == 0)
+    {
+      return do_alg_ff_trace(argc - 1, &argv[1]);
     }
   fprintf(stderr, "_alg: unknown subcommand '%s'\n", argv[0]);
   return 1;
