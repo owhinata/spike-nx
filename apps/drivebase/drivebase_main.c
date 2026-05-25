@@ -1830,7 +1830,7 @@ static void usage(void)
           "  drivebase stop-motion <coast|brake|hold>    STOP\n"
           "  drivebase get-state [duration_ms [interval_ms]]\n"
           "                                              GET_STATE (table; default one-shot)\n"
-          "  drivebase set-gyro <none|1d|3d>             SET_USE_GYRO\n"
+          "  drivebase set-gyro <none|3d>                SET_USE_GYRO\n"
           "  drivebase jitter [reset]                    JITTER_DUMP\n"
           "  drivebase _sysid {ramp-ks|ramp-kv|ramp-ka|vbat} ...\n"
           "                                              FF system-id\n"
@@ -2363,22 +2363,32 @@ int main(int argc, FAR char *argv[])
     {
       if (argc < 3)
         {
-          fprintf(stderr, "usage: drivebase set-gyro <none|1d|3d>\n");
+          fprintf(stderr, "usage: drivebase set-gyro <none|3d>\n");
           close(dev); return 1;
         }
       uint8_t mode;
       if      (strcmp(argv[2], "none") == 0) mode = DRIVEBASE_USE_GYRO_NONE;
-      else if (strcmp(argv[2], "1d")   == 0) mode = DRIVEBASE_USE_GYRO_1D;
       else if (strcmp(argv[2], "3d")   == 0) mode = DRIVEBASE_USE_GYRO_3D;
       else
         {
           /* Codex NIT: silent fallback to NONE hides typos.  Surface
            * the bad argument and bail rather than mutating state.
+           * Issue #157: `1d` was removed — its fused-projection heading
+           * is now `3d`, so point users at the replacement explicitly.
            */
 
-          fprintf(stderr,
-                  "drivebase set-gyro: unknown mode '%s' "
-                  "(expected none|1d|3d)\n", argv[2]);
+          if (strcmp(argv[2], "1d") == 0)
+            {
+              fprintf(stderr,
+                      "drivebase set-gyro: '1d' was removed; "
+                      "use '3d' (same projection heading)\n");
+            }
+          else
+            {
+              fprintf(stderr,
+                      "drivebase set-gyro: unknown mode '%s' "
+                      "(expected none|3d)\n", argv[2]);
+            }
           close(dev);
           return 1;
         }

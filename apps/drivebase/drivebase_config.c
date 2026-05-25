@@ -257,8 +257,11 @@ static int set_tick_us(const char *value)
   return 0;
 }
 
-/* Phase 3b (#148): use_gyro_plus1 ∈ {0..2}.  See struct
- * db_config_start_defaults_s comment for the encoding.
+/* Phase 3b (#148): use_gyro_plus1 ∈ {0,1,3}.  See struct
+ * db_config_start_defaults_s comment for the encoding.  Issue #157
+ * removed 1D: a legacy value of 2 (old 1D) is aliased to 3 (3D) — the
+ * fused-projection heading is identical — so existing cfg files keep
+ * gyro-on at boot instead of silently dropping to encoder-only.
  */
 
 static int set_use_gyro_plus1(const char *value)
@@ -266,7 +269,14 @@ static int set_use_gyro_plus1(const char *value)
   uint32_t v;
   int rc = parse_u32(value, &v);
   if (rc < 0) return rc;
-  if (v > 2) return -EINVAL;
+  if (v > 3) return -EINVAL;
+  if (v == 2)
+    {
+      syslog(LOG_WARNING,
+             "drivebase cfg: use_gyro_plus1=2 (1D) is deprecated; "
+             "treating as 3 (3D)\n");
+      v = 3;
+    }
   g_start_defaults.use_gyro_plus1 = (uint8_t)v;
   return 0;
 }
@@ -444,14 +454,15 @@ int db_config_load(const char *path)
 
   /* Phase 6 production default: gyro-locked heading at boot.  Phase
    * 2.5/3a/3b shipped the Madgwick fusion + heading-PID injection so
-   * the typical drivebase use case wants 1D gyro from the first
-   * command.  cfg can still override to 0/1 (NONE) explicitly if the
+   * the typical drivebase use case wants gyro heading from the first
+   * command.  cfg can still override to 1 (NONE) explicitly if the
    * IMU is intentionally disabled; this just changes the unedited-
    * cfg default.  See drivebase_daemon.c for the `use_gyro_plus1 - 1`
-   * decode and the latched-on-first-command flow.
+   * decode and the latched-on-first-command flow.  Issue #157: 3D is
+   * now the only gyro mode (1D removed).
    */
 
-  g_start_defaults.use_gyro_plus1 = 2;   /* +1 encoding: 2 = 1D    */
+  g_start_defaults.use_gyro_plus1 = 3;   /* +1 encoding: 3 = 3D    */
 
   if (path == NULL) path = DB_CONFIG_DEFAULT_PATH;
 

@@ -15,11 +15,12 @@
 # the hub and edit the values you want to override; comment out (or
 # delete) everything else.
 #
-# Phase 6.6 flipped the `use_gyro_plus1` default from 0 (key absent →
-# DRIVEBASE_USE_GYRO_NONE) to 2 (1D gyro-locked heading).  The typical
-# SPIKE drivebase use case wants the IMU active from boot; if your
-# build intentionally disables the gyro, set the line near the bottom
-# to 1 (= NONE explicit).
+# Phase 6.6 flipped the `use_gyro_plus1` default to gyro-locked heading
+# at boot; Issue #157 removed the old `1d` mode and made `3d` the sole
+# gyro mode, so the compiled default is now 3 (3D).  The typical SPIKE
+# drivebase use case wants the IMU active from boot; if your build
+# intentionally disables the gyro, set the line near the bottom to 1
+# (= NONE explicit).  A legacy value of 2 (old 1D) is auto-aliased to 3.
 #
 # Phase 6 (#152) shipped a coordinated FF + PID retune.  The compiled
 # defaults reflect the Phase 6.6 bench result:
@@ -254,16 +255,17 @@ battery_nominal_mv = 7200
 battery_min_mv     = 6000
 
 # ----------------------------------------------------------------------
-# Phase 3b (#148) boot-time gyro mode (Phase 6.6: default flipped to 2)
+# Phase 3b (#148) boot-time gyro mode (Issue #157: default is 3 = 3D)
 #   0 = key absent  — daemon picks DRIVEBASE_USE_GYRO_NONE (legacy)
 #   1 = NONE        — explicit encoder-only at boot
-#   2 = 1D          — gyro-locked heading at boot (Phase 6 default)
+#   3 = 3D          — gyro-locked heading at boot (default)
+# A legacy value of 2 (old 1D) is auto-aliased to 3 with a warning.
 # The mode is only `latched` once the first command starts AND Madgwick
 # has converged (calibrated); `drivebase status` reports the live state.
 # Set to 1 if you intentionally want to disable the gyro at boot.
 # ----------------------------------------------------------------------
 
-use_gyro_plus1 = 2
+use_gyro_plus1 = 3
 
 # ----------------------------------------------------------------------
 # `drivebase start` defaults

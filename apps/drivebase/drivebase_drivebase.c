@@ -330,14 +330,14 @@ int db_drivebase_set_use_gyro(struct db_drivebase_s *db, uint8_t mode,
 {
   /* Validation first — keep the active check after, so unsupported modes
    * are rejected even while the drivebase is idle.
+   *
+   * Issue #157: `1d` was removed.  Its old behaviour (fused-quaternion
+   * forward projection) is exactly what `3d` now selects, so only NONE
+   * and 3D are accepted; everything else (including the retired
+   * DRIVEBASE_USE_GYRO_1D = enum 1) is rejected with -EINVAL.
    */
 
-  if (mode == DRIVEBASE_USE_GYRO_3D)
-    {
-      db->last_set_gyro_rc = -ENOSYS;
-      return -ENOSYS;
-    }
-  if (mode != DRIVEBASE_USE_GYRO_NONE && mode != DRIVEBASE_USE_GYRO_1D)
+  if (mode != DRIVEBASE_USE_GYRO_NONE && mode != DRIVEBASE_USE_GYRO_3D)
     {
       db->last_set_gyro_rc = -EINVAL;
       return -EINVAL;
@@ -354,7 +354,7 @@ int db_drivebase_set_use_gyro(struct db_drivebase_s *db, uint8_t mode,
       return -EBUSY;
     }
 
-  /* Snapshot old state BEFORE mutating — needed for the same-mode-1D
+  /* Snapshot old state BEFORE mutating — needed for the same-mode-3D
    * no-op below (Codex BLOCKING #1, Issue #148 implementation review).
    */
 
@@ -381,7 +381,7 @@ int db_drivebase_set_use_gyro(struct db_drivebase_s *db, uint8_t mode,
    *   - mode == NONE              → drop any cached origin so a future
    *                                  re-enable can't silently pick up
    *                                  a stale baseline.
-   *   - same mode 1D & valid &
+   *   - same mode 3D & valid &
    *     capturable                → KEEP the existing origin as-is.
    *                                  Re-deriving from `db->angle_mdeg`
    *                                  would compute the baseline from
@@ -402,7 +402,7 @@ int db_drivebase_set_use_gyro(struct db_drivebase_s *db, uint8_t mode,
     {
       db->gyro_origin_valid = false;
     }
-  else if (!mode_changed && mode == DRIVEBASE_USE_GYRO_1D && old_valid &&
+  else if (!mode_changed && mode == DRIVEBASE_USE_GYRO_3D && old_valid &&
            gyro_origin_capturable(db, now_us))
     {
       /* No-op: preserve the existing origin so publish doesn't jump. */
@@ -498,7 +498,7 @@ static void db_drivebase_capture_start_heading(
        */
 
       if (!db->gyro_origin_valid &&
-          db->use_gyro_latched == DRIVEBASE_USE_GYRO_1D &&
+          db->use_gyro_latched == DRIVEBASE_USE_GYRO_3D &&
           db->imu != NULL)
         {
           db->gyro_origin_mdeg =
@@ -515,7 +515,7 @@ static void db_drivebase_capture_start_heading(
    * value.  Latched is the *intent*; the guards are the *trust check*.
    */
 
-  if (db->use_gyro_latched == DRIVEBASE_USE_GYRO_1D &&
+  if (db->use_gyro_latched == DRIVEBASE_USE_GYRO_3D &&
       db->imu != NULL &&
       db->gyro_origin_valid &&
       db_imu_is_calibrated(db->imu) &&

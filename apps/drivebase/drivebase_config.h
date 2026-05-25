@@ -57,9 +57,10 @@ struct db_config_start_defaults_s
    *
    *   0 = unset       — daemon picks DRIVEBASE_USE_GYRO_NONE
    *   1 = NONE        — explicit encoder-only
-   *   2 = 1D          — gyro-locked heading at boot
+   *   3 = 3D          — gyro-locked heading at boot
    *
-   * Other values are rejected by the parser, so consumers can treat
+   * Issue #157 removed 1D: a legacy value of 2 (old 1D) is aliased to
+   * 3 by the parser.  Other values are rejected, so consumers can treat
    * `use_gyro_plus1 - 1` as the enum once they confirm != 0.
    */
 

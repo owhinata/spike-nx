@@ -167,10 +167,10 @@ static int rt_tick_cb(uint64_t now_us_arg, void *arg)
    *
    * Phase 3b (#148) publish overwrite — fold the IMU heading into
    * `angle_mdeg` when EITHER of the two scenarios holds:
-   *   1. A motion is in flight with latched 1D mode (the PID is
+   *   1. A motion is in flight with latched 3D mode (the PID is
    *      already running on the gyro state input — publish must agree
    *      so reset/SMART/get-state stay coherent with the PID).
-   *   2. The drivebase is idle but the user already armed 1D mode and
+   *   2. The drivebase is idle but the user already armed 3D mode and
    *      we hold a valid origin.  This is the manual-spin case
    *      ("hand-rotate the robot and watch angle_mdeg track").
    * In both cases the IMU must be online and not stale; otherwise the
@@ -190,8 +190,8 @@ static int rt_tick_cb(uint64_t now_us_arg, void *arg)
       db_drivebase_get_state(&d->db, &st);
 
       bool publish_gyro =
-          (d->db.use_gyro_latched   == DRIVEBASE_USE_GYRO_1D) ||
-          (d->db.use_gyro_requested == DRIVEBASE_USE_GYRO_1D &&
+          (d->db.use_gyro_latched   == DRIVEBASE_USE_GYRO_3D) ||
+          (d->db.use_gyro_requested == DRIVEBASE_USE_GYRO_3D &&
            d->db.gyro_origin_valid);
 
       if (publish_gyro && d->imu_open && d->db.gyro_origin_valid &&

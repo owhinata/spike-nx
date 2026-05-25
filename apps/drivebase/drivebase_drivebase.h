@@ -148,7 +148,7 @@ struct db_drivebase_s
                                 /* set at command-start when capturable    */
   volatile int8_t    last_set_gyro_rc;
                                 /* last db_drivebase_set_use_gyro return   */
-                                /* code (0 / -EBUSY / -EINVAL / -ENOSYS)   */
+                                /* code (0 / -EBUSY / -EINVAL)             */
   int64_t            gyro_origin_mdeg;
                                 /* robot-heading mdeg baseline; subtract   */
                                 /* from raw IMU heading to obtain the      */
@@ -209,10 +209,12 @@ void db_drivebase_attach_imu(struct db_drivebase_s *db,
                              struct db_imu_s *imu);
 
 /* Phase 3b (#148) — change the requested gyro mode.  Returns 0 on
- * success, -EBUSY if a motion is in flight, -EINVAL for unknown modes,
- * -ENOSYS for 3D (not yet implemented).  Updates the db's latched
- * `last_set_gyro_rc` regardless of the path taken so a status snapshot
- * can observe the last attempt.  Single-thread (RT tick) only.
+ * success, -EBUSY if a motion is in flight, -EINVAL for unsupported
+ * modes.  Issue #157: only NONE and 3D are accepted; 1D was removed
+ * (its fused-quaternion forward-projection heading is what 3D selects).
+ * Updates the db's latched `last_set_gyro_rc` regardless of the path
+ * taken so a status snapshot can observe the last attempt.
+ * Single-thread (RT tick) only.
  */
 
 int  db_drivebase_set_use_gyro(struct db_drivebase_s *db, uint8_t mode,

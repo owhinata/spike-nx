@@ -462,6 +462,12 @@ Phase 3b wires that into the drivebase aggregate heading PID's **state
 input** — encoder `(sR-sL)/2` alone cannot close the loop on wheel slip,
 gear backlash, or motor-to-motor mismatch.
 
+This world-vertical heading is the body forward-axis projected onto the
+world horizontal plane — i.e. the **3D heading** in §7 terms.  Issue #157
+made `set-gyro 3d` the sole gyro mode and removed the old `1d` name (it
+computed this same projection); `set-gyro 1d` is now rejected with
+`-EINVAL`.
+
 ### Structure
 
 | Concept | Source | Where |
@@ -505,14 +511,15 @@ sample from this tick reaches the PID.
 ### Publish overwrite
 
 `drivebase_daemon.c` overwrites `st.angle_mdeg` with `(int32_t)CLAMP(raw -
-gyro_origin_mdeg, INT32_MIN, INT32_MAX)` whenever `latched == 1D` (mid-
-motion) or `requested == 1D && origin_valid` (idle after `set-gyro`).  The
+gyro_origin_mdeg, INT32_MIN, INT32_MAX)` whenever `latched == 3D` (mid-
+motion) or `requested == 3D && origin_valid` (idle after `set-gyro`).  The
 PID and the user-visible publish share a single origin, so they stay in
 SSOT lock-step.
 
 ### Out of scope (deferred Issues)
 
 - X/Y bias EMA temperature tracking — Phase 3a Codex CONCERN 2 territory
-- 3D mode (`set-gyro 3d`) — returns `-ENOSYS` until Phase 7
+- 1D mode (`set-gyro 1d`) — removed in Issue #157; `3d` (the fused
+  forward-axis projection) is the sole gyro heading mode
 - Evaluation of the I-term spike on IMU-stale → encoder fallback — bench
   acceptance assumes no stalls; this is a follow-up Issue

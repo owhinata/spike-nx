@@ -51,7 +51,7 @@ apps/drivebase/
 ├── drivebase_chardev_handler.{c,h}  DAEMON_ATTACH/PICKUP/PUBLISH wrapper
 ├── drivebase_rt.{c,h}               SCHED_FIFO 220 + clock_nanosleep 5 ms tick + jitter ring
 ├── drivebase_motor.{c,h}            sensor_motor_l/r encoder drain + SET_PWM/COAST/BRAKE
-├── drivebase_imu.{c,h}              sensor_imu0 drain + Z-gyro heading 1D
+├── drivebase_imu.{c,h}              sensor_imu0 drain + Madgwick 3D heading
 ├── drivebase_drivebase.{c,h}        L/R 集約 (drive_straight / turn / curve / arc / forever)
 ├── drivebase_servo.{c,h}            per-motor 閉ループ
 ├── drivebase_observer.{c,h}         sliding-window slope (default 30 ms)
@@ -209,7 +209,7 @@ PROGNAME = `drivebase` (NSH builtin)。stack size は 4096 (§7 参照)。
 | `drivebase forever <mmps> <dps>` | DRIVE_FOREVER (停止しない、distance + heading 同時) |
 | `drivebase stop-motion <coast\|brake\|hold>` | DRIVEBASE_STOP (緊急停止 fast path) |
 | `drivebase get-state [duration_ms [interval_ms]]` | DRIVEBASE_GET_STATE。引数なしは 1 行のみ。`duration_ms` 指定時は `interval_ms` 毎 (default 100ms) にサンプリングして 1 行ずつ表形式で出力 |
-| `drivebase set-gyro <none\|1d\|3d>` | DRIVEBASE_SET_USE_GYRO (heading 上書き) |
+| `drivebase set-gyro <none\|3d>` | DRIVEBASE_SET_USE_GYRO (heading 上書き) |
 | `drivebase jitter [reset]` | DRIVEBASE_JITTER_DUMP (RT loop の wake latency 統計) |
 
 開発専用の隠し verb: `_motor`, `_alg`, `_servo`, `_drive`, `_rt`, `_daemon`, `_imu`。lifecycle FSM の段階的検証用で、daemon 動作中には使用してはならない (g_daemon と BSS を共有する static 構造体を破壊する)。
@@ -444,16 +444,16 @@ distance + heading の 2 系 PID 出力 (mm/s, deg/s) を逆変換して L/R 各
 
 **Phase 3b heading PID への IMU 注入 (Issue [#148](https://github.com/owhinata/spike-nx/issues/148))**:
 
-`drivebase set-gyro 1d` で IMU world-vertical heading を heading PID の state 入力に注入できる (encoder slip / バックラッシュ / モーター個体差を closed-loop で吸収する)。注入は以下の 2 段に分けて構造的に race を防ぐ:
+`drivebase set-gyro 3d` で IMU world-vertical heading (body forward 軸を world 水平面へ射影したもの) を heading PID の state 入力に注入できる (encoder slip / バックラッシュ / モーター個体差を closed-loop で吸収する)。Issue #157 で同じ射影を計算していた旧 `1d` 名を廃止し `3d` に一本化した。注入は以下の 2 段に分けて構造的に race を防ぐ:
 
 - **requested** (`status.use_gyro_requested`): ユーザ要求モード。`set-gyro` ioctl または cfg `use_gyro_plus1` で更新される
 - **latched** (`status.use_gyro_latched`): モーション開始時 (`db_drivebase_capture_start_heading(do_latch=true)`) に一回だけ評価され、`gyro_origin_capturable()` (IMU attach済 + calibrated + not stale + requested != NONE) が成立した時のみ requested と同値が入る。モーション中は固定で、IMU が一時的に stale になっても per-tick 注入が encoder fallback に切替えるだけで latched は変えない
 
-走行中の `set-gyro` は `-EBUSY` (`status.last_set_gyro_rc=-16`)、`set-gyro 3d` は `-ENOSYS` (`-38`、Phase 7 まで)、不正値は `-EINVAL` (`-22`)。ioctl 戻り値は kernel chardev envelope queue を経由するため userspace に直接届かないが、daemon は `last_set_gyro_rc` 経由で公開する + `syslog(LOG_WARNING)` でも出力する。
+走行中の `set-gyro` は `-EBUSY` (`status.last_set_gyro_rc=-16`)、`set-gyro 1d` は CLI で拒否 (#157 で廃止、`3d` を使う)、その他の不正値は `-EINVAL` (`-22`)。ioctl 戻り値は kernel chardev envelope queue を経由するため userspace に直接届かないが、daemon は `last_set_gyro_rc` 経由で公開する + `syslog(LOG_WARNING)` でも出力する。
 
 注入は **position state のみ** (`state.heading_x_mdeg`)。`state.heading_v_mdegps` (D 項) は LSM6DSL の量子化ノイズを避けるため encoder 由来を維持。pybricks と同じパターン。
 
-origin は `gyro_origin_mdeg`: `set-gyro` / `set_origin` / `reset` / latch で `db_imu_get_heading_mdeg() - angle_mdeg` を保存し、PID 入力と publish の両方で `raw - gyro_origin_mdeg` を引いて使う。これで `drivebase reset 0 90` 直後の `get-state.angle_mdeg ≈ 90000`、encoder モードで turn 90 後に `set-gyro 1d` 切替えても publish が 0 にジャンプしない。
+origin は `gyro_origin_mdeg`: `set-gyro` / `set_origin` / `reset` / latch で `db_imu_get_heading_mdeg() - angle_mdeg` を保存し、PID 入力と publish の両方で `raw - gyro_origin_mdeg` を引いて使う。これで `drivebase reset 0 90` 直後の `get-state.angle_mdeg ≈ 90000`、encoder モードで turn 90 後に `set-gyro 3d` 切替えても publish が 0 にジャンプしない。
 
 publish path も同じ origin を引くので PID 状態と user-visible heading が SSOT 化される (走行中 + 未走行 manual rotate の両ケースで一致)。
 
@@ -623,7 +623,7 @@ Phase 6 で追加した FF / battery / SysId stack と Step 6.6 の ki sweep を
 | `ff_v_hyst_exit_mdegps` | 1000 | Phase 6.2 default |
 | `battery_nominal_mv` | 7200 | Phase 6.3 default、SPIKE 6S Li-Ion 公称 |
 | `battery_min_mv` | 6000 | Phase 6.3 default、1.2× cap |
-| `use_gyro_plus1` | **2** | Phase 6.6 で default を flip (0 → 2)、IMU を持つ典型ケースで boot 時から 1D gyro 有効 |
+| `use_gyro_plus1` | **3** | default 3 (3D gyro-locked heading)、IMU を持つ典型ケースで boot 時から gyro 有効。Issue #157 で `1d` 廃止、legacy `2` (旧 1D) は warning 付きで 3 に alias |
 
 **Step 6.6 ki sweep 全データ**: `straight 50` brake / `straight 300` brake / `turn 90` brake / `turn 180` brake を ki ∈ {0, 5, 10, 15} で各 2 run、計 32 runs。
 
@@ -693,7 +693,7 @@ Phase 6 で追加した FF / battery / SysId stack と Step 6.6 の ki sweep を
 | Start | `wheel_d_um` (56000) | uint32 | > 0、`drivebase start` CLI で wheel 省略時のみ採用 |
 | | `axle_t_um` (112000) | uint32 | > 0、CLI で axle 省略時のみ採用 |
 | | `tick_us` (DB_RT_TICK_US_DEFAULT) | uint32 | > 0、CLI で tick 省略時のみ採用 |
-| | `use_gyro_plus1` (0 = unset) | uint8 | Phase 3b (#148): 0 = key 不在で `NONE`、1 = `NONE`、2 = `1D`。daemon 起動時に `db_drivebase_set_use_gyro` を呼ぶだけ。Madgwick 未収束のため `latched` 遷移は最初のコマンドまで保留される |
+| | `use_gyro_plus1` (0 = unset) | uint8 | Phase 3b (#148): 0 = key 不在で `NONE`、1 = `NONE`、3 = `3D` (Issue #157: legacy 2 = 旧 `1D` は 3 に alias)。daemon 起動時に `db_drivebase_set_use_gyro` を呼ぶだけ。Madgwick 未収束のため `latched` 遷移は最初のコマンドまで保留される |
 
 **Wheel / axle / tick の precedence**: `drivebase start [wheel_mm] [axle_mm] [tick_ms]` で argc により明示判定。明示時は CLI 優先、省略時は config を採用、両方無しでコード default。
 
@@ -756,7 +756,7 @@ motor が両ポート (odd + even) に挿さっていない可能性。`drivebas
 
 実機 dmesg で `lump: port X: SYNCED type=48` が両 port で出ていることを確認。
 
-### 10.3 IMU 機能 (`set-gyro 1d`) が効かない
+### 10.3 IMU 機能 (`set-gyro 3d`) が効かない
 
 確認順序:
 
@@ -766,13 +766,12 @@ motor が両ポート (odd + even) に挿さっていない可能性。`drivebas
 2. `drivebase status` で `last_set_gyro_rc` を確認。
     - `0` → 受理されたが motion 開始時に latched に遷移しなかった可能性 (次へ)
     - `-16 (EBUSY)` → motion 中に `set-gyro` を発行した。`drivebase stop-motion coast` してから再試行
-    - `-38 (ENOSYS)` → `set-gyro 3d` は Phase 7 までサポート無し
-    - `-22 (EINVAL)` → 不正値
-3. `use_gyro_requested == 1` だが `use_gyro_latched == 0` のまま motion を発行している:
+    - `-22 (EINVAL)` → 不正値。`set-gyro 1d` は #157 で廃止、`set-gyro 3d` を使う
+3. `use_gyro_requested == 2` だが `use_gyro_latched == 0` のまま motion を発行している:
     - Madgwick 未収束 (cold-boot 直後)、`drivebase _imu show` で `madgwick.initialized=1` + `calibrated=1` を確認。200 ms 以上の静止が必要
     - IMU stale (`db_imu_is_stale` true)、`_imu drift 5` 等で sample が来ているか確認
 4. publish (`drivebase get-state` の `angle_mdeg`) が gyro origin-relative にならない:
-    - `use_gyro_requested == 1` かつ `gyro_origin_valid` (内部状態) が必要。`set-gyro 1d` 直後に capturable でなければ origin が立たないので、`drivebase reset 0 0` で再 origin 化を試す
+    - `use_gyro_requested == 2` かつ `gyro_origin_valid` (内部状態) が必要。`set-gyro 3d` 直後に capturable でなければ origin が立たないので、`drivebase reset 0 0` で再 origin 化を試す
 
 ### 10.4 stall watchdog が誤発火する
 

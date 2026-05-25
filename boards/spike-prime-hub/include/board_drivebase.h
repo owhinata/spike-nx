@@ -120,8 +120,13 @@ enum drivebase_on_completion_e
 enum drivebase_use_gyro_e
 {
   DRIVEBASE_USE_GYRO_NONE = 0,
-  DRIVEBASE_USE_GYRO_1D   = 1,
-  DRIVEBASE_USE_GYRO_3D   = 2,
+  DRIVEBASE_USE_GYRO_1D   = 1,  /* deprecated (Issue #157): removed from
+                                 * the runtime — set_use_gyro rejects it
+                                 * with -EINVAL.  The value is kept only
+                                 * for status-ABI stability.            */
+  DRIVEBASE_USE_GYRO_3D   = 2,  /* fused-quaternion heading: body forward
+                                 * axis projected onto the world horizontal
+                                 * plane (the former "1D" projection).    */
 };
 
 enum drivebase_active_command_e

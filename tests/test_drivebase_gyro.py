@@ -1,14 +1,18 @@
-"""Category G: drivebase Phase 3b — gyro-locked heading PID (Issue #148).
+"""Category G: drivebase gyro-locked heading PID (Issue #148 / #157).
 
 These tests cover the user-visible surface of the `set-gyro` ioctl and
 the published `status` fields that surround it (use_gyro / use_gyro_
 latched / last_set_gyro_rc / imu_present).  All non-interactive cases
 run with the daemon attached but no motor motion required.
 
+Issue #157 removed the old `1d` mode: `3d` (fused-quaternion forward
+projection — what `1d` used to compute) is now the sole gyro heading
+mode, and `set-gyro 1d` is rejected at the CLI.
+
 Interactive cases (mid-motion EBUSY, cold-boot un-calibrated path, cfg
 restart, 51° tilted bench accuracy) live behind `@pytest.mark.inter
 active` / `@pytest.mark.slow` so CI only runs the smoke set without
-hardware that's specific to the Phase 3b plan.
+hardware that's specific to the gyro-injection plan.
 """
 
 import re
@@ -57,13 +61,13 @@ def _start_with_imu(p, settle_s=5.0):
 # ---------------------------------------------------------------------------
 
 
-def test_g1_set_gyro_1d_status_fields(p):
-    """G-1: `drivebase set-gyro 1d` makes the requested mode visible.
+def test_g1_set_gyro_3d_status_fields(p):
+    """G-1: `drivebase set-gyro 3d` makes the requested mode visible.
 
     After issuing the ioctl with the daemon idle the published status
     must report:
       - imu_present == 1            (IMU opened at start)
-      - use_gyro_requested == 1     (the requested mode)
+      - use_gyro_requested == 2     (the requested mode = 3D)
       - use_gyro_latched   == 0     (no motion ⇒ nothing to latch yet)
       - last_set_gyro_rc   == 0     (ioctl accepted)
     `use_gyro` (legacy union alias) must mirror `use_gyro_requested` so
@@ -71,12 +75,12 @@ def test_g1_set_gyro_1d_status_fields(p):
     """
     try:
         _start_with_imu(p)
-        out = p.sendCommand("drivebase set-gyro 1d", timeout=5)
+        out = p.sendCommand("drivebase set-gyro 3d", timeout=5)
         # CLI prints nothing on success; absence of "SET_USE_GYRO" error
         # is the asynchronous-ioctl success path (env queued, daemon
         # dispatches in <1 tick).
         assert "SET_USE_GYRO" not in out, (
-            f"set-gyro 1d should not error: {out!r}"
+            f"set-gyro 3d should not error: {out!r}"
         )
 
         # Give the daemon idle loop (50 ms cadence) two wakes to refresh
@@ -85,8 +89,8 @@ def test_g1_set_gyro_1d_status_fields(p):
 
         st = _parse_status(p.sendCommand("drivebase status", timeout=5))
         assert st["imu_present"] == 1, st
-        assert st["use_gyro_requested"] == 1, st
-        assert st["use_gyro"] == 1, st        # union alias mirror
+        assert st["use_gyro_requested"] == 2, st
+        assert st["use_gyro"] == 2, st        # union alias mirror
         assert st["use_gyro_latched"] == 0, st
         assert st["last_set_gyro_rc"] == 0, st
     finally:
@@ -94,30 +98,34 @@ def test_g1_set_gyro_1d_status_fields(p):
         time.sleep(0.3)
 
 
-def test_g2_set_gyro_3d_returns_enosys(p):
-    """G-2: `drivebase set-gyro 3d` is rejected with -ENOSYS.
+def test_g2_set_gyro_1d_rejected(p):
+    """G-2: `drivebase set-gyro 1d` is rejected — 1D was removed (#157).
 
-    Phase 3b only implements 1D yaw injection; 3D is reserved for
-    Phase 7.  The CLI ioctl call enqueues into the kernel ring (envelope
-    accepted), but the daemon's dispatch returns -ENOSYS which surfaces
-    via `status.last_set_gyro_rc`.  `use_gyro_requested` must stay at
-    its previous value (here, NONE from the fresh start).
+    The CLI no longer accepts `1d`; it prints a migration hint pointing
+    at `3d` and bails *before* issuing the ioctl, so the daemon's
+    requested mode and last_set_gyro_rc are left untouched.
     """
     try:
         _start_with_imu(p)
-        # Baseline: requested stays at NONE before the bad call.
+        # Baseline: capture whatever the boot cfg left requested at (the
+        # compiled default is now 3D, #157), so we assert *unchanged*
+        # rather than a fixed value.
         st_before = _parse_status(p.sendCommand("drivebase status", timeout=5))
-        assert st_before["use_gyro_requested"] == 0, st_before
+        req_before = st_before["use_gyro_requested"]
+        rc_before = st_before["last_set_gyro_rc"]
 
-        p.sendCommand("drivebase set-gyro 3d", timeout=5)
+        out = p.sendCommand("drivebase set-gyro 1d", timeout=5)
+        # CLI rejects with a removal hint and does not send the ioctl.
+        assert "removed" in out, (
+            f"set-gyro 1d should print a removal hint: {out!r}"
+        )
         time.sleep(0.2)
 
         st = _parse_status(p.sendCommand("drivebase status", timeout=5))
-        # -ENOSYS = 38 in NuttX libc.
-        assert st["last_set_gyro_rc"] == -38, st
-        # Failed set must not change requested.
-        assert st["use_gyro_requested"] == 0, st
+        # CLI bailed before the ioctl — requested/latched/rc all unchanged.
+        assert st["use_gyro_requested"] == req_before, st
         assert st["use_gyro_latched"]   == 0, st
+        assert st["last_set_gyro_rc"] == rc_before, st
     finally:
         p.sendCommand("drivebase stop", timeout=8)
         time.sleep(0.3)
@@ -133,14 +141,14 @@ def test_g1b_manual_rotation_publish(p):
     """G-1b: hand-rotate the Hub 90° and confirm angle_mdeg tracks.
 
     The publish overwrite (drivebase_daemon.c) folds the IMU heading
-    into `get-state.angle_mdeg` whenever `use_gyro_requested == 1D`
+    into `get-state.angle_mdeg` whenever `use_gyro_requested == 3D`
     and a valid origin is held — including when no motion is in
-    flight.  This case proves the manual-spin path: set-gyro 1d →
+    flight.  This case proves the manual-spin path: set-gyro 3d →
     reset 0 0 → rotate by hand → angle_mdeg ≈ 90000.
     """
     try:
         _start_with_imu(p)
-        p.sendCommand("drivebase set-gyro 1d", timeout=5)
+        p.sendCommand("drivebase set-gyro 3d", timeout=5)
         time.sleep(0.3)
         p.sendCommand("drivebase reset 0 0", timeout=5)
         time.sleep(0.3)
@@ -169,7 +177,7 @@ def test_g1_5_reset_nonzero_origin(p):
     """
     try:
         _start_with_imu(p)
-        p.sendCommand("drivebase set-gyro 1d", timeout=5)
+        p.sendCommand("drivebase set-gyro 3d", timeout=5)
         time.sleep(0.3)
         p.sendCommand("drivebase reset 0 90", timeout=5)
         time.sleep(0.3)
@@ -190,30 +198,34 @@ def test_g1_5_reset_nonzero_origin(p):
 def test_g3_set_gyro_busy_mid_motion(p):
     """G-3: mid-motion `set-gyro` returns -EBUSY without disturbing latched.
 
-    Issue a long `forever` drive, then attempt set-gyro 1d.  The daemon
+    Issue a long `forever` drive, then attempt set-gyro 3d.  The daemon
     rejects with -EBUSY (status.last_set_gyro_rc == -16); requested
     stays at its previous value.  After `stop-motion` the next set-gyro
     succeeds with rc=0.
     """
     try:
         _start_with_imu(p)
+        # Boot cfg may already arm a mode (compiled default is 3D, #157);
+        # capture it so the mid-motion EBUSY assertion checks *unchanged*.
+        req0 = _parse_status(
+            p.sendCommand("drivebase status", timeout=5))["use_gyro_requested"]
         p.sendCommand("drivebase forever 0 60", timeout=5)
         time.sleep(0.3)
 
-        p.sendCommand("drivebase set-gyro 1d", timeout=5)
+        p.sendCommand("drivebase set-gyro 3d", timeout=5)
         time.sleep(0.2)
         st = _parse_status(p.sendCommand("drivebase status", timeout=5))
         assert st["last_set_gyro_rc"] == -16, st   # -EBUSY
-        assert st["use_gyro_requested"] == 0, st
+        assert st["use_gyro_requested"] == req0, st
 
         p.sendCommand("drivebase stop-motion coast", timeout=5)
         time.sleep(0.5)
 
-        p.sendCommand("drivebase set-gyro 1d", timeout=5)
+        p.sendCommand("drivebase set-gyro 3d", timeout=5)
         time.sleep(0.2)
         st = _parse_status(p.sendCommand("drivebase status", timeout=5))
         assert st["last_set_gyro_rc"] == 0, st
-        assert st["use_gyro_requested"] == 1, st
+        assert st["use_gyro_requested"] == 2, st
     finally:
         p.sendCommand("drivebase stop-motion coast", timeout=5)
         p.sendCommand("drivebase stop", timeout=8)
@@ -225,7 +237,7 @@ def test_g4_uncalibrated_falls_back_to_encoder(p):
     """G-4: cold-boot before Madgwick converges keeps latched at NONE.
 
     Right after `drivebase start` the IMU is not yet calibrated; even
-    if the user immediately requests 1D, the next command-start latch
+    if the user immediately requests 3D, the next command-start latch
     sees `gyro_origin_capturable() == false` and locks `latched = NONE`.
     Encoder publish stays in effect for that motion.  This proves the
     safety guard so a stale-data activation never reaches the PID input.
@@ -245,7 +257,7 @@ def test_g4_uncalibrated_falls_back_to_encoder(p):
         # Race the calibration window — < 200 ms so Madgwick's stillness
         # idle has not yet declared calibrated=1.
         time.sleep(0.1)
-        p.sendCommand("drivebase set-gyro 1d", timeout=5)
+        p.sendCommand("drivebase set-gyro 3d", timeout=5)
         # Immediately issue a short motion so latch fires now.
         p.sendCommand("drivebase straight 100 100 brake", timeout=5)
         time.sleep(0.2)
@@ -265,13 +277,14 @@ def test_g4_uncalibrated_falls_back_to_encoder(p):
 @pytest.mark.slow
 @pytest.mark.interactive
 def test_g5_cfg_boot_time_mode(p):
-    """G-5: cfg `use_gyro_plus1=2` activates 1D at boot.
+    """G-5: cfg `use_gyro_plus1=3` activates 3D at boot.
 
     Requires:
-      1. /mnt/flash/drivebase.cfg has `use_gyro_plus1 = 2`
+      1. /mnt/flash/drivebase.cfg has `use_gyro_plus1 = 3`
+         (a legacy `= 2` is auto-aliased to 3 with a warning, #157)
       2. test_g5 reboots the Hub so config is re-loaded
 
-    After reboot, `drivebase status` reports use_gyro_requested == 1
+    After reboot, `drivebase status` reports use_gyro_requested == 2
     even before any user issues set-gyro.  The first command after
     Madgwick converges should latch.
     """
@@ -281,7 +294,7 @@ def test_g5_cfg_boot_time_mode(p):
     st = _parse_status(p.sendCommand("drivebase status", timeout=5))
     if st.get("daemon_attached") == 0:
         pytest.skip("rcS did not auto-start drivebase — skip cfg gate test")
-    assert st["use_gyro_requested"] == 1, st
+    assert st["use_gyro_requested"] == 2, st
     # latched not asserted: depends on whether rcS issued any command.
 
 
@@ -299,15 +312,20 @@ def test_g6_turn_accuracy_tilted_bench(p):
     on standard ports, drivebase wheel/axle defaults.  Operator places
     a tape mark before each turn and reads the residual angle after.
 
+    Compare encoder mode (`set-gyro none`) against gyro mode
+    (`set-gyro 3d`).  Issue #157: 3d is the projection heading the old
+    `1d` used to compute, so this re-validates the same behaviour under
+    the new name (it must still meet the bars below).
+
     Acceptance (AND):
       - encoder mode residual >= 5 deg (measurement floor)
-      - gyro mode residual <= encoder * 1/3 AND <= +-4 deg absolute
+      - gyro mode (3d) residual <= encoder * 1/3 AND <= +-4 deg absolute
     """
     p.waitUser("Mount Hub at 51 deg tilt, mark start angle on tape")
     pytest.skip(
-        "G-6 is operator-driven; record encoder/gyro residuals manually "
-        "and verify ratio per plan §turn accuracy. See "
-        "/home/ouwa/.claude/plans/127-phase-3b-glistening-blum.md §動作確認"
+        "G-6 is operator-driven; record encoder (set-gyro none) vs gyro "
+        "(set-gyro 3d) residuals manually and verify ratio. See "
+        "/home/ouwa/.claude/plans/157-partitioned-music.md"
     )
 
 
@@ -320,13 +338,16 @@ def test_g7_straight_lateral_drift_bench(p):
     grid line, both modes attempted from the same start.  Operator
     measures lateral drift at end of each run.
 
+    Compare encoder mode (`set-gyro none`) against gyro mode
+    (`set-gyro 3d`).
+
     Acceptance (AND):
       - encoder mode drift >= 10 mm (measurement floor)
-      - gyro mode drift <= encoder * 1/2 AND <= +-15 mm absolute
+      - gyro mode (3d) drift <= encoder * 1/2 AND <= +-15 mm absolute
     """
     p.waitUser("Center bench on floor grid line, mark start position")
     pytest.skip(
-        "G-7 is operator-driven; record encoder/gyro drift manually "
-        "per plan §直進精度. See "
-        "/home/ouwa/.claude/plans/127-phase-3b-glistening-blum.md §動作確認"
+        "G-7 is operator-driven; record encoder (set-gyro none) vs gyro "
+        "(set-gyro 3d) drift manually. See "
+        "/home/ouwa/.claude/plans/157-partitioned-music.md"
     )
