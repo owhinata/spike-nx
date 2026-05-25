@@ -131,6 +131,15 @@ struct db_aggregate_output_s
                                  /* what the aggregator should do      */
                                  /* (DRIVE_DUTY / COAST / BRAKE / HOLD) */
   bool     done;                 /* current done state of this axis    */
+  bool     trajectory_done;      /* trajectory finished (ref.done).    */
+                                 /* Issue #158 Phase 7: lets the L/R   */
+                                 /* compose gate the terminal breakaway*/
+                                 /* on "trajectory ended" vs the post- */
+                                 /* tolerance `done` above.            */
+  int32_t  pos_err_mdeg;         /* ref_x - act_x this tick (clamped   */
+                                 /* to int32).  Phase 7: per-wheel err */
+                                 /* = D.pos_err ∓ H.pos_err drives the */
+                                 /* breakaway direction.               */
 };
 
 /****************************************************************************

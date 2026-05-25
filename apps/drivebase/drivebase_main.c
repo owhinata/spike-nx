@@ -1580,9 +1580,11 @@ static int do_alg_settings(int argc, FAR char *argv[])
          (long)ffd->kV, (long)ffd->kA);
   printf("hdg  ff    : kV=%ld kA=%ld (.01%% per deg/s, deg/s^2)\n",
          (long)ffh->kV, (long)ffh->kA);
-  printf("motor ff   : kS=%ld v_hyst=[%ld,%ld] mdeg/s (per-side, /2 applied)\n",
+  printf("motor ff   : kS=%ld v_hyst=[%ld,%ld] mdeg/s breakaway=%ld "
+         "(per-side, /2 applied)\n",
          (long)ffm->kS, (long)ffm->v_hyst_exit_mdegps,
-         (long)ffm->v_hyst_enter_mdegps);
+         (long)ffm->v_hyst_enter_mdegps,
+         (long)ffm->terminal_breakaway);
   printf("battery    : vbat=%ld mV nominal=%ld mV min=%ld mV\n",
          (long)db_battery_get_mv(),
          (long)bat->nominal_mv, (long)bat->min_mv);

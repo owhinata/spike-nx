@@ -426,6 +426,35 @@ def test_alg_ff_trace_duty_ff_matches_gains(p):
     assert checked >= 3, f"too few ff-trace rows to validate: {out!r}"
 
 
+_MOTOR_FF_RE = re.compile(
+    r"^motor ff\s*:\s*kS=(?P<ks>-?\d+)\s+v_hyst=\[(?P<exit>-?\d+),"
+    r"(?P<enter>-?\d+)\]\s+mdeg/s\s+breakaway=(?P<bk>-?\d+)",
+    re.MULTILINE,
+)
+
+
+def test_alg_settings_reports_terminal_breakaway(p):
+    """D-FF-BK-1: `_alg settings` prints the Phase 7 breakaway floor.
+
+    Issue #158: the per-motor terminal static-friction breakaway floor is
+    a new tunable (`ff_terminal_breakaway`) that ships OFF (compiled
+    default 0).  `_alg settings` reads compiled defaults without a daemon
+    (geometry falls back to 56/112 mm), so this validates the field +
+    `motor ff` print wiring deterministically.  A regression that dropped
+    the field, mis-wired the printf, or shipped a non-zero default would
+    fail here.
+    """
+    _ensure_stopped(p)
+    out = p.sendCommand("drivebase _alg settings", timeout=5)
+    m = _MOTOR_FF_RE.search(out)
+    assert m, f"_alg settings missing 'motor ff' breakaway field: {out!r}"
+    bk = int(m.group("bk"))
+    assert bk == 0, (
+        f"compiled-default ff_terminal_breakaway={bk}, expected 0 (Phase 7 "
+        f"ships the mechanism OFF until the bench sweep): {out!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Interactive: require physical motor pair (odd + even port)
 # ---------------------------------------------------------------------------

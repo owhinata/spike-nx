@@ -185,6 +185,18 @@ static int set_ff_v_hyst_exit_mdegps(const char *value)
   return db_settings_set_ff_v_hyst_exit_mdegps(v);
 }
 
+/* Terminal static-friction breakaway floor (Issue #158 Phase 7).
+ * Common to both motors, no axis argument.
+ */
+
+static int set_ff_terminal_breakaway(const char *value)
+{
+  int32_t v;
+  int rc = parse_i32(value, &v);
+  if (rc < 0) return rc;
+  return db_settings_set_ff_terminal_breakaway(v);
+}
+
 /* Battery sag correction (Step 6.3). */
 
 static int set_battery_nominal_mv(const char *value)
@@ -322,6 +334,7 @@ static const struct db_config_entry_s g_config_table[] =
   { "ff_motor_kS",                    set_ff_motor_kS },
   { "ff_v_hyst_enter_mdegps",         set_ff_v_hyst_enter_mdegps },
   { "ff_v_hyst_exit_mdegps",          set_ff_v_hyst_exit_mdegps },
+  { "ff_terminal_breakaway",          set_ff_terminal_breakaway },
 
   { "battery_nominal_mv",             set_battery_nominal_mv },
   { "battery_min_mv",                 set_battery_min_mv },

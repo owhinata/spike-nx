@@ -276,10 +276,12 @@ void db_aggregate_control_update(struct db_aggregate_control_s *ctl,
 
   if (!ctl->trajectory_active && !ctl->pid.latched_passive_done)
     {
-      out->duty         = 0;
-      out->ref_v_mdegps = 0;
-      out->actuation    = DRIVEBASE_ON_COMPLETION_COAST;
-      out->done         = ctl->pid.done;
+      out->duty            = 0;
+      out->ref_v_mdegps    = 0;
+      out->actuation       = DRIVEBASE_ON_COMPLETION_COAST;
+      out->done            = ctl->pid.done;
+      out->trajectory_done = true;   /* no command staged = nothing to */
+      out->pos_err_mdeg    = 0;      /* break away toward (Phase 7)    */
       return;
     }
 
@@ -347,10 +349,24 @@ void db_aggregate_control_update(struct db_aggregate_control_s *ctl,
 
   struct db_pid_output_s pout;
   db_pid_update(&ctl->pid, &in, &pout);
-  out->duty         = pout.duty;
-  out->ref_v_mdegps = ref.v_mdegps;
-  out->actuation    = pout.actuation;
-  out->done         = pout.done;
+  out->duty            = pout.duty;
+  out->ref_v_mdegps    = ref.v_mdegps;
+  out->actuation       = pout.actuation;
+  out->done            = pout.done;
+  out->trajectory_done = ref.done;
+
+  /* Per-axis position error for the Phase 7 terminal breakaway (Issue
+   * #158).  Same quantity the pause logic recomputes below; clamped to
+   * int32 (int64 cumulative angle, small errors) so the L/R compose can
+   * form per-wheel error without overflow.
+   */
+
+  {
+    int64_t pe = ref.x_mdeg - state_x_mdeg;
+    if (pe >  INT32_MAX) pe = INT32_MAX;
+    if (pe <  INT32_MIN) pe = INT32_MIN;
+    out->pos_err_mdeg = (int32_t)pe;
+  }
 
   /* Reference-time pause decision (Issue #142, Phase 5 D).  Mirrors
    * pybricks `lib/pbio/src/control.c:302-319`.  Pause if and only if:

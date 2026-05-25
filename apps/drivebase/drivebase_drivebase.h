@@ -158,9 +158,12 @@ struct db_drivebase_s
   /* Phase 6 Step 6.2 (#152): per-motor friction FF.  `ff_motor` points
    * at the live db_settings instance, fetched once at db_drivebase_init
    * (settings is frozen before the RT thread launches).  Per-side
-   * `ff_state_left/right.sign_v_held` tracks the hysteresised sign of
-   * v_ref so that small oscillation around 0 does not chatter the
-   * kS contribution.  See Plan D1 + D4 + D6.
+   * `ff_state_left/right` holds the friction sign state: `sign_v_held`
+   * tracks the hysteresised sign of v_ref so small oscillation around 0
+   * does not chatter the kS contribution (Plan D1 + D4 + D6), and
+   * `breakaway_consumed` / `breakaway_sign` drive the Phase 7 (#158)
+   * per-move terminal breakaway one-shot (see drivebase_drivebase.c::
+   * apply_breakaway_floor).  All RT-thread-owned, no atomics needed.
    */
 
   const struct db_ff_motor_friction_s *ff_motor;

@@ -13,6 +13,7 @@
 #ifndef __APPS_DRIVEBASE_DRIVEBASE_SETTINGS_H
 #define __APPS_DRIVEBASE_DRIVEBASE_SETTINGS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -145,6 +146,21 @@ struct db_ff_motor_friction_s
   int32_t kS;                       /* .01% duty, left = right common  */
   int32_t v_hyst_enter_mdegps;      /* enter: commit sign regardless   */
   int32_t v_hyst_exit_mdegps;       /* exit:  fall back to 0           */
+
+  /* Terminal static-friction breakaway floor (Issue #158 Phase 7).
+   * kS (above) is the small per-tick Coulomb assist applied while a
+   * trajectory is running; it cannot break a dead-stopped wheel free
+   * (kS <= DB_FF_GAIN_LIMIT = 10% even un-attenuated, vs ~25% measured
+   * static friction).  When a finite move's trajectory has finished but
+   * a wheel is trapped short of (or past) target, this raises that
+   * wheel's pre-clamp duty to at least `terminal_breakaway` in the
+   * direction of the wheel's position error — saturating (floor), not
+   * additive — once per move per wheel.  Default 0 = behavioural no-op.
+   * See drivebase_drivebase.c::apply_breakaway_floor for the one-shot
+   * episode gate.
+   */
+
+  int32_t terminal_breakaway;       /* .01% duty floor, left = right    */
 };
 
 /* Per-side hysteresis state for sign(v_ref).  Only sign history, no
@@ -154,7 +170,19 @@ struct db_ff_motor_friction_s
 
 struct db_ff_state_s
 {
-  int8_t  sign_v_held;        /* -1, 0, +1                              */
+  int8_t  sign_v_held;        /* -1, 0, +1: hysteresised sign(v_ref)    */
+
+  /* Terminal breakaway episode state (Issue #158 Phase 7).  Drives the
+   * per-move one-shot in apply_breakaway_floor(): `breakaway_sign` is
+   * the wheel-error sign at which the current episode started (0 = no
+   * episode this move), `breakaway_consumed` latches once the wheel has
+   * reached the deadband or crossed the target so the floor fires at
+   * most once per move (no reverse re-engagement / buzz).  Both reset on
+   * a new move (trajectory no longer done).  RT-thread-owned, no atomic.
+   */
+
+  bool    breakaway_consumed; /* episode done for this move             */
+  int8_t  breakaway_sign;     /* -1, 0, +1: episode start direction     */
 };
 
 /* Battery sag correction (Issue #152 Phase 6 Step 6.3).  See Plan D3.
@@ -301,6 +329,13 @@ int db_settings_set_ff_kA(enum db_axis_e axis, int32_t value);
 int db_settings_set_ff_kS(int32_t value);
 int db_settings_set_ff_v_hyst_enter_mdegps(int32_t value);
 int db_settings_set_ff_v_hyst_exit_mdegps(int32_t value);
+
+/* Terminal static-friction breakaway floor (Issue #158 Phase 7).
+ * Bounded to [0, DB_BREAKAWAY_LIMIT] (= [0, 3000] = 0..30 % duty); the
+ * limit exceeds DB_FF_GAIN_LIMIT on purpose — see drivebase_settings.c.
+ */
+
+int db_settings_set_ff_terminal_breakaway(int32_t value);
 
 /* Battery sag correction setters (Issue #152 Phase 6 Step 6.3).
  * Bounds are independent per-key (cross-key relation `min < nominal` is

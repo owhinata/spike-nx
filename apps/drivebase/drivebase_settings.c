@@ -254,6 +254,7 @@ static struct db_ff_motor_friction_s g_ff_motor_friction =
   .kS                       = 700,
   .v_hyst_enter_mdegps      = 5000,
   .v_hyst_exit_mdegps       = 1000,
+  .terminal_breakaway       = 0,    /* Phase 7: no-op until bench-swept */
 };
 
 /* Battery sag correction defaults (Issue #152 Phase 6 Step 6.3, Plan
@@ -301,6 +302,19 @@ static struct db_battery_settings_s g_battery_settings =
  */
 
 #define DB_FF_HYST_LIMIT_MDEGPS     100000
+
+/* Terminal breakaway floor limit (Issue #158 Phase 7).  3000 = 30 %
+ * duty.  This deliberately exceeds DB_FF_GAIN_LIMIT (10 %): the floor's
+ * job is to clear the SPIKE Medium Motor's ~25 % static-friction
+ * breakaway, which the kS Coulomb assist (10 % cap, /2 attenuated) can
+ * never reach.  The value is a non-negative magnitude; the sign comes
+ * from the wheel's position-error direction at apply time.  The only
+ * downstream guard against a mis-tune is the per-side clamp to the
+ * +/-10000 duty rail after the L/R compose — 30 % is comfortably below
+ * it even after the <=1.2x battery-sag boost.
+ */
+
+#define DB_BREAKAWAY_LIMIT            3000
 
 /* Battery sag correction limits (Issue #152 Phase 6 Step 6.3).
  *
@@ -734,6 +748,17 @@ int db_settings_set_ff_v_hyst_exit_mdegps(int32_t value)
 {
   return set_in_range_i32(&g_ff_motor_friction.v_hyst_exit_mdegps, value,
                           0, DB_FF_HYST_LIMIT_MDEGPS);
+}
+
+int db_settings_set_ff_terminal_breakaway(int32_t value)
+{
+  /* Non-negative magnitude — the sign is applied at use time from the
+   * wheel's position-error direction (Issue #158 Phase 7).  Upper bound
+   * DB_BREAKAWAY_LIMIT (30 %) exceeds DB_FF_GAIN_LIMIT on purpose; see
+   * the limit macro comment for the static-friction rationale.
+   */
+  return set_in_range_i32(&g_ff_motor_friction.terminal_breakaway, value,
+                          0, DB_BREAKAWAY_LIMIT);
 }
 
 int db_settings_set_battery_nominal_mv(int32_t value)

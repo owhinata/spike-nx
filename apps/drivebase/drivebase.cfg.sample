@@ -10,7 +10,7 @@
 #
 # This template lists every supported key at the Phase 6 production-
 # tuned default; loading it as-is is equivalent to using the compiled
-# binary's built-in defaults (`dmesg` reports `loaded 40 config key(s)
+# binary's built-in defaults (`dmesg` reports `loaded 41 config key(s)
 # ... (0 rejected)`).  Copy this file to /mnt/flash/drivebase.cfg on
 # the hub and edit the values you want to override; comment out (or
 # delete) everything else.
@@ -231,6 +231,38 @@ ff_head_kA = 0
 ff_motor_kS              = 700
 ff_v_hyst_enter_mdegps   = 5000
 ff_v_hyst_exit_mdegps    = 1000
+
+# ----------------------------------------------------------------------
+# Terminal static-friction breakaway floor (Issue #158 Phase 7)
+#
+# kS above is the small in-motion Coulomb assist; it is capped at 10%
+# (and /2 attenuated) so it cannot break a dead-stopped wheel free.
+# When a finite move's trajectory has ended but a wheel is trapped a few
+# mm / degrees short of (or past) target, this raises that wheel's duty
+# to at least `ff_terminal_breakaway` (.01% units) toward target —
+# saturating (a floor, not additive), once per move per wheel, and only
+# while the PID is not already commanding more or braking the other way.
+# It fixes `straight 50 brake` stopping short (#155) and lets the heading
+# axis run `ff_head_kV=6` (which fixes `turn 180 brake`, #156) without
+# regressing `turn 90 brake`.
+#
+# Direction comes from the wheel's position error, so the floor is
+# correct on straight / pivot / curve (per-motor, like kS).  Bounds:
+# [0, 3000] = 0..30% duty — the cap exceeds the FF gain limit (10%) on
+# purpose, since the SPIKE Medium Motor's static friction is ~25%.
+#
+# Default 0 = OFF (behavioural no-op).  Bench-sweep {2000,2200,2400,2600}
+# with `ff_head_kV=6` on straight 50 / turn 90 / turn 180 (brake), then
+# pin the winner.  Watch the terminal per-tick pos_err trace for a single
+# clean approach (the one-shot prevents reverse buzz, but too high a
+# floor on a short move can overshoot tolerance once).
+# ----------------------------------------------------------------------
+
+ff_terminal_breakaway    = 0
+# Phase 7 production candidate (uncomment + pair with ff_head_kV=6 after
+# the bench sweep picks the magnitude):
+# ff_terminal_breakaway  = 2400
+# ff_head_kV             = 6
 
 # ----------------------------------------------------------------------
 # Battery sag correction (Issue #152 Phase 6 Step 6.3)

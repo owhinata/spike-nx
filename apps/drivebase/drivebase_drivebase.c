@@ -131,6 +131,97 @@ static int8_t ff_sign_with_hysteresis(int32_t v_ref_mdegps, int8_t prev,
   return prev;
 }
 
+/* Per-wheel "close enough, stop pushing" band for the terminal breakaway
+ * (Issue #158 Phase 7).  Mirrors the PID deadband_mdeg (3000) as the
+ * per-wheel error magnitude below which an in-progress breakaway episode
+ * is considered finished.  deadband < pos_tolerance (8000 @ kp=50) so the
+ * floor stops before the done window's tolerance check, leaving margin.
+ */
+
+#define DB_BREAKAWAY_ERR_DEADBAND          3000
+
+/* Phase 6 Step 6.2 left the kS friction term off whenever the trajectory
+ * reference speed is ~0 (ff_sign_with_hysteresis → 0).  That is correct
+ * for an in-motion Coulomb assist but leaves a wheel that stops a few mm /
+ * degrees short of (or past) target with no torque floor: PID's P term is
+ * tiny and ki winds up over seconds, so a short move can sit below the
+ * SPIKE Medium Motor's ~25 % static-friction breakaway and never reach the
+ * done window (Issue #155 straight 50, and turn 90 once ff_head_kV=6).
+ *
+ * apply_breakaway_floor() raises a trapped wheel's pre-clamp duty to at
+ * least `terminal_breakaway` toward target.  Key properties (Issue #158
+ * plan, Codex 4-round review):
+ *   - saturating (raise-to-floor), NOT additive — never stacks with kS /
+ *     PID / battery boost to the rail; a wheel already commanding >= floor
+ *     in the right direction is returned unchanged (cruise untouched).
+ *   - direction = sign(wheel_err) (toward target), never the commanded
+ *     duty sign, which can lag a wound-up integrator after an overshoot.
+ *   - per-move one-shot: an episode starts when |wheel_err| first exceeds
+ *     the deadband after traj_done, and is consumed when the wheel reaches
+ *     the deadband OR crosses the target (sign flip).  A single inertial
+ *     overshoot is then left to the PID — no reverse re-fire, no buzz.
+ *   - opposite-sign `pre` = the PID is actively braking an approaching
+ *     wheel via the speed term (ref_v=0 but act_v != 0); that is real
+ *     damping, so respect it — do not start, consume, or override.
+ * The caller re-arms (clears breakaway_consumed / breakaway_sign) on every
+ * tick where the trajectory is not done, i.e. at the start of each move.
+ */
+
+static int32_t apply_breakaway_floor(struct db_drivebase_s *db,
+                                     struct db_ff_state_s *st, int32_t pre,
+                                     int64_t wheel_err, bool traj_done)
+{
+  int32_t floor = db->ff_motor->terminal_breakaway;
+  if (floor == 0 || !traj_done || st->breakaway_consumed)
+    {
+      return pre;
+    }
+
+  int8_t s = (wheel_err >  DB_BREAKAWAY_ERR_DEADBAND) -
+             (wheel_err < -DB_BREAKAWAY_ERR_DEADBAND);
+  if (s == 0)
+    {
+      /* Inside the deadband — if an episode was pushing, it is done. */
+
+      if (st->breakaway_sign != 0)
+        {
+          st->breakaway_consumed = true;
+        }
+      return pre;
+    }
+
+  /* An active episode that has crossed the target (error flipped sign)
+   * is consumed immediately — checked BEFORE the braking guard so a
+   * crossing while `pre` still points the old way cannot leave the
+   * episode alive to re-fire on the rebound (one-shot invariant).
+   */
+
+  if (st->breakaway_sign != 0 && s != st->breakaway_sign)
+    {
+      st->breakaway_consumed = true;         /* crossed target → stop    */
+      return pre;
+    }
+
+  /* PID braking the other way (speed term decelerating an approaching
+   * wheel): respect it.  Only relevant when starting or continuing a
+   * same-direction episode; never starts or applies the floor here.
+   */
+
+  if ((s > 0 && pre < 0) || (s < 0 && pre > 0))
+    {
+      return pre;
+    }
+
+  /* Raise to floor (signed).  The episode "starts" only when the floor
+   * is actually applied, so breakaway_sign != 0 ⇔ the floor has driven
+   * this wheel at least once this move.
+   */
+
+  if (s > 0 && pre <  floor) { st->breakaway_sign = s; return  floor; }
+  if (s < 0 && pre > -floor) { st->breakaway_sign = s; return -floor; }
+  return pre;                                /* already past floor       */
+}
+
 /****************************************************************************
  * Public Functions — lifecycle
  ****************************************************************************/
@@ -1038,10 +1129,40 @@ int db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us)
       int32_t kS_L    = (int32_t)signL * kS_half;
       int32_t kS_R    = (int32_t)signR * kS_half;
 
-      int32_t left_pre  = clamp_i32(out_d.duty - out_h.duty + kS_L,
-                                    -10000, 10000);
-      int32_t right_pre = clamp_i32(out_d.duty + out_h.duty + kS_R,
-                                    -10000, 10000);
+      /* Phase 7 (#158) — per-motor terminal static-friction breakaway.
+       * Re-arm the one-shot episode state whenever the trajectory is not
+       * done (i.e. at the start of each move), then raise a trapped
+       * wheel's duty toward target.  Per-wheel error uses the same D∓H
+       * compose as duty so it is correct on straight / pivot / curve
+       * (Plan D1); int64 avoids signed overflow of two int32-clamped
+       * errors.  No divide → no __aeabi_*divmod in the RT path.
+       */
+
+      bool traj_done = out_d.trajectory_done && out_h.trajectory_done;
+      if (!traj_done)
+        {
+          db->ff_state_left.breakaway_consumed  = false;
+          db->ff_state_left.breakaway_sign      = 0;
+          db->ff_state_right.breakaway_consumed = false;
+          db->ff_state_right.breakaway_sign     = 0;
+        }
+
+      int64_t wheel_err_L = (int64_t)out_d.pos_err_mdeg
+                          - (int64_t)out_h.pos_err_mdeg;
+      int64_t wheel_err_R = (int64_t)out_d.pos_err_mdeg
+                          + (int64_t)out_h.pos_err_mdeg;
+
+      int32_t left_cmd  = out_d.duty - out_h.duty + kS_L;
+      int32_t right_cmd = out_d.duty + out_h.duty + kS_R;
+
+      int32_t left_pre  = clamp_i32(
+          apply_breakaway_floor(db, &db->ff_state_left,  left_cmd,
+                                wheel_err_L, traj_done),
+          -10000, 10000);
+      int32_t right_pre = clamp_i32(
+          apply_breakaway_floor(db, &db->ff_state_right, right_cmd,
+                                wheel_err_R, traj_done),
+          -10000, 10000);
 
       /* Phase 6 Step 6.3 (#152) — battery sag correction (Plan D3).
        *
