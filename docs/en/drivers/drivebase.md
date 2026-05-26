@@ -241,6 +241,8 @@ DAEMON_TEARDOWN → sem_post(teardown_done) → DAEMON_STOPPED
 
 `drivebase_daemon_stop(timeout_ms)` (default 2000 ms) waits on `teardown_done`.
 
+**`running` is set `true` at the *entry* to `DAEMON_INITIALIZING` (before step 1), not after `db_rt_start` (Issue #153).**  The RT pthread spawned in step 6 returns `-1` (and so exits) the instant its first `rt_tick_cb` observes `running == false`.  If the prio-100 daemon task were preempted (e.g. a LUMP IRQ burst) past that first tick before setting the flag, the RT thread would die at tick 1 and the daemon would then idle with a dead publisher — which the kernel stale-daemon watchdog (§5.2) detaches into a permanent zombie (`status` all-zero except `attach_generation`, `set-gyro` → `-ENOTCONN`, `start` → `-EALREADY`).  Setting the flag before `db_rt_start` closes that TOCTOU.  A `stop` arriving during `DAEMON_INITIALIZING` clears the flag and is honoured by skipping `db_rt_start` and going straight to teardown (no doomed RT thread is created).
+
 ### 5.1 Daemon-side stall watchdog
 
 The RT tick callback (`rt_tick_cb`) tracks `db_rt_s.deadline_miss_count`:
@@ -845,6 +847,8 @@ Five consecutive deadline misses route through coast.  Inspect `drivebase jitter
 ### 10.5 Daemon refuses to come up after several start/stop cycles
 
 Confirm `attach_generation` is incrementing in `GET_STATUS`.  If kernel chardev close-cleanup didn't run and `attached` got stuck at true, the next ATTACH returns `-EBUSY`.  A `reboot` resets the chardev cleanly.
+
+Historically (Issue #153) a different fault produced the same surface: a TOCTOU between `db_rt_start` and `atomic_store(running = true)` let the RT thread exit on its **first tick** (it read `running == false`), leaving a zombie whose `status` reads all-zero except `attach_generation` and whose `start` returns `-EALREADY` (reproduced ~1/250 stop/start cycles and on most cold boots).  Fixed by setting `running` at the entry to `DAEMON_INITIALIZING`, before `db_rt_start` (§5).
 
 ## 11. References
 

@@ -240,6 +240,8 @@ DAEMON_TEARDOWN → sem_post(teardown_done) → DAEMON_STOPPED
 
 stop は `drivebase_daemon_stop(timeout_ms)` (default 2000 ms) で teardown_done を待つ。
 
+**`running` は `db_rt_start` の後ではなく `DAEMON_INITIALIZING` の入口 (step 1 より前) で `true` にする (Issue #153)。** step 6 で起動する RT pthread は、初回 `rt_tick_cb` が `running == false` を観測した瞬間に `-1` を返して終了する。prio-100 の daemon task が (LUMP IRQ バースト等で) フラグセット前にその初回 tick を超えて preempt されると、RT thread が tick=1 で即死し、daemon は publisher が死んだまま idle ループに入る → kernel stale-daemon watchdog (§5.2) がそれを detach して**永久 zombie** 化する (`status` は `attach_generation` 以外ゼロ、`set-gyro` → `-ENOTCONN`、`start` → `-EALREADY`)。フラグを `db_rt_start` より前に立てることでこの TOCTOU を閉じる。`DAEMON_INITIALIZING` 中に来た `stop` はフラグをクリアし、`db_rt_start` をスキップして直接 teardown へ進む (即死する RT thread を作らない) ことで尊重される。
+
 ### 5.1 stall watchdog (daemon 側)
 
 RT tick callback (`rt_tick_cb`) が `db_rt_s.deadline_miss_count` を監視:
@@ -840,6 +842,8 @@ deadline_miss が 5 連続で coast 経路に乗る。`drivebase jitter` で wak
 ### 10.5 multiple start/stop の後で daemon が立たない
 
 `attach_generation` が GET_STATUS で正常に増加しているか確認。kernel chardev の close cleanup が走らずに `attached=true` のままになっていると、次の ATTACH が `-EBUSY` で蹴られる。`reboot` でクリーン状態に戻る。
+
+かつて (Issue #153) 同じ症状を別の原因が生んでいた: `db_rt_start` と `atomic_store(running = true)` の間の TOCTOU により RT thread が**初回 tick** で `running == false` を読んで終了し、`status` が `attach_generation` 以外ゼロ・`start` が `-EALREADY` を返す zombie が残った (stop/start 約 1/250 サイクル + cold boot の大半で再現)。`running` を `db_rt_start` より前 (`DAEMON_INITIALIZING` 入口) で立てることで解消 (§5)。
 
 ## 11. 参照
 

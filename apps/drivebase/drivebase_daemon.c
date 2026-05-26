@@ -285,6 +285,22 @@ static int daemon_task_main(int argc, char *argv[])
   d->last_seen_misses   = 0;
   d->imu_open           = false;
 
+  /* Mark running BEFORE db_rt_start (below) launches the RT thread.
+   * db_rt_start creates the SCHED_FIFO prio-220 RT thread, whose first
+   * rt_tick_cb returns -1 (and so exits the thread) if it observes
+   * `running == false`.  Setting running here — rather than after
+   * db_rt_start — closes a TOCTOU where, if this prio-100 task is
+   * preempted (e.g. a LUMP IRQ burst) past the RT thread's first tick
+   * before the store, the RT thread exits at tick 1 and the daemon idles
+   * with a dead publisher: the kernel /dev/drivebase watchdog then detaches
+   * it, leaving a permanent zombie (status all-zero, set-gyro -ENOTCONN,
+   * start -EALREADY).  See Issue #153.  `running` is only read by
+   * rt_tick_cb and the idle loop, both reached only after db_rt_start, so
+   * setting it this early is safe; a stop during INITIALISING clears it and
+   * is honoured by the pre-db_rt_start check below.
+   */
+
+  atomic_store(&d->running, true);
   atomic_store(&d->state, DB_DAEMON_INITIALISING);
 
   int rc = drivebase_motor_init();
@@ -405,18 +421,34 @@ static int daemon_task_main(int argc, char *argv[])
     }
 
   db_rt_init(&d->rt, tick_us);
+
+  /* poll_tick is declared before the `goto teardown` below so the jump
+   * does not skip an initialised auto variable.
+   */
+
+  uint32_t poll_tick = 0;
+
+  /* If a stop arrived during INITIALISING, `running` is already false.
+   * Honour it without ever starting the RT thread (avoids creating a
+   * thread that would immediately exit) — go straight to teardown.
+   */
+
+  if (!atomic_load(&d->running))
+    {
+      atomic_store(&d->state, DB_DAEMON_TEARDOWN);
+      goto teardown;
+    }
+
   rc = db_rt_start(&d->rt, CONFIG_APP_DRIVEBASE_RT_PRIORITY,
                    rt_tick_cb, d);
   if (rc < 0) goto fail_chardev;
 
-  atomic_store(&d->running, true);
   atomic_store(&d->state, DB_DAEMON_RUNNING);
 
   /* Idle loop — the RT thread drives all real work; we wake every
    * 50 ms to publish status counters and check for stop request.
    */
 
-  uint32_t poll_tick = 0;
   while (atomic_load(&d->running))
     {
       usleep(50000);
@@ -459,7 +491,12 @@ static int daemon_task_main(int argc, char *argv[])
 
   atomic_store(&d->state, DB_DAEMON_TEARDOWN);
 
-  /* Teardown order matters — see header comment. */
+teardown:
+
+  /* Teardown order matters — see header comment.  db_rt_stop is a no-op
+   * when the RT thread was never started (the stop-during-init path above
+   * jumps here before db_rt_start).
+   */
 
   db_rt_stop(&d->rt, 100);
   drivebase_motor_coast(DB_SIDE_LEFT);
@@ -492,6 +529,7 @@ fail_battery:
 fail_motor:
   drivebase_motor_deinit();
 fail:
+  atomic_store(&d->running, false);
   atomic_store(&d->state, DB_DAEMON_STOPPED);
   d->pid = -1;
   sem_post(&d->teardown_done);
