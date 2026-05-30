@@ -64,6 +64,38 @@ low 32 bits, microseconds since the start of the capture).
 | 8 | `blue` | `u16` | `raw` | 0 |
 | 10 | `intensity` | `u16` | `raw` | 0 |
 
+## `linetrace_lap_run` (magic 0x0012)
+
+Per-tick line-tracing lap trace recorded by the `linetrace` PID daemon
+(Issue #166, parent #163 LQG roadmap) — one record per loop tick.
+Driven by `linetrace cap arm/stop/export`.
+
+- record size: 19 bytes
+- rate hint: 100 Hz
+
+| offset | name | type | unit | scale 10^n |
+|-------:|------|------|------|-----------:|
+| 0 | `ts_us` | `u32` | `us` | 0 |
+| 4 | `intensity` | `u16` | `raw` | 0 |
+| 6 | `target` | `u16` | `raw` | 0 |
+| 8 | `turn_cmd_dps` | `i16` | `dps` | 0 |
+| 10 | `heading_mdeg` | `i32` | `mdeg` | 0 |
+| 14 | `turn_rate_dps` | `i16` | `dps` | 0 |
+| 16 | `speed_mmps` | `i16` | `mmps` | 0 |
+| 18 | `edge` | `u8` | `` | 0 |
+
+The `edge` byte tags which edge of the line the lap was driven on:
+
+- `0` = **UNKNOWN/UNSET** — P0b always writes this (the PID daemon has
+  no edge concept yet).  `0` is a reserved sentinel, NOT a valid
+  LEFT/RIGHT.
+- `1` = **LEFT** (set by P1a)
+- `2` = **RIGHT** (set by P1a)
+
+The offline P0c fitter must **NOT** treat `edge == 0` as a real edge;
+for P0b captures the operator supplies the `c`-sign (which edge) out of
+band.
+
 ## Adding a new schema
 
 Worked example: a 6-axis IMU raw schema `imu_raw_run`.

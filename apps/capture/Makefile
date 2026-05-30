@@ -11,6 +11,7 @@ include $(APPDIR)/Make.defs
 CSRCS  = capture.c
 CSRCS += schemas_color_reflection_run.c
 CSRCS += schemas_color_rgbi_run.c
+CSRCS += schemas_linetrace_lap_run.c
 
 # Headers that callers include via <capture/capture.h> etc.  Surface them
 # through CFLAGS so apps/sensor and any future client compiles without
