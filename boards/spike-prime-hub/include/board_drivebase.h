@@ -266,7 +266,7 @@ struct drivebase_state_s
   uint8_t  is_done;
   uint8_t  is_stalled;
   uint8_t  active_command;    /* enum drivebase_active_command_e        */
-  uint8_t  reserved;
+  uint8_t  actuation_fault;   /* #154: motor port lost, recovery pending */
 };
 
 struct drivebase_heading_s

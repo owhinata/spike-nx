@@ -24,6 +24,25 @@
 #include "drivebase_rt.h"      /* DB_RT_TICK_MS_DEFAULT                  */
 
 /****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+/* #154 glitch sanity gate.  A fresh encoder sample more than
+ * DB_SERVO_GLITCH_MDEG (~5000 deg) from the trusted position is physically
+ * impossible in one tick (max wheel motion is ~1 deg/tick).  It is either a
+ * transient garbage value the motor emits intermittently in mode 2 (the
+ * recurring raw=53038, seen even at idle) or — rarely — a real epoch shift
+ * the reset path missed.  Drop it UNLESS the SAME far level repeats for
+ * DB_SERVO_REBASE_RUN consecutive samples (agreeing within
+ * DB_SERVO_AGREE_MDEG), which a short garbage burst never does; only then is
+ * it re-baselined (observer re-seeded, no slope spike).
+ */
+
+#define DB_SERVO_GLITCH_MDEG        5000000   /* 5000 deg: impossible jump   */
+#define DB_SERVO_AGREE_MDEG         100000    /* 100 deg: same "far level"   */
+#define DB_SERVO_REBASE_RUN         10        /* consecutive to re-baseline  */
+
+/****************************************************************************
  * Private Helpers
  ****************************************************************************/
 
@@ -49,6 +68,8 @@ void db_servo_init(struct db_servo_s *s, enum db_side_e side,
   s->t_last_us             = 0;
   s->last_applied_duty     = 0;
   s->last_actuation        = DRIVEBASE_ON_COMPLETION_COAST;
+  s->reject_candidate_mdeg = 0;
+  s->candidate_run         = 0;
 
   const struct db_stall_settings_s *st = db_settings_stall();
   db_observer_init(&s->observer,
@@ -81,20 +102,26 @@ int db_servo_reset(struct db_servo_s *s, uint64_t now_us)
                          now_us : sm.timestamp_us;
       db_observer_reset(&s->observer, s->x_actual_mdeg, s->t_last_us);
     }
-  else if (rc == -EAGAIN)
+  else
     {
+      /* No fresh continuous sample: -EAGAIN (incl. a SYNC sentinel),
+       * DB_MOTOR_DRAIN_DISCONNECTED (positive), or a read error.  Seed a
+       * neutral (x=0, t=now) origin and let the first db_servo_update tick
+       * prime the observer once a real encoder sample arrives.  This is
+       * also the post-reclaim epoch-reset path (#154), so it must not fail
+       * on a still-draining sentinel.
+       */
+
       s->x_actual_mdeg = 0;
       s->t_last_us     = now_us;
       db_observer_reset(&s->observer, 0, now_us);
     }
-  else
-    {
-      return rc;
-    }
 
-  s->v_estimate_mdegps = 0;
-  s->last_applied_duty = 0;
-  s->last_actuation    = DRIVEBASE_ON_COMPLETION_COAST;
+  s->v_estimate_mdegps     = 0;
+  s->last_applied_duty     = 0;
+  s->last_actuation        = DRIVEBASE_ON_COMPLETION_COAST;
+  s->reject_candidate_mdeg = 0;
+  s->candidate_run         = 0;
   return 0;
 }
 
@@ -119,11 +146,60 @@ int db_servo_update(struct db_servo_s *s, uint64_t now_us)
 
   if (dr == 0)
     {
-      s->x_actual_mdeg = db_angle_deg_to_mdeg(sm.raw_value);
-      db_observer_update_sample(&s->observer,
-                                s->x_actual_mdeg,
-                                sm.timestamp_us,
-                                duty_abs);
+      /* #154 glitch sanity gate.  drivebase_motor_drain already drops
+       * non-POS-mode frames; this catches a transient garbage value that
+       * arrives IN mode 2 right after a reclaim (e.g. raw=53038 deg between
+       * real ~210).  A single >5000 deg jump is physically impossible, so
+       * drop it; after a few consecutive drops accept the far value as a
+       * real epoch shift (re-seed, no slope spike).
+       */
+
+      int64_t x_new   = db_angle_deg_to_mdeg(sm.raw_value);
+      int64_t d_track = x_new - s->x_actual_mdeg;
+      if (d_track < 0) d_track = -d_track;
+
+      if (d_track <= DB_SERVO_GLITCH_MDEG)
+        {
+          /* Continuous with the trusted position — accept. */
+
+          s->candidate_run = 0;
+          s->x_actual_mdeg = x_new;
+          db_observer_update_sample(&s->observer,
+                                    s->x_actual_mdeg,
+                                    sm.timestamp_us,
+                                    duty_abs);
+        }
+      else
+        {
+          /* Far from the trusted position.  Count consecutive samples that
+           * agree on the SAME far level: a real epoch shift holds steady, a
+           * transient garbage burst (raw=53038) does not.  Only a sustained
+           * run re-baselines; otherwise drop the sample.
+           */
+
+          int64_t d_cand = x_new - s->reject_candidate_mdeg;
+          if (d_cand < 0) d_cand = -d_cand;
+          if (s->candidate_run > 0 && d_cand <= DB_SERVO_AGREE_MDEG)
+            {
+              if (s->candidate_run < 255) s->candidate_run++;
+            }
+          else
+            {
+              s->candidate_run = 1;
+            }
+          s->reject_candidate_mdeg = x_new;
+
+          if (s->candidate_run >= DB_SERVO_REBASE_RUN)
+            {
+              s->candidate_run = 0;
+              s->x_actual_mdeg = x_new;
+              db_observer_reset(&s->observer, x_new, sm.timestamp_us);
+            }
+          else
+            {
+              /* drop the (likely garbage) sample — keep the trusted x. */
+            }
+        }
     }
   else if (dr == -EAGAIN)
     {
@@ -133,7 +209,17 @@ int db_servo_update(struct db_servo_s *s, uint64_t now_us)
     }
   else
     {
-      return dr;
+      /* #154: DB_MOTOR_DRAIN_DISCONNECTED (positive sentinel) or a read
+       * error (-EBADF after a reclaim closed the fd, -ENODEV).  The port
+       * is lost — arm recovery and skip the observer update (keep the last
+       * estimate rather than ingesting a garbage epoch).  Crucially do NOT
+       * propagate the code: a <0 here would bubble up through
+       * db_drivebase_update into rt_tick_cb and stop the RT thread, and a
+       * positive code would be misread by callers.  The apply gate coasts
+       * both wheels while the request is pending.
+       */
+
+      drivebase_motor_request_reclaim(s->side);
     }
 
   s->t_last_us         = now_us;
@@ -171,7 +257,16 @@ int db_servo_apply(struct db_servo_s *s, int32_t duty, uint8_t actuation)
         {
           int32_t d = clamp_duty(duty);
           rc = drivebase_motor_set_duty(s->side, d);
-          s->last_applied_duty = d;
+
+          /* #154 honest duty: only record the commanded duty if it was
+           * actually applied.  A stale-CLAIM set_duty returns -ENODEV (no
+           * torque); recording `d` anyway would feed the stall observer a
+           * high applied-duty against zero speed → a FALSE stall=1.  On
+           * failure record 0 so the observer sees "not driving".
+           * drivebase_motor_set_duty already arms the reclaim request.
+           */
+
+          s->last_applied_duty = (rc == 0) ? d : 0;
           s->last_actuation    = DRIVEBASE_ON_COMPLETION_HOLD;
           return rc;
         }

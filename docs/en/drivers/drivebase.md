@@ -273,6 +273,19 @@ if (dev->attached && dev->attach_filep == filep) {
 
 Comparing `attach_filep` by pointer detects "the ATTACH fd was closed" precisely (PID comparison would mis-fire under thread / fd duplication).  `attach_generation` is exposed via `DRIVEBASE_GET_STATUS` so user space can track re-attach generations.
 
+### 5.4 Motor-port self-recovery (Issue #154)
+
+A LUMP motor port can momentarily disconnect ("no DATA for 600 ms") and re-SYNC at any time — most commonly *after a session has driven*.  The kernel `legosensor` layer bumps `bind_generation` on the unbind and again on the re-bind, which leaves the daemon's long-lived, once-`LEGOSENSOR_CLAIM`'d fd **stale**: every `LEGOSENSOR_SET_PWM` then returns `-ENODEV` (no torque → no motion + a false `stall=1`, because `db_servo_apply` used to record the commanded duty regardless of rc).  Worse, the re-SYNC also corrupts the encoder epoch — the motor briefly streams non-POS modes (mode 1 INT8, mode 3 INT16) and a transient garbage mode-2 value (`raw=53038` between real ~210) which, read as a position, injects a huge discontinuity → PID runaway.
+
+The daemon now recovers **without a `stop`/`start`**:
+
+- **Detect** — `drivebase_motor_set_duty()` arms a per-side reclaim request (an atomic bitmask) on `-ENODEV`; `drivebase_motor_drain()` arms it on a disconnect sentinel (`type_id==0 && len==0`).  `db_servo_apply` now records `last_applied_duty` only on `rc==0`, killing the false stall.
+- **Coast while pending** — `db_drivebase_update()` skips all closed-loop actuation and coasts both wheels while any reclaim is pending (asymmetric drive / phantom runaway are impossible while faulted).  Surfaced as the get-state `actuation_fault` column.
+- **Reclaim off the RT tick** — the non-RT idle loop runs `drivebase_motor_reclaim()` (close + re-open + re-`CLAIM` + `GET_INFO(type==48)` + re-`SELECT(mode 2)`) under a **freeze + ack handshake**: it sets `io_frozen`, waits (fail-closed) for the RT tick to acknowledge `rt_idle` at the top of `rt_tick_cb`, then has exclusive access to the fds and `db` state.  While frozen the RT tick publishes a *minimal keep-alive* `PUBLISH_STATE` every tick so the §5.2 stale-daemon watchdog (50 ms) cannot detach the daemon during a long re-SYNC.  Once both sides are healthy it `db_drivebase_reset()`s the epoch (re-seeds the encoder baseline, aborts the in-flight command).
+- **Encoder-garbage rejection** — `drivebase_motor_drain()` returns only `mode_id == 2` (POS) samples, dropping the transient non-POS frames.  `db_servo_update()` drops a fresh sample that jumps > 5000 deg from the trusted position unless the same far level repeats for ≥ 10 agreeing samples (a real epoch shift the reset missed → re-baseline, no slope spike); a transient garbage burst never does.
+
+> The motor port disconnect itself appears to correlate with prior driving and is a separate software investigation; the holistic *stop-on-glitch* failsafe and safety review live in Issue #161.
+
 ## 6. RT control loop
 
 ### 6.1 Tick mechanism: absolute-time nanosleep
@@ -648,7 +661,7 @@ Production defaults after the Phase 6 FF / battery / SysId stack plus the Step 6
 - **`straight 50` boundary fix**: dynamic kS for short moves / pos_tolerance auto-widen / kp_pos boost.
 - **`turn 180` overshoot**: asymmetric kA design / heading-specific SysId / trajectory shaping.
 - **Heading-axis FF redesign**: root-cause why the symmetric `kV × v_ref` works on distance but regresses on heading (inertia ratio?  friction characteristics?) → **resolved in §8.5.7 (it was a move-length confound)**.
-- **Issue #153 / #154 race fixes**: rcS auto-start attach race and mid-bench `-ENOTCONN` are open follow-ups for the chardev cleanup path.
+- **Issue #153 / #154 race fixes (resolved)**: the rcS auto-start attach TOCTOU (#153) and the motor-port stale-CLAIM `-ENODEV` no-move + post-reclaim encoder-garbage runaway (#154) are fixed — see §5 (and §5.4 for the #154 self-recovery).  The motor-disconnect-after-driving root cause and the stop-on-glitch failsafe are tracked in #161.
 
 #### 8.5.7 Phase 7 diagnosis: heading FF was a move-length confound (Issue [#158](https://github.com/owhinata/spike-nx/issues/158))
 

@@ -42,7 +42,17 @@ struct db_motor_sample_s
   uint8_t  data_type;
   uint8_t  num_values;
   uint8_t  port_idx;           /* 0..5 = A..F                             */
+  uint8_t  type_id;            /* lump_sample_s.type_id (0 = disconnect)  */
+  uint8_t  len;                /* lump_sample_s.len (0 = sentinel)        */
 };
+
+/* drivebase_motor_drain() return code for a disconnect sentinel.  Positive
+ * so it never collides with a negated errno (callers that print
+ * strerror(-rc) must special-case it), and so a propagated value can never
+ * be mistaken for the < 0 "stop the RT thread" signal.  (#154)
+ */
+
+#define DB_MOTOR_DRAIN_DISCONNECTED  1
 
 /****************************************************************************
  * Public Function Prototypes
@@ -70,13 +80,46 @@ bool drivebase_motor_is_initialised(void);
 int  drivebase_motor_port_idx(enum db_side_e side);
 
 /* Drain the latest LUMP frames from one side.  Returns 0 on success
- * (out filled with the freshest sample), -EAGAIN if the topic has no
- * fresh sample since the previous drain, or a negated errno on a real
- * read error.  Non-blocking — safe to call from the 5 ms control tick.
+ * (out filled with the freshest real sample), -EAGAIN if the topic has
+ * no fresh continuous sample since the previous drain (incl. a SYNC
+ * sentinel, which is withheld so its zero payload never poisons the
+ * observer), DB_MOTOR_DRAIN_DISCONNECTED (positive) if a disconnect
+ * sentinel was seen (reclaim is armed; no sample is returned), or a
+ * negated errno on a real read error.  Non-blocking — safe to call from
+ * the control tick.  (#154)
  */
 
 int  drivebase_motor_drain(enum db_side_e side,
                            struct db_motor_sample_s *out);
+
+/* #154 motor-port self-recovery support.  When set_duty / a drain
+ * sentinel detects a lost LUMP port (stale LEGOSENSOR CLAIM after a
+ * disconnect+resync), the RT path arms a per-side reclaim request; the
+ * non-RT daemon idle loop performs the actual close+reopen+re-CLAIM under
+ * a freeze handshake.  All flags are plain atomics — no locks on the RT
+ * deadline path.
+ */
+
+void     drivebase_motor_request_reclaim(enum db_side_e side);
+unsigned drivebase_motor_reclaim_pending(void);   /* per-side bitmask     */
+void     drivebase_motor_clear_reclaim(enum db_side_e side);
+
+/* Freeze handshake.  The daemon sets io_frozen and waits until the RT
+ * tick acknowledges via rt_idle before it touches any motor fd.
+ */
+
+bool drivebase_motor_io_frozen(void);
+void drivebase_motor_set_io_frozen(bool v);
+void drivebase_motor_set_rt_idle(bool v);
+bool drivebase_motor_rt_idle(void);
+
+/* Re-establish a fresh LEGOSENSOR CLAIM on one side: close (auto-RELEASE
+ * + auto-coast) + one-shot open + CLAIM + GET_INFO(type==48) + SELECT
+ * mode 2.  Returns 0 on success.  Leaves the side non-actuatable (fd=-1)
+ * on ANY failure.  Must run on the daemon (non-RT) thread under freeze.
+ */
+
+int  drivebase_motor_reclaim(enum db_side_e side);
 
 /* Actuation.  duty is the .01-% signed PWM duty (-10000..10000) routed
  * through LEGOSENSOR_SET_PWM; coast / brake go through the per-class

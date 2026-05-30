@@ -11,6 +11,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -27,6 +28,14 @@
  ****************************************************************************/
 
 #define DB_LPF2_TYPE_SPIKE_MEDIUM_MOTOR  48
+
+/* LPF2 reporting mode that carries the int32 absolute encoder position the
+ * observer consumes (drivebase_motor_select_mode(side, 2) at daemon start /
+ * reclaim).  Frames in any other mode are NOT position and are dropped by
+ * drivebase_motor_drain (#154 runaway: post-reclaim mode-1/3 transients).
+ */
+
+#define DB_MOTOR_POS_MODE                2
 
 /* sizeof(lump_sample_s) is 56 B (board_legosensor.h _Static_assert).
  * NBUFFER=16 ⇒ 16 ms of 1 kHz samples.  We drain the whole ring in one
@@ -92,6 +101,17 @@ static struct db_motor_side_s g_motor[DB_SIDE_NUM] =
 };
 
 static bool g_initialised;
+
+/* #154 self-recovery state.  g_reclaim_request is a per-side bitmask the
+ * RT path sets (via fetch_or) when a set_duty / drain detects a lost port;
+ * the daemon idle loop drains it.  g_motor_io_frozen / g_rt_idle implement
+ * the freeze handshake: the daemon raises io_frozen and waits for the RT
+ * tick to acknowledge via rt_idle before it closes/reopens any fd.
+ */
+
+static atomic_uint  g_reclaim_request;
+static atomic_bool  g_motor_io_frozen;
+static atomic_bool  g_rt_idle;
 
 /****************************************************************************
  * Private Functions
@@ -224,6 +244,17 @@ int drivebase_motor_init(void)
       return -EALREADY;
     }
 
+  /* #154: start from a clean recovery state.  These file-static atomics
+   * persist across daemon stop/start, so a prior lifetime could leave a
+   * stale reclaim request or — worse — io_frozen=true, which would wedge
+   * the new RT thread at the freeze gate forever (daemon_try_reclaim only
+   * runs while a request is pending, so it would never unfreeze).
+   */
+
+  atomic_store(&g_reclaim_request, 0u);
+  atomic_store(&g_motor_io_frozen, false);
+  atomic_store(&g_rt_idle, false);
+
   uint64_t deadline = now_us_monotonic() + DB_MOTOR_PROBE_TIMEOUT_US;
 
   int ret = open_one_with_retry(&g_motor[DB_SIDE_LEFT], deadline);
@@ -260,6 +291,14 @@ void drivebase_motor_deinit(void)
   close_one(&g_motor[DB_SIDE_LEFT]);
   close_one(&g_motor[DB_SIDE_RIGHT]);
   g_initialised = false;
+
+  /* #154: drop any pending recovery / freeze state so a later start is
+   * clean even if teardown raced an in-flight reclaim.
+   */
+
+  atomic_store(&g_reclaim_request, 0u);
+  atomic_store(&g_motor_io_frozen, false);
+  atomic_store(&g_rt_idle, false);
 }
 
 bool drivebase_motor_is_initialised(void)
@@ -303,9 +342,57 @@ int drivebase_motor_drain(enum db_side_e side,
       return -EAGAIN;
     }
 
-  /* Newest sample is the last entry — single most-recent latch. */
+  /* #154: scan the WHOLE batch and latch only the newest POS-mode (mode 2)
+   * data sample.  Two classes of garbage must be filtered:
+   *
+   *   - zero-length sentinels (len==0): carry no payload (decode to 0).  A
+   *     disconnect sentinel (type_id==0) also means our CLAIM went stale —
+   *     arm reclaim.  A SYNC sentinel (type_id!=0) is just "no data".
+   *
+   *   - WRONG-MODE data frames: after a reclaim / re-SYNC the motor briefly
+   *     streams OTHER modes (mode 1 INT8, mode 3 INT16, …) before settling
+   *     on the SELECTed POS mode 2 (INT32).  Those values are NOT encoder
+   *     degrees; read as POS they decode to garbage (e.g. mode-3 raw=-12754)
+   *     and inject the huge discontinuity that drives the runaway.  Skip any
+   *     frame whose mode_id != 2 entirely.
+   *
+   * If the batch crossed a disconnect, do not return a post-disconnect frame
+   * as continuous — the reclaim path re-seeds the baseline.
+   */
 
-  const struct lump_sample_s *latest = &batch[count - 1];
+  bool saw_disconnect = false;
+  const struct lump_sample_s *latest = NULL;
+  for (size_t i = 0; i < count; i++)
+    {
+      if (batch[i].len == 0)
+        {
+          if (batch[i].type_id == 0)
+            {
+              saw_disconnect = true;
+            }
+          continue;                       /* sentinel — no payload          */
+        }
+      if (batch[i].mode_id == DB_MOTOR_POS_MODE)
+        {
+          latest = &batch[i];             /* keep the newest POS sample     */
+        }
+      /* else: transient non-POS mode (1/3/…) — not encoder degrees, skip   */
+    }
+
+  if (saw_disconnect)
+    {
+      drivebase_motor_request_reclaim(side);
+      return DB_MOTOR_DRAIN_DISCONNECTED;
+    }
+  if (latest == NULL)
+    {
+      /* No usable POS (mode 2) sample this drain — only a SYNC sentinel
+       * and/or transient non-POS-mode frames.  Withhold rather than feed
+       * the observer garbage.
+       */
+
+      return -EAGAIN;
+    }
 
   out->timestamp_us = latest->timestamp;
   out->seq          = latest->seq;
@@ -314,6 +401,8 @@ int drivebase_motor_drain(enum db_side_e side,
   out->data_type    = latest->data_type;
   out->num_values   = latest->num_values;
   out->port_idx     = latest->port;
+  out->type_id      = latest->type_id;
+  out->len          = latest->len;
 
   /* For commit #4 the consumer treats the first int32 of the active
    * mode's payload as the encoder reading.  Wider modes (multi-int32 or
@@ -375,7 +464,17 @@ int drivebase_motor_set_duty(enum db_side_e side, int16_t duty)
   arg.channels[0]  = (int16_t)signed_duty;
 
   int ret = ioctl(g_motor[side].fd, LEGOSENSOR_SET_PWM, (unsigned long)&arg);
-  return ret < 0 ? -errno : 0;
+  if (ret < 0)
+    {
+      /* #154: a stale CLAIM after a port disconnect+resync surfaces here
+       * as -ENODEV.  Arm the daemon's recovery; the RT path stops driving
+       * (the apply gate coasts both wheels) until the reclaim completes.
+       */
+
+      drivebase_motor_request_reclaim(side);
+      return -errno;
+    }
+  return 0;
 }
 
 int drivebase_motor_coast(enum db_side_e side)
@@ -388,7 +487,12 @@ int drivebase_motor_coast(enum db_side_e side)
   int cmd = (side == DB_SIDE_LEFT) ? LEGOSENSOR_MOTOR_L_COAST
                                    : LEGOSENSOR_MOTOR_R_COAST;
   int ret = ioctl(g_motor[side].fd, cmd, 0);
-  return ret < 0 ? -errno : 0;
+  if (ret < 0)
+    {
+      drivebase_motor_request_reclaim(side);   /* #154 */
+      return -errno;
+    }
+  return 0;
 }
 
 int drivebase_motor_brake(enum db_side_e side)
@@ -401,7 +505,12 @@ int drivebase_motor_brake(enum db_side_e side)
   int cmd = (side == DB_SIDE_LEFT) ? LEGOSENSOR_MOTOR_L_BRAKE
                                    : LEGOSENSOR_MOTOR_R_BRAKE;
   int ret = ioctl(g_motor[side].fd, cmd, 0);
-  return ret < 0 ? -errno : 0;
+  if (ret < 0)
+    {
+      drivebase_motor_request_reclaim(side);   /* #154 */
+      return -errno;
+    }
+  return 0;
 }
 
 int drivebase_motor_select_mode(enum db_side_e side, uint8_t mode)
@@ -414,4 +523,88 @@ int drivebase_motor_select_mode(enum db_side_e side, uint8_t mode)
   struct legosensor_select_arg_s arg = { .mode = mode };
   int ret = ioctl(g_motor[side].fd, LEGOSENSOR_SELECT, (unsigned long)&arg);
   return ret < 0 ? -errno : 0;
+}
+
+/****************************************************************************
+ * #154 self-recovery: reclaim request flags + freeze handshake + reclaim
+ ****************************************************************************/
+
+void drivebase_motor_request_reclaim(enum db_side_e side)
+{
+  if ((unsigned)side < DB_SIDE_NUM)
+    {
+      atomic_fetch_or(&g_reclaim_request, 1u << (unsigned)side);
+    }
+}
+
+unsigned drivebase_motor_reclaim_pending(void)
+{
+  return atomic_load(&g_reclaim_request);
+}
+
+void drivebase_motor_clear_reclaim(enum db_side_e side)
+{
+  if ((unsigned)side < DB_SIDE_NUM)
+    {
+      atomic_fetch_and(&g_reclaim_request, ~(1u << (unsigned)side));
+    }
+}
+
+bool drivebase_motor_io_frozen(void)
+{
+  return atomic_load(&g_motor_io_frozen);
+}
+
+void drivebase_motor_set_io_frozen(bool v)
+{
+  atomic_store(&g_motor_io_frozen, v);
+}
+
+void drivebase_motor_set_rt_idle(bool v)
+{
+  atomic_store(&g_rt_idle, v);
+}
+
+bool drivebase_motor_rt_idle(void)
+{
+  return atomic_load(&g_rt_idle);
+}
+
+int drivebase_motor_reclaim(enum db_side_e side)
+{
+  if (!g_initialised || (unsigned)side >= DB_SIDE_NUM)
+    {
+      return -ENODEV;
+    }
+
+  struct db_motor_side_s *m = &g_motor[side];
+
+  /* close_one auto-RELEASEs (best-effort) and close() auto-coasts the
+   * H-bridge + clears claim ownership regardless of a stale generation.
+   * A one-shot open_one then re-CLAIMs against the CURRENT bind_generation
+   * (fresh snapshot) and re-verifies type 48.  open_one already leaves
+   * fd=-1 on its own failure paths.
+   */
+
+  close_one(m);
+
+  int rc = open_one(m);
+  if (rc < 0)
+    {
+      return rc;                      /* side left non-actuatable (fd=-1) */
+    }
+
+  /* Re-select POS mode 2 (the encoder mode the observer expects).  On
+   * failure, close again so the side is non-actuatable rather than
+   * silently driving an un-selected device.
+   */
+
+  rc = drivebase_motor_select_mode(side, 2);
+  if (rc < 0)
+    {
+      close_one(m);
+      return rc;
+    }
+
+  return 0;
 }

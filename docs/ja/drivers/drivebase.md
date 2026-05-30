@@ -272,6 +272,19 @@ if (dev->attached && dev->attach_filep == filep) {
 
 `attach_filep` ポインタ比較で「ATTACH した fd の close」だけを検出する (PID 比較は thread/fd 複製で誤判定するため使わない)。`attach_generation` は `DRIVEBASE_GET_STATUS` で公開され、再 ATTACH 世代を user-space から追跡可能。
 
+### 5.4 motor port の自己回復 (Issue #154)
+
+LUMP motor port は任意のタイミングで一瞬 disconnect ("no DATA for 600 ms") して re-SYNC することがある (特に *一度走行した後* に多い)。kernel `legosensor` 層は unbind と re-bind で `bind_generation` を 2 回 bump するため、daemon が一度だけ `LEGOSENSOR_CLAIM` した長寿命 fd が **stale** 化し、以後 `LEGOSENSOR_SET_PWM` は全て `-ENODEV` を返す (torque ゼロ → 不動 + false `stall=1`。従来 `db_servo_apply` は rc を問わず指令 duty を記録していたため)。さらに re-SYNC は encoder epoch も壊す — motor が一瞬 POS 以外のモード (mode 1 INT8 / mode 3 INT16) と mode 2 の過渡ゴミ値 (`raw=53038`、本物 ~210 の間) を stream し、POS として読むと巨大な不連続 → PID 暴走になる。
+
+daemon は **`stop`/`start` 無しで**回復する:
+
+- **検出** — `drivebase_motor_set_duty()` が `-ENODEV` で per-side reclaim 要求 (atomic bitmask) を arm。`drivebase_motor_drain()` は disconnect sentinel (`type_id==0 && len==0`) で arm。`db_servo_apply` は `rc==0` のときだけ `last_applied_duty` を記録し false stall を解消。
+- **pending 中は coast** — `db_drivebase_update()` は reclaim pending 中は closed-loop 駆動を全て止め両輪を coast する (faulted 中は非対称 drive / phantom 暴走が不可能)。get-state の `actuation_fault` 列で可視化。
+- **reclaim は RT tick 外で** — 非 RT idle loop が `drivebase_motor_reclaim()` (close + 再 open + 再 `CLAIM` + `GET_INFO(type==48)` + 再 `SELECT(mode 2)`) を **freeze + ack ハンドシェイク**で実行: `io_frozen` を立て、`rt_tick_cb` 先頭で RT tick が `rt_idle` を ack するのを fail-closed で待ってから fd と `db` 状態に排他アクセスする。freeze 中 RT tick は毎 tick *最小 keep-alive* `PUBLISH_STATE` を発行し、長い re-SYNC 中に §5.2 stale-daemon watchdog (50 ms) で detach されないようにする。両 side 健全になったら `db_drivebase_reset()` で epoch を再 seed (encoder baseline 再取得、in-flight command abort)。
+- **encoder ゴミの除去** — `drivebase_motor_drain()` は `mode_id == 2` (POS) の sample のみ返し、過渡的な非 POS frame を捨てる。`db_servo_update()` は trusted 位置から > 5000 deg 跳ぶ fresh sample を、同じ far level が ≥ 10 サンプル連続一致しない限り捨てる (一致したら reset が取り逃した本物の epoch shift とみなし re-baseline、slope spike 無)。過渡ゴミバーストは連続しない。
+
+> motor port の disconnect 自体が「走行後に相関する」現象は別の SW 調査対象、包括的な *glitch 停止* failsafe と安全性レビューは Issue #161。
+
 ## 6. RT 制御ループ
 
 ### 6.1 tick 機構: 絶対時刻 nanosleep
@@ -646,7 +659,7 @@ Phase 6 で追加した FF / battery / SysId stack と Step 6.6 の ki sweep を
 - **`straight 50` boundary fix**: dynamic kS for short moves / tolerance auto-widen / kp boost
 - **`turn 180` overshoot**: asymmetric kA design / heading-specific SysId / trajectory shaping
 - **Heading-axis FF redesign**: symmetric `kV × v_ref` が heading で機能しない原因の root cause (慣性比? 摩擦特性?) 究明 → **§8.5.7 で究明済 (move-length 交絡だった)**
-- **Issue #153/#154 系の race 解決**: rcS auto-start attach race / mid-bench `-ENOTCONN` の chardev cleanup 改善
+- **Issue #153/#154 系の race 解決 (済)**: rcS auto-start attach TOCTOU (#153) / motor-port stale-CLAIM `-ENODEV` no-move + reclaim 後 encoder ゴミ暴走 (#154) を解決 — §5 (#154 自己回復は §5.4) 参照。走行後の motor disconnect 根本と glitch 停止 failsafe は #161。
 
 #### 8.5.7 Phase 7 診断: heading FF は move-length 交絡だった (Issue [#158](https://github.com/owhinata/spike-nx/issues/158))
 

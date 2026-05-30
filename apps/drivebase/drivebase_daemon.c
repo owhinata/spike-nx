@@ -102,6 +102,13 @@ struct daemon_global_s
 
   uint32_t                  consecutive_misses;
   uint32_t                  last_seen_misses;
+
+  /* #154 motor-port self-recovery — throttle flags so a stuck-unplugged
+   * motor logs once per failure transition, not every 50 ms idle wake.
+   */
+
+  bool                      reclaim_ack_warned;
+  bool                      reclaim_fail_warned[DB_SIDE_NUM];
 };
 
 /****************************************************************************
@@ -145,6 +152,41 @@ static int daemon_global_alloc(void)
 static int rt_tick_cb(uint64_t now_us_arg, void *arg)
 {
   struct daemon_global_s *d = (struct daemon_global_s *)arg;
+
+  /* #154 freeze gate.  While the non-RT idle loop reclaims a lost motor
+   * port it raises io_frozen and waits for this acknowledgement before it
+   * closes/reopens any fd or resets db state.  When frozen, touch NOTHING
+   * that reads/writes `db` or `g_motor[]` — that means skipping command
+   * dispatch, the IMU drain, the drivebase update, the NORMAL db-derived
+   * state publish, AND the stall-watchdog coast below — so the reclaim has
+   * exclusive access.  We DO still publish a minimal keep-alive snapshot
+   * (built without reading db) every tick so the kernel stale-daemon
+   * watchdog (50 ms) cannot detach us during a long reclaim/resync.  Still
+   * honour a stop request so teardown is never blocked.
+   */
+
+  if (drivebase_motor_io_frozen())
+    {
+      drivebase_motor_set_rt_idle(true);
+
+      /* Keep the kernel stale-daemon watchdog (DB_STALE_THRESHOLD_MS = 50 ms)
+       * fed while the non-RT reclaim holds the freeze.  A port resync +
+       * reclaim can take >50 ms (observed ~240 ms), and we must not run the
+       * normal publish here because it reads `db`, which the daemon is
+       * resetting under the freeze.  Publish a minimal keep-alive snapshot
+       * built WITHOUT touching db / g_motor[] — same chardev fd, no shared
+       * mutable state with the reclaim — so the daemon stays attached for
+       * any freeze duration.  actuation_fault=1 marks recovery in progress.
+       */
+
+      struct drivebase_state_s ka;
+      memset(&ka, 0, sizeof(ka));
+      ka.actuation_fault = 1;
+      ka.tick_seq        = d->rt.tick_count;
+      db_chardev_handler_publish_state(&d->handler, &ka);
+
+      return atomic_load(&d->running) ? 0 : -1;
+    }
 
   /* Drain envelopes + dispatch + IMU drain + drivebase update.  Phase
    * 3b moves the IMU drain ahead of db_drivebase_update so the heading
@@ -204,7 +246,8 @@ static int rt_tick_cb(uint64_t now_us_arg, void *arg)
           if (rel <  INT32_MIN) rel = INT32_MIN;
           st.angle_mdeg = (int32_t)rel;
         }
-      st.tick_seq = d->rt.tick_count;
+      st.tick_seq        = d->rt.tick_count;
+      st.actuation_fault = drivebase_motor_reclaim_pending() != 0;  /* #154 */
       db_chardev_handler_publish_state(&d->handler, &st);
     }
 
@@ -230,6 +273,112 @@ static int rt_tick_cb(uint64_t now_us_arg, void *arg)
   d->last_seen_misses = misses_now;
 
   return atomic_load(&d->running) ? 0 : -1;
+}
+
+/* #154 motor-port self-recovery, run from the NON-RT idle loop.  When a
+ * set_duty / drain on the RT path detects a lost LUMP port (stale
+ * LEGOSENSOR CLAIM after a disconnect+resync), it arms a per-side reclaim
+ * request.  Here we freeze the RT tick (fail-closed on its ack), reclaim
+ * the affected side(s) with a fresh CLAIM, and once both are healthy reset
+ * the drivebase epoch — restoring motion WITHOUT a stop/start.
+ */
+
+static void daemon_try_reclaim(struct daemon_global_s *d)
+{
+  if (drivebase_motor_reclaim_pending() == 0)
+    {
+      return;
+    }
+
+  /* Freeze the RT tick and wait (fail-closed) for it to acknowledge it is
+   * idle at the freeze gate before touching any motor fd.  If the ack does
+   * not arrive (RT wedged or mid-stop) we do NOT close/reopen/reset —
+   * release the freeze and retry on the next idle wake.
+   */
+
+  drivebase_motor_set_rt_idle(false);
+  drivebase_motor_set_io_frozen(true);
+
+  struct timespec fz0;
+  clock_gettime(CLOCK_MONOTONIC, &fz0);
+
+  bool acked = false;
+  for (int i = 0; i < 12 && atomic_load(&d->running); i++)
+    {
+      if (drivebase_motor_rt_idle())
+        {
+          acked = true;
+          break;
+        }
+      usleep(2000);
+    }
+
+  if (!acked)
+    {
+      drivebase_motor_set_io_frozen(false);
+      if (!d->reclaim_ack_warned)
+        {
+          syslog(LOG_WARNING, "drivebase: #154 reclaim ack timeout\n");
+          d->reclaim_ack_warned = true;
+        }
+      return;
+    }
+  d->reclaim_ack_warned = false;
+
+  /* RT is provably idle (early-returns at the freeze gate, where it now
+   * publishes a keep-alive snapshot every tick to keep the kernel stale
+   * watchdog fed).  Safe to reclaim/reset db + g_motor[] exclusively here.
+   */
+
+  unsigned req = drivebase_motor_reclaim_pending();
+  for (int side = 0; side < DB_SIDE_NUM && atomic_load(&d->running); side++)
+    {
+      if ((req & (1u << (unsigned)side)) == 0)
+        {
+          continue;
+        }
+
+      int rc = drivebase_motor_reclaim((enum db_side_e)side);
+      if (rc == 0)
+        {
+          drivebase_motor_clear_reclaim((enum db_side_e)side);
+          d->reclaim_fail_warned[side] = false;
+          syslog(LOG_INFO, "drivebase: #154 reclaimed motor side=%d\n", side);
+        }
+      else if (!d->reclaim_fail_warned[side])
+        {
+          /* Still physically unplugged (-ENODEV) or another error — leave
+           * the bit set and retry next cycle; log once per transition.
+           */
+
+          syslog(LOG_WARNING,
+                 "drivebase: #154 reclaim side=%d rc=%d (retry)\n", side, rc);
+          d->reclaim_fail_warned[side] = true;
+        }
+    }
+
+  /* Re-baseline only once BOTH sides are healthy — a differential
+   * drivebase with one dead motor cannot be meaningfully reset.  The reset
+   * re-seeds the encoder baseline + observer (kills the phantom-velocity
+   * epoch) and aborts the in-flight command (done=true), like stop/start
+   * but without tearing the daemon down.
+   */
+
+  if (drivebase_motor_reclaim_pending() == 0)
+    {
+      struct timespec ts;
+      clock_gettime(CLOCK_MONOTONIC, &ts);
+      uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ull +
+                        (uint64_t)ts.tv_nsec / 1000ull;
+      db_drivebase_reset(&d->db, now_us);
+      uint32_t froze_ms = (uint32_t)((ts.tv_sec - fz0.tv_sec) * 1000L +
+                                     (ts.tv_nsec - fz0.tv_nsec) / 1000000L);
+      syslog(LOG_INFO,
+             "drivebase: #154 recovery complete (epoch reset, froze %lu ms)\n",
+             (unsigned long)froze_ms);
+    }
+
+  drivebase_motor_set_io_frozen(false);
 }
 
 static int daemon_task_main(int argc, char *argv[])
@@ -452,6 +601,14 @@ static int daemon_task_main(int argc, char *argv[])
   while (atomic_load(&d->running))
     {
       usleep(50000);
+
+      /* #154: recover a lost motor port (close+reopen+re-CLAIM under a
+       * freeze handshake) before the periodic status publish, so a fault
+       * is cleared within one idle cycle (~50 ms).
+       */
+
+      daemon_try_reclaim(d);
+
       db_chardev_handler_publish_status(&d->handler);
 
       /* If user requested DRIVEBASE_JITTER_RESET, claim and apply it

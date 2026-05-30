@@ -160,6 +160,10 @@ static int do_motor_subcmd(int argc, FAR char *argv[])
                      (unsigned long long)sm.timestamp_us,
                      (long)sm.raw_value);
             }
+          else if (dr == DB_MOTOR_DRAIN_DISCONNECTED)
+            {
+              printf("%s drain: disconnected (port lost, #154)\n", name);
+            }
           else
             {
               printf("%s drain: %s\n", name, strerror(-dr));
@@ -2479,9 +2483,9 @@ int main(int argc, FAR char *argv[])
           interval_ms = (uint32_t)v;
         }
 
-      printf("%8s  %8s  %7s  %10s  %7s  %4s  %5s  %3s  %10s\n",
+      printf("%8s  %8s  %7s  %10s  %7s  %4s  %5s  %3s  %10s  %6s\n",
              "time_ms", "dist_mm", "v_mmps", "angle_mdeg", "tr_dps",
-             "done", "stall", "cmd", "tick");
+             "done", "stall", "cmd", "tick", "afault");
 
       struct timespec t0;
       clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -2501,12 +2505,12 @@ int main(int argc, FAR char *argv[])
           long elapsed_ms = (tn.tv_sec - t0.tv_sec) * 1000L +
                             (tn.tv_nsec - t0.tv_nsec) / 1000000L;
 
-          printf("%8ld  %8ld  %7ld  %10ld  %7ld  %4u  %5u  %3u  %10lu\n",
+          printf("%8ld  %8ld  %7ld  %10ld  %7ld  %4u  %5u  %3u  %10lu  %6u\n",
                  elapsed_ms,
                  (long)st.distance_mm, (long)st.drive_speed_mmps,
                  (long)st.angle_mdeg, (long)st.turn_rate_dps,
                  st.is_done, st.is_stalled, st.active_command,
-                 (unsigned long)st.tick_seq);
+                 (unsigned long)st.tick_seq, st.actuation_fault);
 
           if (duration_ms == 0 || (uint32_t)elapsed_ms >= duration_ms)
             {

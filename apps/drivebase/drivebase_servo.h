@@ -58,6 +58,16 @@ struct db_servo_s
 
   int32_t                   last_applied_duty;
   uint8_t                   last_actuation;
+
+  /* #154 glitch sanity gate.  A far-from-trusted sample is rejected unless
+   * the SAME far level repeats for several consecutive samples — only then
+   * is it a real epoch shift to re-baseline onto.  A transient garbage burst
+   * (the recurring mode-2 raw=53038) never lasts that long, so it is dropped
+   * without corrupting the tracked position.
+   */
+
+  int64_t                   reject_candidate_mdeg;
+  uint8_t                   candidate_run;
 };
 
 struct db_servo_status_s

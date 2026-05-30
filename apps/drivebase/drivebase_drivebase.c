@@ -1073,7 +1073,23 @@ int db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us)
       propagate = DRIVEBASE_ON_COMPLETION_BRAKE;
     }
 
-  if (propagate != 0)
+  if (drivebase_motor_reclaim_pending() != 0)
+    {
+      /* #154: a motor port fault is pending recovery.  Actively coast both
+       * wheels every tick — COAST clears any latched PWM AND zeroes the
+       * observer's applied-duty cache (db_servo_apply COAST branch sets
+       * last_applied_duty=0), so no false stall accumulates — and skip all
+       * closed-loop actuation until the daemon reclaims the port(s) and
+       * resets the epoch.  This makes asymmetric drive and phantom-velocity
+       * runaway structurally impossible while a fault is pending.
+       */
+
+      db_servo_apply(&db->servo[DB_SIDE_LEFT],  0,
+                     DRIVEBASE_ON_COMPLETION_COAST);
+      db_servo_apply(&db->servo[DB_SIDE_RIGHT], 0,
+                     DRIVEBASE_ON_COMPLETION_COAST);
+    }
+  else if (propagate != 0)
     {
       /* Latch the non-firing axis too so it stays passive on the next
        * tick (otherwise its HOLD trajectory would continue driving
@@ -1199,6 +1215,20 @@ int db_drivebase_update(struct db_drivebase_s *db, uint64_t now_us)
                      DRIVEBASE_ON_COMPLETION_HOLD);
       db_servo_apply(&db->servo[DB_SIDE_RIGHT], right_duty,
                      DRIVEBASE_ON_COMPLETION_HOLD);
+
+      /* #154: if either set_duty above just failed (a stale CLAIM armed a
+       * reclaim this tick), coast both wheels now so an already-latched PWM
+       * on the healthy wheel does not keep spinning until the next recovery
+       * cycle.  Subsequent ticks take the reclaim-pending branch above.
+       */
+
+      if (drivebase_motor_reclaim_pending() != 0)
+        {
+          db_servo_apply(&db->servo[DB_SIDE_LEFT],  0,
+                         DRIVEBASE_ON_COMPLETION_COAST);
+          db_servo_apply(&db->servo[DB_SIDE_RIGHT], 0,
+                         DRIVEBASE_ON_COMPLETION_COAST);
+        }
     }
 
   /* 7. Refresh cached aggregate state from the freshly-updated per-
@@ -1254,7 +1284,7 @@ void db_drivebase_get_state(const struct db_drivebase_s *db,
   out->is_done           = db->done;
   out->is_stalled        = db->stalled;
   out->active_command    = db->active_command;
-  out->reserved          = 0;
+  out->actuation_fault   = 0;     /* daemon rt_tick_cb sets this (#154)  */
 }
 
 bool db_drivebase_is_done(const struct db_drivebase_s *db)
