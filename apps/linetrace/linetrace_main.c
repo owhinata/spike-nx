@@ -188,12 +188,21 @@ static struct
 
 #define CAP_RECORD_SIZE  (sizeof(struct capture_linetrace_lap_run_record_s))
 
-/* 64 KiB / 19 B = 3449 records.  Honours the roadmap "<= 64 KB" cap and
- * the capture subsystem's CONFIG_APP_CAPTURE_MAX_HEAP_BYTES budget.  At
- * the 100 Hz default loop that is ~34 s of lap.
+/* Heap budget honours both the roadmap "<= 64 KB" cap AND the capture
+ * subsystem's shared CONFIG_APP_CAPTURE_MAX_HEAP_BYTES budget: take the
+ * smaller of the two so lowering the config knob cannot let linetrace
+ * exceed it.  64 KiB / 19 B = 3449 records; at the 100 Hz default loop
+ * that is ~34 s of lap.
  */
 
-#define CAP_MAX_RECORDS  (65536u / CAP_RECORD_SIZE)
+#ifdef CONFIG_APP_CAPTURE_MAX_HEAP_BYTES
+#  define CAP_MAX_BYTES  ((65536u < CONFIG_APP_CAPTURE_MAX_HEAP_BYTES) ? \
+                          65536u : (unsigned)CONFIG_APP_CAPTURE_MAX_HEAP_BYTES)
+#else
+#  define CAP_MAX_BYTES  65536u
+#endif
+
+#define CAP_MAX_RECORDS  (CAP_MAX_BYTES / CAP_RECORD_SIZE)
 
 /* edge sentinel: P0b has no edge concept yet (P1a sets LEFT/RIGHT). */
 
@@ -223,10 +232,25 @@ static struct
 
 static pthread_mutex_t g_cap_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Lock-free "capture is armed" hint.  The daemon's per-tick append fast
+ * path reads this WITHOUT taking g_cap_lock so an idle (not-armed)
+ * capture adds no lock contention / jitter to the 100 Hz control loop
+ * (memory feedback_observability_jitter).  It is set true only after the
+ * buffer is fully armed, and cleared on every transition out of ARMED.
+ * The hint can momentarily lag the true state, so the append path still
+ * re-checks `state == LT_CAP_ARMED` under the lock before any memcpy —
+ * the hint is a fast-path filter, never the authority.  Single-byte
+ * volatile reads/writes are atomic on Cortex-M4.
+ */
+
+static volatile bool g_cap_armed_hint = false;
+
 /* SIGINT/SIGTERM abort flag for the export verb.  Flag-only handler
- * (signal-async-safe); capture_write/capture_deinit observe the kernel
- * abort, the verb's own cleanup frees the buffer.  Mirrors apps/sensor
- * do_capture.
+ * (signal-async-safe).  Installing the handlers is also what makes a
+ * `kill <pid>` (SIGTERM) actually interrupt the blocking capture
+ * syscalls — NuttX has no default SIGTERM terminate action.  The export
+ * verb checks the flag before each blocking capture stage and winds down
+ * via capture_abort if set.
  */
 
 static volatile sig_atomic_t g_cap_export_aborting;
@@ -249,6 +273,27 @@ static const char *cap_state_str(enum linetrace_cap_state_e s)
     }
 }
 
+/* Caller holds g_cap_lock.  Free the buffer (if any) and reset all
+ * capture metadata to the IDLE baseline, recording `err` as last_error.
+ * Single point so reap / start / export-cleanup / abort never leave a
+ * stale field (e.g. `overflow` or `t0_us`).  Also clears the lock-free
+ * armed hint.
+ */
+
+static void cap_reset_idle_locked(int err)
+{
+  free(g_cap.buf);
+  g_cap.buf        = NULL;
+  g_cap.capacity   = 0;
+  g_cap.count      = 0;
+  g_cap.t0_us      = 0;
+  g_cap.overflow   = 0;
+  g_cap.export_pid = -1;
+  g_cap.last_error = err;
+  g_cap.state      = LT_CAP_IDLE;
+  g_cap_armed_hint = false;
+}
+
 /* Caller holds g_cap_lock.  If a capture is stuck in EXPORTING but the
  * task that owned it is gone (hard-killed before its cleanup ran), free
  * the buffer and return to IDLE so the FSM is never wedged.  kill(pid, 0)
@@ -262,13 +307,7 @@ static void cap_reap_dead_exporter_locked(void)
   if (g_cap.state == LT_CAP_EXPORTING && g_cap.export_pid > 0 &&
       kill(g_cap.export_pid, 0) < 0 && errno == ESRCH)
     {
-      free(g_cap.buf);
-      g_cap.buf        = NULL;
-      g_cap.count      = 0;
-      g_cap.capacity   = 0;
-      g_cap.export_pid = -1;
-      g_cap.last_error = -ECANCELED;
-      g_cap.state      = LT_CAP_IDLE;
+      cap_reset_idle_locked(-ECANCELED);
     }
 }
 
@@ -442,7 +481,15 @@ static int clamp_int(int v, int lo, int hi)
 static void cap_append_tick(int db_fd, int intensity, int target,
                             int turn_cmd_dps)
 {
-  /* Fast path: one predicated load when not armed (the common case). */
+  /* Lock-free fast path: an idle (not-armed) capture adds zero lock
+   * contention to the control loop.  The hint may momentarily lag the
+   * true state, so the locked re-checks below are still the authority.
+   */
+
+  if (!g_cap_armed_hint)
+    {
+      return;
+    }
 
   pthread_mutex_lock(&g_cap_lock);
   if (g_cap.state != LT_CAP_ARMED)
@@ -453,8 +500,9 @@ static void cap_append_tick(int db_fd, int intensity, int target,
 
   if (g_cap.count >= g_cap.capacity)
     {
-      g_cap.state    = LT_CAP_DONE;
-      g_cap.overflow = 1;
+      g_cap.state      = LT_CAP_DONE;
+      g_cap.overflow   = 1;
+      g_cap_armed_hint = false;
       pthread_mutex_unlock(&g_cap_lock);
       return;
     }
@@ -631,7 +679,8 @@ static int linetrace_daemon(int argc, char *argv[])
           pthread_mutex_lock(&g_cap_lock);
           if (g_cap.state == LT_CAP_ARMED)
             {
-              g_cap.state = LT_CAP_DONE;
+              g_cap.state      = LT_CAP_DONE;
+              g_cap_armed_hint = false;
             }
           pthread_mutex_unlock(&g_cap_lock);
 #endif
@@ -959,12 +1008,7 @@ static int linetrace_daemon(int argc, char *argv[])
   cap_reap_dead_exporter_locked();
   if (g_cap.state == LT_CAP_ARMED || g_cap.state == LT_CAP_DONE)
     {
-      free(g_cap.buf);
-      g_cap.buf      = NULL;
-      g_cap.count    = 0;
-      g_cap.capacity = 0;
-      g_cap.overflow = 0;
-      g_cap.state    = LT_CAP_IDLE;
+      cap_reset_idle_locked(0);
     }
   pthread_mutex_unlock(&g_cap_lock);
 #endif
@@ -1007,15 +1051,7 @@ static int do_start(void)
       return 1;
     }
 
-  free(g_cap.buf);
-  g_cap.buf        = NULL;
-  g_cap.capacity   = 0;
-  g_cap.count      = 0;
-  g_cap.t0_us      = 0;
-  g_cap.last_error = 0;
-  g_cap.overflow   = 0;
-  g_cap.export_pid = -1;
-  g_cap.state      = LT_CAP_IDLE;
+  cap_reset_idle_locked(0);
   pthread_mutex_unlock(&g_cap_lock);
 #endif
 
@@ -1521,6 +1557,13 @@ static int do_cap_arm(int argc, char **argv)
   g_cap.overflow   = 0;
   g_cap.export_pid = -1;
   g_cap.state      = LT_CAP_ARMED;
+
+  /* Publish the lock-free hint LAST, after every g_cap field the append
+   * path reads is committed, so the daemon never sees armed=true with a
+   * half-initialized buffer.
+   */
+
+  g_cap_armed_hint = true;
   int hz = g_params.hz;
   pthread_mutex_unlock(&g_cap_lock);
 
@@ -1543,7 +1586,8 @@ static int do_cap_stop(void)
 
   if (g_cap.state == LT_CAP_ARMED)
     {
-      g_cap.state = LT_CAP_DONE;
+      g_cap.state      = LT_CAP_DONE;
+      g_cap_armed_hint = false;
     }
 
   if (g_cap.state == LT_CAP_DONE)
@@ -1629,7 +1673,20 @@ static int do_cap_export(void)
 
   capture_handle_t h;
   bool init_done = false;
-  int  rc = capture_init(&h, &g_capture_schema_linetrace_lap_run, count);
+  int  rc = 0;
+
+  /* A signal can land between handler-install and the first blocking
+   * capture call; check g_cap_export_aborting before each stage so the
+   * export still winds down via capture_abort instead of pushing data.
+   */
+
+  if (g_cap_export_aborting)
+    {
+      rc = -ECANCELED;
+      goto out;
+    }
+
+  rc = capture_init(&h, &g_capture_schema_linetrace_lap_run, count);
   if (rc < 0)
     {
       fprintf(stderr, "linetrace: capture_init: %d\n", rc);
@@ -1638,10 +1695,26 @@ static int do_cap_export(void)
 
   init_done = true;
 
+  if (g_cap_export_aborting)
+    {
+      rc = -ECANCELED;
+      capture_abort(&h);
+      init_done = false;
+      goto out;
+    }
+
   rc = capture_write(&h, buf, (size_t)count * CAP_RECORD_SIZE);
   if (rc < 0)
     {
       fprintf(stderr, "linetrace: capture_write: %d\n", rc);
+      capture_abort(&h);
+      init_done = false;
+      goto out;
+    }
+
+  if (g_cap_export_aborting)
+    {
+      rc = -ECANCELED;
       capture_abort(&h);
       init_done = false;
       goto out;
@@ -1663,6 +1736,11 @@ out:
       capture_abort(&h);
     }
 
+  if (g_cap_export_aborting)
+    {
+      fprintf(stderr, "linetrace: cap export aborted by signal\n");
+    }
+
   if (int_installed)
     {
       sigaction(SIGINT, &old_int_sa, NULL);
@@ -1676,20 +1754,15 @@ out:
   /* Release ownership: free the buffer and return the FSM to IDLE.  The
    * daemon never frees a live EXPORTING buffer, so this is the sole
    * owner on the handled path (a SIGKILL would skip this and the lazy
-   * reaper covers it).
+   * reaper covers it).  Guard on export_pid==getpid() so a do_start /
+   * daemon-exit that ran concurrently (and could only have done so after
+   * a reap) is never stomped.
    */
 
   pthread_mutex_lock(&g_cap_lock);
   if (g_cap.state == LT_CAP_EXPORTING && g_cap.export_pid == getpid())
     {
-      free(g_cap.buf);
-      g_cap.buf        = NULL;
-      g_cap.capacity   = 0;
-      g_cap.count      = 0;
-      g_cap.overflow   = 0;
-      g_cap.export_pid = -1;
-      g_cap.last_error = (rc < 0) ? rc : 0;
-      g_cap.state      = LT_CAP_IDLE;
+      cap_reset_idle_locked((rc < 0) ? rc : 0);
     }
   pthread_mutex_unlock(&g_cap_lock);
 
@@ -1703,14 +1776,7 @@ static int do_cap_abort(void)
 
   if (g_cap.state == LT_CAP_ARMED || g_cap.state == LT_CAP_DONE)
     {
-      free(g_cap.buf);
-      g_cap.buf        = NULL;
-      g_cap.capacity   = 0;
-      g_cap.count      = 0;
-      g_cap.overflow   = 0;
-      g_cap.export_pid = -1;
-      g_cap.last_error = 0;
-      g_cap.state      = LT_CAP_IDLE;
+      cap_reset_idle_locked(0);
       pthread_mutex_unlock(&g_cap_lock);
       printf("linetrace: cap discarded\n");
       return 0;
