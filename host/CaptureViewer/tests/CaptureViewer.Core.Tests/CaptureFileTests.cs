@@ -123,6 +123,7 @@ public class CaptureFileTests
         KnownSchemas.ByMagic.Should().ContainKey((ushort)0x0010);
         KnownSchemas.TryGet(0x0010)!.Name.Should().Be("color_reflection_run");
         KnownSchemas.TryGet(0x0011)!.Name.Should().Be("color_rgbi_run");
+        KnownSchemas.TryGet(0x0012)!.Name.Should().Be("linetrace_lap_run");
         KnownSchemas.TryGet(0xFFFF).Should().BeNull();
     }
 }

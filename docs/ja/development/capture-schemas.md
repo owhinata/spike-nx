@@ -58,6 +58,38 @@
 | 8 | `blue` | `u16` | `raw` | 0 |
 | 10 | `intensity` | `u16` | `raw` | 0 |
 
+## `linetrace_lap_run` (magic 0x0012)
+
+`linetrace` PID デーモンが走行中に 1 tick = 1 record でライントレースの
+ラップを記録するスキーマ (Issue #166、親 #163 LQG ロードマップ)。
+`linetrace cap arm/stop/export` で扱う。
+
+- record size: 19 bytes
+- rate hint: 100 Hz
+
+| offset | name | type | unit | scale 10^n |
+|-------:|------|------|------|-----------:|
+| 0 | `ts_us` | `u32` | `us` | 0 |
+| 4 | `intensity` | `u16` | `raw` | 0 |
+| 6 | `target` | `u16` | `raw` | 0 |
+| 8 | `turn_cmd_dps` | `i16` | `dps` | 0 |
+| 10 | `heading_mdeg` | `i32` | `mdeg` | 0 |
+| 14 | `turn_rate_dps` | `i16` | `dps` | 0 |
+| 16 | `speed_mmps` | `i16` | `mmps` | 0 |
+| 18 | `edge` | `u8` | `` | 0 |
+
+`edge` バイトはライン上のどちらのエッジを走ったかを表す:
+
+- `0` = **UNKNOWN/UNSET** — P0b は常にこの値を書く (PID デーモンに
+  まだ edge の概念がないため)。`0` は予約済みのセンチネルで、有効な
+  LEFT/RIGHT ではない。
+- `1` = **LEFT** (P1a で設定)
+- `2` = **RIGHT** (P1a で設定)
+
+P0c のオフライン fitter は **`edge == 0` を実エッジとして解釈しては
+ならない**。P0b キャプチャでは `c` の符号 (どちらのエッジか) はオペレータ
+が帯域外で指定する。
+
 ## 新規スキーマの追加手順
 
 例: 慣性センサ (IMU) 6-axis の生サンプル `imu_raw_run` を追加する場合。

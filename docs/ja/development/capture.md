@@ -53,6 +53,41 @@ nsh> wait
 
 データを諦める場合は `kill <apps/sensor の pid>` で強制終了 → kernel chardev の release fop が cleanup を担当 (timeout 機構なし)。
 
+### linetrace ラップキャプチャ (Issue #166)
+
+`linetrace` PID デーモンが走行中に 1 tick = 1 record でラップを記録し、
+`linetrace cap export` で同じ `/dev/btcap` パイプラインを通して `.cap`
+として吐き出す (schema `linetrace_lap_run` magic 0x0012、§capture-schemas)。
+
+```
+nsh> linetrace start
+nsh> linetrace cap arm 2000        # ~20 s @ 100 Hz でバッファ確保
+nsh> linetrace run 200 0.36 512    # ラップを走る
+nsh>                               # ... 1 周走る ...
+nsh> linetrace cap stop            # 凍結 (満杯になれば自動 stop)
+nsh> linetrace brake
+nsh> linetrace cap export &        # reader 待ちで block
+nsh> btsensor mode capture         # 2nd session: /dev/btcap を drain
+host$ cat /dev/rfcomm0 > lap.cap   # host 側で stream を保存
+```
+
+操作ポイント:
+
+- `cap arm <n>` はモーションを起こさない。`arm` してから `run` でも、
+  `run` してから `arm` でも、ARMED の間に流れた tick (idle / engaged
+  問わず) が記録される。`cap_max` = 3449 records (64 KB / 19 B)。
+- `brake` は走行中の capture を **凍結して保持** する (部分ラップも P0c に
+  有用)。`cap stop` は明示的な「今すぐ凍結」verb。
+- `linetrace stop` (デーモン終了) は未 export の capture を破棄する。
+  `cap export` を `stop` より先に実行すること。
+- `cap export` の後半は `sensor color capture` の export と同一 (同じ
+  `/dev/btcap` 単一セッション契約、同じ「writer を kill してキャンセル」
+  セマンティクス)。**btcap セッションは同時に 1 つだけ** なので、`sensor
+  … capture` と `linetrace cap export` を同時に走らせることはできない。
+- `kill -9 <export pid>` で強制終了した場合、次の `cap arm`/`cap export`/
+  `cap status`/`cap abort` が dead exporter を回収して `idle` に戻す
+  (lazy reaper)。明示的に捨てたいときは `cap abort`。
+
 ### キャプチャ phase の挙動
 
 `sensor <class> capture [duration_ms]` (default 1000):

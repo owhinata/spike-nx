@@ -13,6 +13,7 @@ public static class KnownSchemas
     {
         { SchemaColorReflectionRun.Magic, new SchemaInfo(SchemaColorReflectionRun.Magic, SchemaColorReflectionRun.Name, SchemaColorReflectionRun.RecordSize, SchemaColorReflectionRun.FieldCount, SchemaColorReflectionRun.Fields) },
         { SchemaColorRgbiRun.Magic, new SchemaInfo(SchemaColorRgbiRun.Magic, SchemaColorRgbiRun.Name, SchemaColorRgbiRun.RecordSize, SchemaColorRgbiRun.FieldCount, SchemaColorRgbiRun.Fields) },
+        { SchemaLinetraceLapRun.Magic, new SchemaInfo(SchemaLinetraceLapRun.Magic, SchemaLinetraceLapRun.Name, SchemaLinetraceLapRun.RecordSize, SchemaLinetraceLapRun.FieldCount, SchemaLinetraceLapRun.Fields) },
     };
 
     public static SchemaInfo? TryGet(ushort magic) =>

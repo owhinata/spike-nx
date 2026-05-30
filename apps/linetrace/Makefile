@@ -7,4 +7,12 @@ MODULE = $(CONFIG_APP_LINETRACE)
 
 MAINSRC = linetrace_main.c
 
+# Capture library headers (Issue #166).  The library lives in
+# apps/capture/ and is linked into the apps archive automatically; we
+# only need the include path to satisfy the `linetrace cap` verbs.
+
+ifeq ($(CONFIG_APP_CAPTURE),y)
+CFLAGS += -I$(APPDIR)/external/capture/include
+endif
+
 include $(APPDIR)/Application.mk

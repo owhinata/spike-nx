@@ -65,6 +65,42 @@ the BT-side `MODE CAPTURE\n` is mandatory to drain the chardev.
 To abandon a session, `kill <apps/sensor pid>` — the kernel chardev
 release fop reclaims the session (no timeout knob exists).
 
+### Linetrace lap capture (Issue #166)
+
+The `linetrace` PID daemon can record a per-tick lap trace (one record
+per loop tick) and export it through the same `/dev/btcap` pipeline as a
+`.cap` file (schema `linetrace_lap_run`, magic 0x0012; see
+capture-schemas).
+
+```
+nsh> linetrace start
+nsh> linetrace cap arm 2000        # ~20 s of buffer @ 100 Hz
+nsh> linetrace run 200 0.36 512    # drive the lap
+nsh>                               # ... drive a full lap ...
+nsh> linetrace cap stop            # freeze (or it auto-stops when full)
+nsh> linetrace brake
+nsh> linetrace cap export &        # blocks for the reader
+nsh> btsensor mode capture         # second session: drains /dev/btcap
+host$ cat /dev/rfcomm0 > lap.cap   # host captures the stream
+```
+
+Operator notes:
+
+- `cap arm <n>` does not start motion.  Arm then `run`, or `run` then
+  arm — both orders work; whatever ticks happen while ARMED (idle or
+  engaged) are recorded.  `cap_max` = 3449 records (64 KB / 19 B).
+- `brake` **freezes and keeps** an in-flight capture (a partial lap is
+  still useful to P0c).  `cap stop` is the explicit "freeze now" verb.
+- `linetrace stop` (daemon exit) drops an un-exported capture.  Run
+  `cap export` before `linetrace stop`.
+- The export half is identical to `sensor color capture`'s export (same
+  `/dev/btcap` single-session contract, same "kill the writer to cancel"
+  semantics).  Only ONE btcap session can be in flight, so you cannot
+  run `sensor … capture` and `linetrace cap export` at the same time.
+- A hard `kill -9 <export pid>` is reclaimed lazily: the next `cap
+  arm`/`cap export`/`cap status`/`cap abort` reaps the dead exporter and
+  returns the FSM to `idle`.  Use `cap abort` to discard explicitly.
+
 ### What the capture phase does
 
 `sensor <class> capture [duration_ms]` (default 1000 ms):

@@ -456,3 +456,173 @@ def test_linetrace_run_dynamic_flags_status(p):
     finally:
         p.sendCommand("linetrace brake", timeout=5)
         _ensure_stopped(p)
+
+
+# ---------------------------------------------------------------------------
+# Lap capture verbs (Issue #166)
+# ---------------------------------------------------------------------------
+
+
+def test_linetrace_cap_without_daemon(p):
+    """L-14: `cap arm`/`cap export` refuse cleanly with no daemon.
+
+    Non-interactive: the daemon-running guard fires before any FSM /
+    capture-library work, so no hardware is required.
+    """
+
+    _ensure_stopped(p)
+    out = p.sendCommand("linetrace cap arm 100", timeout=5)
+    assert "not running" in out, f"unexpected: {out!r}"
+
+    out = p.sendCommand("linetrace cap export", timeout=5)
+    # export with no armed/done capture and no daemon -> nothing to export
+    assert "nothing to export" in out or "not running" in out, \
+        f"unexpected: {out!r}"
+
+
+def test_linetrace_cap_arm_validates(p, color_sensor_required):
+    """L-15: `cap arm` range + integer validation.
+
+    Requires the daemon (color CLAIM) so the validate path runs after
+    the daemon-running guard.
+    """
+
+    _ensure_stopped(p)
+    start = p.sendCommand("linetrace start", timeout=8)
+    if "running" not in start.lower() and "started" not in start.lower():
+        pytest.skip(f"linetrace start did not succeed: {start!r}")
+    time.sleep(0.3)
+
+    try:
+        out = p.sendCommand("linetrace cap arm 0", timeout=5)
+        assert "must be in" in out, f"arm 0: {out!r}"
+
+        out = p.sendCommand("linetrace cap arm -1", timeout=5)
+        assert "must be in" in out, f"arm -1: {out!r}"
+
+        # > cap_max (3449)
+        out = p.sendCommand("linetrace cap arm 999999", timeout=5)
+        assert "must be in" in out, f"arm 999999: {out!r}"
+
+        out = p.sendCommand("linetrace cap arm abc", timeout=5)
+        assert "must be an integer" in out, f"arm abc: {out!r}"
+    finally:
+        p.sendCommand("linetrace cap abort", timeout=5)
+        _ensure_stopped(p)
+
+
+def test_linetrace_cap_export_without_arm(p, color_sensor_required):
+    """L-16: `cap export` while IDLE -> nothing to export."""
+
+    _ensure_stopped(p)
+    start = p.sendCommand("linetrace start", timeout=8)
+    if "running" not in start.lower() and "started" not in start.lower():
+        pytest.skip(f"linetrace start did not succeed: {start!r}")
+    time.sleep(0.3)
+
+    try:
+        out = p.sendCommand("linetrace cap export", timeout=5)
+        assert "nothing to export" in out, f"unexpected: {out!r}"
+    finally:
+        _ensure_stopped(p)
+
+
+def test_linetrace_cap_status_keys(p, color_sensor_required):
+    """L-17: status exposes additive cap_* keys; `cap status` prints fields.
+
+    Confirms the new keys are additive and `_parse_status` still reads
+    the existing keys.
+    """
+
+    _ensure_stopped(p)
+    start = p.sendCommand("linetrace start", timeout=8)
+    if "running" not in start.lower() and "started" not in start.lower():
+        pytest.skip(f"linetrace start did not succeed: {start!r}")
+    time.sleep(0.3)
+
+    try:
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        # Existing keys still parse.
+        assert st.get("running") == "yes", f"status: {out!r}"
+        # New additive key.
+        assert st.get("cap_state") == "idle", f"cap_state: {out!r}"
+
+        out = p.sendCommand("linetrace cap status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("cap_state") == "idle", f"cap status: {out!r}"
+        assert "cap_count" in st
+        assert "cap_capacity" in st
+        assert "cap_overflow" in st
+    finally:
+        _ensure_stopped(p)
+
+
+def test_linetrace_cap_abort(p, color_sensor_required):
+    """L-18: explicit `cap abort` resets an armed capture to idle."""
+
+    _ensure_stopped(p)
+    start = p.sendCommand("linetrace start", timeout=8)
+    if "running" not in start.lower() and "started" not in start.lower():
+        pytest.skip(f"linetrace start did not succeed: {start!r}")
+    time.sleep(0.3)
+
+    try:
+        out = p.sendCommand("linetrace cap arm 50", timeout=5)
+        assert "armed" in out, f"arm: {out!r}"
+
+        out = p.sendCommand("linetrace cap status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("cap_state") == "armed", f"after arm: {out!r}"
+        assert st.get("cap_capacity") == "50"
+
+        out = p.sendCommand("linetrace cap abort", timeout=5)
+        assert "discarded" in out, f"abort: {out!r}"
+
+        out = p.sendCommand("linetrace cap status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("cap_state") == "idle", f"after abort: {out!r}"
+    finally:
+        _ensure_stopped(p)
+
+
+@pytest.mark.interactive
+def test_linetrace_cap_arm_then_status(p):
+    """L-19: FSM arm -> count advances on idle ticks -> stop -> done.
+
+    No motion: idle-loop ticks populate `count`.  Validates the FSM
+    transitions without a BT host (the full export round-trip stays a
+    manual HW-verify step).
+    """
+
+    _ensure_stopped(p)
+    start = p.sendCommand("linetrace start", timeout=8)
+    if "running" not in start.lower() and "started" not in start.lower():
+        pytest.skip(f"linetrace start did not succeed: {start!r}")
+    time.sleep(0.3)
+
+    try:
+        out = p.sendCommand("linetrace cap arm 50", timeout=5)
+        assert "armed" in out, f"arm: {out!r}"
+
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("cap_state") == "armed", f"status: {out!r}"
+        assert st.get("cap_capacity") == "50"
+
+        # Idle ticks accumulate count at the loop rate (100 Hz default).
+        time.sleep(0.3)
+        out = p.sendCommand("linetrace cap status", timeout=5)
+        st = _parse_status(out)
+        count = int(st.get("cap_count", "0"))
+        assert count > 0, f"expected idle ticks to advance count: {out!r}"
+
+        out = p.sendCommand("linetrace cap stop", timeout=5)
+        assert "done" in out, f"stop: {out!r}"
+
+        out = p.sendCommand("linetrace cap status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("cap_state") == "done", f"after stop: {out!r}"
+    finally:
+        p.sendCommand("linetrace cap abort", timeout=5)
+        _ensure_stopped(p)
