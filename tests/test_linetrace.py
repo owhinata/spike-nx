@@ -459,6 +459,169 @@ def test_linetrace_run_dynamic_flags_status(p):
 
 
 # ---------------------------------------------------------------------------
+# Issue #169 / P1a: LQG controller (coexists with PID, default PID)
+# ---------------------------------------------------------------------------
+
+_LQGSTAT_HEADER = (
+    "time_ms", "iter", "intens", "ey_hat", "eth_hat_deg",
+    "innov", "K1", "K2", "turn", "sat", "lost",
+)
+
+
+def _parse_lqgstat(text):
+    """Return (header_seen, data_rows).  Row = list of column strings,
+    matched only when the first token is all-digit (time_ms)."""
+    header_seen = False
+    rows = []
+    for line in text.splitlines():
+        toks = line.split()
+        if tuple(toks) == _LQGSTAT_HEADER:
+            header_seen = True
+            continue
+        if len(toks) != len(_LQGSTAT_HEADER):
+            continue
+        if not toks[0].isdigit():
+            continue
+        rows.append(toks)
+    return header_seen, rows
+
+
+def test_linetrace_lqg_without_daemon(p):
+    """L-14: lqg refuses cleanly when no daemon is running."""
+
+    _ensure_stopped(p)
+    out = p.sendCommand("linetrace lqg 150", timeout=5)
+    assert "not running" in out, f"unexpected: {out!r}"
+
+
+def test_linetrace_lqgstat_without_daemon(p):
+    """L-15: lqgstat refuses cleanly when no daemon is running."""
+
+    _ensure_stopped(p)
+    out = p.sendCommand("linetrace lqgstat", timeout=5)
+    assert "daemon not running" in out, f"unexpected: {out!r}"
+    header_seen, rows = _parse_lqgstat(out)
+    assert not header_seen, "header should not appear when daemon down"
+    assert rows == []
+
+
+def test_linetrace_status_default_controller_pid(p):
+    """L-16: status shows controller: pid by default (no daemon -> n/a).
+
+    Without a daemon the status path early-returns after 'running: no',
+    so this only asserts the no-daemon surface; the controller line is
+    checked under the interactive flow once a daemon is up.
+    """
+
+    _ensure_stopped(p)
+    out = p.sendCommand("linetrace status", timeout=5)
+    st = _parse_status(out)
+    assert st.get("running") == "no", f"unexpected status: {out!r}"
+
+
+def test_linetrace_lqgstat_rejects_short_interval(p, color_sensor_required):
+    """L-17: lqgstat interval below the control period (10 ms @ 100 Hz)
+    is rejected.  Daemon must be up so the validate path runs."""
+
+    _ensure_stopped(p)
+    start = p.sendCommand("linetrace start", timeout=8)
+    if "running" not in start.lower() and "spawned" not in start.lower():
+        pytest.skip(f"linetrace start did not succeed: {start!r}")
+    time.sleep(0.5)
+    try:
+        out = p.sendCommand("linetrace lqgstat 1000 5", timeout=5)
+        assert "too small" in out, f"unexpected: {out!r}"
+        header_seen, rows = _parse_lqgstat(out)
+        assert not header_seen
+        assert rows == []
+    finally:
+        _ensure_stopped(p)
+
+
+def test_linetrace_lqg_arg_validation(p, color_sensor_required):
+    """L-18: lqg argument validation rejects bad params.
+
+    Daemon must be running for do_lqg to evaluate args past the
+    daemon-running gate (same precondition as L-7/L-8/L-11/L-12), so
+    requires a real color sensor.
+    """
+
+    _ensure_stopped(p)
+    start = p.sendCommand("linetrace start", timeout=8)
+    if "running" not in start.lower() and "spawned" not in start.lower():
+        pytest.skip(f"linetrace start did not succeed: {start!r}")
+    time.sleep(0.5)
+    try:
+        # c <= 0 rejected.
+        out = p.sendCommand("linetrace lqg 150 --c 0", timeout=5)
+        assert "lqg params" in out.lower() or "must be" in out.lower(), (
+            f"expected --c 0 reject: {out!r}"
+        )
+
+        # non-finite c rejected.
+        out = p.sendCommand("linetrace lqg 150 --c nan", timeout=5)
+        assert "must be" in out.lower() or "lqg params" in out.lower(), (
+            f"expected non-finite --c reject: {out!r}"
+        )
+
+        # bad edge rejected.
+        out = p.sendCommand("linetrace lqg 150 --edge up", timeout=5)
+        assert "edge" in out.lower(), f"expected --edge reject: {out!r}"
+
+        # out-of-range hz rejected.
+        out = p.sendCommand("linetrace lqg 150 --hz 5", timeout=5)
+        assert "hz" in out.lower(), f"expected --hz reject: {out!r}"
+    finally:
+        p.sendCommand("linetrace brake", timeout=5)
+        _ensure_stopped(p)
+
+
+@pytest.mark.interactive
+def test_linetrace_lqg_engage_and_status(p):
+    """L-19: lqg engages -> status controller: lqg, engaged yes;
+    lqgstat prints header + rows with ey_hat/K1/K2; run flips to PID."""
+
+    _ensure_stopped(p)
+    start = p.sendCommand("linetrace start", timeout=8)
+    assert "running" in start.lower() or "spawned" in start.lower(), (
+        f"linetrace start failed: {start!r}"
+    )
+    time.sleep(0.5)
+    try:
+        # Default controller is PID.
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("controller") == "pid", f"default not pid: {out!r}"
+
+        # Engage LQG at idle-zero (no motion) so the bench is safe.
+        out = p.sendCommand("linetrace lqg 0 512 --c 150 --L 52", timeout=5)
+        assert "lqg" in out.lower(), f"lqg engage echo missing: {out!r}"
+
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("controller") == "lqg", f"not lqg: {out!r}"
+        assert st.get("engaged") == "yes"
+        assert st.get("lqg_edge") == "right"
+
+        # lqgstat header + at least one row, K1 ~ sqrt(0.888) ~ 0.942.
+        out = p.sendCommand("linetrace lqgstat", timeout=5)
+        header_seen, rows = _parse_lqgstat(out)
+        assert header_seen, f"lqgstat header missing: {out!r}"
+        assert len(rows) >= 1, f"expected >=1 row: {out!r}"
+        k1 = float(rows[0][6])
+        assert 0.9 < k1 < 1.0, f"K1 out of expected range: {k1}"
+
+        # run flips back to PID.
+        p.sendCommand("linetrace run 0 0", timeout=5)
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("controller") == "pid", f"did not flip to pid: {out!r}"
+    finally:
+        p.sendCommand("linetrace brake", timeout=5)
+        _ensure_stopped(p)
+
+
+# ---------------------------------------------------------------------------
 # Lap capture verbs (Issue #166)
 # ---------------------------------------------------------------------------
 

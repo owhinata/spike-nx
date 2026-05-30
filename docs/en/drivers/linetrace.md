@@ -191,6 +191,92 @@ Verify with `pidstat`: `v_max≈300` on straights, `v_min` floor on curves indic
 
 **Important**: `--v-*` flags reset to "dynamic OFF" (`v_min := speed`, `α := β := 0`) on every `run` (unlike kp/ki/kd/target/hz which inherit prior values).  This avoids accidentally carrying a stale dynamic profile from a previous tuning session.
 
+## 3.5 LQG controller (Issue #169 / P1a)
+
+The `lqg` verb engages an observer-based **Tier-3 LQG** line follower that **coexists** with the PID. The default stays PID (`run`); LQG is opt-in until a later phase flips the default. The investigation behind it lives in `tools/lqr_linetrace/` (oracle `lqr_sim.py`).
+
+### 3.5.1 The 2-state model
+
+The line follower is the outer kinematic loop emitting a turn-rate command:
+
+```
+state x = [e_y, e_theta]    e_y     cross-track error [mm]
+                            e_theta heading error     [rad]
+  dot e_y     = v * sin(e_theta)
+  dot e_theta = omega                 (omega = turn-rate command)
+```
+
+The single reflected-intensity reading sits a look-ahead distance `L` ahead of the axle, so it measures a blend of position and heading:
+
+```
+err = target - intensity = -c * (e_y + L * sin e_theta)     (linear band)
+```
+
+with measurement row `C = [-c, -c·L]`. `c` [counts/mm] is the intensity slope across the line edge (calibrate); `L` [mm] is the look-ahead (measure). The `--edge left|right` flag picks the steer polarity: RIGHT edge bakes `+c` into the Kf table, LEFT bakes `-c`, so the LEFT Kf is the sign-flipped RIGHT Kf and the estimate stays physical signed mm/rad for both edges.
+
+### 3.5.2 Closed-form state feedback K(v)
+
+```
+K1 = sqrt(q1r)                  gain on e_y      (speed-independent)
+K2 = sqrt(2*v*K1 + q2)          gain on e_theta  (grows ~sqrt(v))
+omega = -K1*e_y - K2*e_theta
+```
+
+With `q2 = 0` this yields damping `zeta = 0.7071` at **every** speed (a fixed-gain PID can only hit 0.707 at one speed). The feedback is edge-agnostic — `e_y`/`e_theta` are physical signed states; the edge sign lives only in the measurement row.
+
+### 3.5.3 Kalman observer
+
+A 2-state steady-state Kalman observer reconstructs `(e_y, e_theta)` from the look-ahead intensity and the previously-applied turn-rate command (predict ZOH on `prev_w`, then a scalar-innovation correct against `C`). Unlike a naive PD it never differentiates `err`, so it is immune to the `L·omega` corruption that breaks a Tier-1 PD at large look-ahead. The Riccati equation is solved **once per `lqg` engage** (CLI thread) into a 24-point speed-scheduled gain table (`LQG_V_LO=50` .. `LQG_V_HI=400` mm/s); the 100 Hz loop only linear-interpolates and runs one `sinf`+`sqrtf` per tick.
+
+The whole config (params + Kf table) is published as one immutable double-buffered slot selected by an `atomic_uint` generation counter (release-store on publish, acquire-load per tick), so a hot LQG→LQG reconfigure can never pair new params with an old table. The observer re-seed is coupled to the generation (not a shared flag), so it can never be lost.
+
+### 3.5.4 Saturation / LOST state machine
+
+Beyond the ±`sat_band` linear band (or when the intensity rails at 0/1024) the innovation lies, so the observer must not integrate garbage:
+
+- **NORMAL** — in band: run the Kalman correct, steer on the estimate.
+- **SATURATED** — railed or out-of-band: **freeze** the observer (predict only, skip the correct), keep steering on the last good heading. After `lost_ticks` consecutive SAT ticks → LOST.
+- **LOST** — stop trusting the observer; command a fixed seek `-last_side·seek_dps` (curving back toward the line). After `lost_timeout_ms` in LOST → **auto-stop**: brake + disengage (the daemon stays alive, `lost_cnt` increments). Re-engage with `lqg`.
+
+Band re-entry re-seeds the estimate from the measurement (`e_y = -err/c_signed`, clamped to ±`sat_band`) so there is no discontinuity from a drifted frozen estimate.
+
+### 3.5.5 Verbs
+
+```
+linetrace lqg <speed_mmps> [target] [--hz N] [--c C] [--L L] \
+              [--edge left|right] [--q1r Q] [--q2 Q] \
+              [--kf-qpos Q] [--kf-qhead Q] [--kf-rmeas R] \
+              [--sat-band MM] [--lost-ticks N] [--seek-dps D] [--lost-timeout MS]
+linetrace lqgstat [duration_ms [interval_ms]]
+```
+
+`lqg` mirrors `run`: unspecified params inherit the prior `lqg` (or compiled defaults on the first engage after `start`); `seek_dps` defaults to the base speed. `lqg 0` idles at zero (FOREVER(0,0), stays engaged). `run` flips back to PID. `target` stays live for both controllers via `linetrace target N`. If the Riccati build fails to converge, the engage is **rejected** (no state change).
+
+`lqgstat` streams the observer internals (default 1000 ms interval; sub-period intervals rejected per the observability-jitter rule):
+
+```
+ time_ms      iter intens    ey_hat  eth_hat_deg        innov        K1        K2    turn  sat  lost
+```
+
+`innov` (innovation, `err_meas - yhat`) is the single best observer-health signal — large or growing innov flags a saturation/model mismatch. `sat` is `NORM|SAT|LOST`. `iter` keeps advancing at speed=0 (idle-zero is not a hang).
+
+### 3.5.6 Defaults (compiled, sim-locked)
+
+| param | default | meaning |
+|---|---|---|
+| `c` | 150 | intensity slope counts/mm (calibrate) |
+| `L` | 52 | look-ahead mm (measure) |
+| `edge` | right | steer polarity |
+| `q1r` | 0.888 | q1/r (state-feedback stiffness) |
+| `q2` | 0 | heading weight (0 → zeta 0.707 all v) |
+| `kf_qpos` / `kf_qhead` / `kf_rmeas` | 1.0 / 1e-4 / 49 | Kalman Q[0][0] / Q[1][1] / R |
+| `sat_band` | 3.4 | linear-band half-width mm |
+| `lost_ticks` | 5 | SAT ticks → LOST |
+| `seek_dps` | = base speed | LOST seek magnitude |
+| `lost_timeout_ms` | 500 | LOST → auto-stop |
+
+At the bench `c=150 L=52` the sim oracle reports LQG IAE 0.6/0.3 (vs PID 1.9/3.4) and 0% overshoot (vs PID 64-111%) at v=150/300 with zeta ≡ 0.707. The C float port of the Kf table agrees with the oracle to ~0.4% relative (single-precision Riccati), and the closed-form K(v) matches to 6 decimals.
+
 ## 4. Wiring
 
 - Color sensor: any port (LPF2 type 61 auto-detected).  Mounted forward-facing about 10 mm above the floor.

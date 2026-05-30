@@ -191,6 +191,92 @@ linetrace run 300 0.36 512 --hz 200 --kd 0.01 --ki 0.15 \
 
 **重要**: `--v-*` flag は `run` ごとに「動的 OFF (`v_min := speed`, `α := β := 0`)」に reset される (kp/ki/kd/target/hz が前回値を継承するのとは異なる)。前回の動的設定をうっかり引きずる事故を避けるため。
 
+## 3.5 LQG コントローラ (Issue #169 / P1a)
+
+`lqg` verb は観測器ベースの **Tier-3 LQG** ライントレーサを起動する。PID と **共存** し、デフォルトは PID (`run`) のまま — LQG は opt-in で、デフォルト切り替えは後続フェーズ。設計調査は `tools/lqr_linetrace/`(oracle `lqr_sim.py`)。
+
+### 3.5.1 2 状態モデル
+
+ライントレーサは turn-rate 指令を出す外側の運動学ループ:
+
+```
+state x = [e_y, e_theta]    e_y     横方向偏差 [mm]
+                            e_theta 姿勢角偏差 [rad]
+  dot e_y     = v * sin(e_theta)
+  dot e_theta = omega                 (omega = turn-rate 指令)
+```
+
+単一の反射輝度センサは車軸より前方 `L` (look-ahead) に位置するため、位置と姿勢のブレンドを観測する:
+
+```
+err = target - intensity = -c * (e_y + L * sin e_theta)     (線形帯域内)
+```
+
+測定行は `C = [-c, -c·L]`。`c` [counts/mm] はライン端の輝度勾配(要キャリブレーション)、`L` [mm] は look-ahead(要実測)。`--edge left|right` は steer 極性を選ぶ: RIGHT edge は Kf テーブルに `+c`、LEFT は `-c` を焼き込み、LEFT の Kf は RIGHT の符号反転になる。推定値は両 edge とも物理的な符号付き mm/rad のまま。
+
+### 3.5.2 閉形式状態フィードバック K(v)
+
+```
+K1 = sqrt(q1r)                  e_y のゲイン      (速度非依存)
+K2 = sqrt(2*v*K1 + q2)          e_theta のゲイン  (~sqrt(v) で増加)
+omega = -K1*e_y - K2*e_theta
+```
+
+`q2 = 0` のとき減衰比は **全速度で** `zeta = 0.7071`(固定ゲイン PID は 1 速度でしか 0.707 に当てられない)。フィードバックは edge 非依存 — `e_y`/`e_theta` は物理的な符号付き状態で、edge 符号は測定行にのみ存在する。
+
+### 3.5.3 Kalman 観測器
+
+2 状態の定常 Kalman 観測器が look-ahead 輝度と前回印加した turn-rate 指令から `(e_y, e_theta)` を再構成する(`prev_w` の ZOH で predict → 測定 `C` に対するスカラ innovation で correct)。naive PD と違い `err` を微分しないため、大きな look-ahead で Tier-1 PD を壊す `L·omega` 汚染に免疫がある。Riccati 方程式は **`lqg` engage ごとに 1 度だけ**(CLI スレッド)24 点の速度スケジュール gain テーブル(`LQG_V_LO=50` .. `LQG_V_HI=400` mm/s)へ解く。100 Hz ループは線形補間と 1 tick あたり 1 回の `sinf`+`sqrtf` のみ。
+
+config 全体(params + Kf テーブル)は `atomic_uint` の世代カウンタで選ぶ 1 つの不変ダブルバッファ slot として publish される(publish 時 release-store、tick ごとに acquire-load)。これにより hot な LQG→LQG 再設定でも新 params と旧テーブルが組になることはない。観測器の re-seed は世代に結合され(共有フラグではない)、取りこぼしが起きない。
+
+### 3.5.4 飽和 / LOST ステートマシン
+
+±`sat_band` の線形帯域を外れる(または輝度が 0/1024 に張り付く)と innovation が嘘になるため、観測器にゴミを積分させない:
+
+- **NORMAL** — 帯域内: Kalman correct を実行し推定値で steer。
+- **SATURATED** — rail or 帯域外: 観測器を **freeze**(predict のみ、correct を skip)し、直近の良い姿勢で steer 継続。連続 `lost_ticks` SAT tick で LOST へ。
+- **LOST** — 観測器を信用しない。固定 seek `-last_side·seek_dps` を指令(ラインへ曲がり戻る)。LOST が `lost_timeout_ms` 続くと **auto-stop**: brake + disengage(daemon は生存、`lost_cnt` インクリメント)。`lqg` で再 engage。
+
+帯域復帰時は測定から推定を re-seed(`e_y = -err/c_signed`、±`sat_band` にクランプ)するので、drift した freeze 推定からの不連続が出ない。
+
+### 3.5.5 Verb
+
+```
+linetrace lqg <speed_mmps> [target] [--hz N] [--c C] [--L L] \
+              [--edge left|right] [--q1r Q] [--q2 Q] \
+              [--kf-qpos Q] [--kf-qhead Q] [--kf-rmeas R] \
+              [--sat-band MM] [--lost-ticks N] [--seek-dps D] [--lost-timeout MS]
+linetrace lqgstat [duration_ms [interval_ms]]
+```
+
+`lqg` は `run` に倣う: 未指定 param は直前の `lqg`(start 後初回は compiled default)を継承、`seek_dps` のデフォルトは base speed。`lqg 0` は zero でアイドル(FOREVER(0,0)、engage 維持)。`run` で PID に戻る。`target` は `linetrace target N` で両コントローラとも live。Riccati が収束しなければ engage は **reject**(状態変化なし)。
+
+`lqgstat` は観測器内部をストリームする(デフォルト 1000 ms、sub-period interval は observability-jitter ルールで reject):
+
+```
+ time_ms      iter intens    ey_hat  eth_hat_deg        innov        K1        K2    turn  sat  lost
+```
+
+`innov`(innovation、`err_meas - yhat`)は観測器の健全性を示す最良の単一信号 — 大きい/増大する innov は飽和やモデル不一致を示す。`sat` は `NORM|SAT|LOST`。`iter` は speed=0 でも進む(idle-zero はハングではない)。
+
+### 3.5.6 デフォルト (compiled, sim-locked)
+
+| param | default | 意味 |
+|---|---|---|
+| `c` | 150 | 輝度勾配 counts/mm(要キャリブレーション) |
+| `L` | 52 | look-ahead mm(要実測) |
+| `edge` | right | steer 極性 |
+| `q1r` | 0.888 | q1/r(state-feedback の硬さ) |
+| `q2` | 0 | 姿勢角重み(0 → 全速度 zeta 0.707) |
+| `kf_qpos` / `kf_qhead` / `kf_rmeas` | 1.0 / 1e-4 / 49 | Kalman Q[0][0] / Q[1][1] / R |
+| `sat_band` | 3.4 | 線形帯域の半幅 mm |
+| `lost_ticks` | 5 | SAT tick → LOST |
+| `seek_dps` | = base speed | LOST seek の大きさ |
+| `lost_timeout_ms` | 500 | LOST → auto-stop |
+
+ベンチ `c=150 L=52` で sim oracle は LQG IAE 0.6/0.3(PID 1.9/3.4)、overshoot 0%(PID 64-111%)を v=150/300 で zeta ≡ 0.707 と報告する。Kf テーブルの C float port は oracle と相対 ~0.4%(単精度 Riccati)で一致し、閉形式 K(v) は 6 桁一致する。
+
 ## 4. 配線
 
 - カラーセンサ: 任意ポート (LPF2 type 61 を auto-detect)。床から 10 mm 程度の高さで前向きに搭載。
