@@ -135,6 +135,7 @@ def parse_cap(path):
 
     fields = []
     spans = []
+    seen_names = set()
     for i in range(field_count):
         off = HEADER_SIZE + i * FIELD_DESC_SIZE
         fname = data[off:off + FIELD_NAME_MAX].split(b"\0", 1)[0].decode(
@@ -156,6 +157,10 @@ def parse_cap(path):
         if foff + fsize > record_size:
             raise CapError("%s: field %r span [%d,%d) exceeds record_size %d"
                            % (path, fname, foff, foff + fsize, record_size))
+        if fname in seen_names:
+            raise CapError("%s: duplicate field name %r in descriptor table"
+                           % (path, fname))
+        seen_names.add(fname)
         fields.append(dict(name=fname, type=ftype, offset=foff, size=fsize,
                            scale_log10=fscale, unit=funit, code=code))
         spans.append((foff, foff + fsize, fname))
@@ -402,11 +407,16 @@ def ekf_nll(ticks, c, q_pos, q_head, R, args, edge_sign, bias=0.0,
             continue
         coast = 0
 
-        # Measurement update.
+        # Measurement update.  Nonlinear h(x) and its Jacobian are evaluated at
+        # the PREDICTED state (eth_p), not the pre-predict angle:
+        #   h(x) = edge_sign*c*(e_y + L*sin e_theta) + bias
+        #   C    = [edge_sign*c, edge_sign*c*L*cos e_theta]
+        sin_ethp = math.sin(eth_p)
+        cos_ethp = math.cos(eth_p)
         cc0 = edge_sign * c
-        cc1 = edge_sign * c * L * cos_eth
-        # Innovation
-        h = cc0 * ey_p + cc1 * eth_p + bias
+        cc1 = edge_sign * c * L * cos_ethp
+        # Innovation (true nonlinear predicted measurement)
+        h = edge_sign * c * (ey_p + L * sin_ethp) + bias
         nu = t["err"] - h
         # S = C Pp C' + R
         PpCt0 = Pp[0][0] * cc0 + Pp[0][1] * cc1
@@ -705,7 +715,12 @@ def fit_regime(ticks, args, edge_sign, label):
     full per-regime result block.  ``ticks`` must retain predict-only ticks."""
     n_used = sum(1 for t in ticks if t["use"])
     res = dict(label=label, n_used=n_used)
-    if n_used < args.min_fit_updates:
+    # Need enough measurement updates AFTER the burn-in skip to actually have a
+    # non-empty NLL; otherwise the objective is a flat zero and the optimiser
+    # returns a meaningless "fit".
+    n_post_burnin = n_used - args.burn_in_ticks
+    res["n_post_burnin"] = n_post_burnin
+    if n_used < args.min_fit_updates or n_post_burnin < args.min_fit_updates:
         res["status"] = "INSUFFICIENT_UPDATES"
         return res
 
@@ -834,7 +849,13 @@ def fit_lap(path, args):
     # model (sanity gate) and must not feed the c/R/bias decisions; record it
     # for reporting but mark it non-decision-grade.
     def usable(r):
-        return r.get("status") == "OK" and r.get("c_label") != "out-of-bracket"
+        # Decision-grade requires a clean, identified fit: status OK, the c
+        # profile a genuine band (NOT ridge/flat/out-of-bracket), and no
+        # nuisance parameter pinned at a search bound.  Anything else is a
+        # diagnostic only and must not feed kf_rmeas / P3.
+        return (r.get("status") == "OK"
+                and r.get("c_label") == "band"
+                and not any(r.get("at_bound", {}).values()))
 
     decision = None
     for r in regimes:
@@ -1019,22 +1040,35 @@ def aggregate_and_decide(laps, args):
     out["bias_spread_mm"] = bias_spread
     out["any_bias_significant"] = any(sigs)
 
-    # Decision 2: kf_rmeas.
+    # Decision 2: kf_rmeas.  A hard decision number is only issued with >=2
+    # usable decision-grade laps AND sqrt(R) in the sane 2..7 band; otherwise
+    # it is reported as PROVISIONAL and the machine field kf_rmeas is left null
+    # (the provisional value lives in kf_rmeas_provisional) so consumers never
+    # mistake a single-lap / out-of-sanity reading for a committed value.
     R_med = median(Rs)
     sqrtR = math.sqrt(R_med) if R_med > 0 else float("nan")
-    kf_rmeas = round(R_med)
-    out["kf_rmeas"] = kf_rmeas
+    kf_rmeas_val = round(R_med)
+    r_sane = 2.0 <= sqrtR <= 7.0
+    decision_grade = (n_laps_used >= 2) and r_sane
     out["R_median"] = R_med
     out["R_per_lap"] = Rs
-    r_warn = not (2.0 <= sqrtR <= 7.0)
-    print("  Decision 2 -- kf_rmeas = %d counts^2  (median R; per-lap R=%s; "
-          "sqrt=%.2f)%s"
-          % (kf_rmeas, ["%.1f" % x for x in Rs], sqrtR,
-             "  WARNING: sqrt(R) outside ~2..7 -> likely absorbing "
-             "curvature/transient/censoring; treat as PROVISIONAL" if r_warn
-             else ""))
-    if len(laps) == 1:
-        print("       (single lap -> kf_rmeas is PROVISIONAL)")
+    out["kf_rmeas_provisional"] = kf_rmeas_val
+    if decision_grade:
+        out["kf_rmeas"] = kf_rmeas_val
+        out["kf_rmeas_status"] = "DECISION_GRADE"
+    else:
+        out["kf_rmeas"] = None
+        out["kf_rmeas_status"] = "PROVISIONAL"
+    status_txt = "DECISION-GRADE" if decision_grade else "PROVISIONAL"
+    print("  Decision 2 -- kf_rmeas = %d counts^2 [%s]  (median R; per-lap "
+          "R=%s; sqrt=%.2f)"
+          % (kf_rmeas_val, status_txt, ["%.1f" % x for x in Rs], sqrtR))
+    if not r_sane:
+        print("       WARNING: sqrt(R)=%.2f outside ~2..7 -> likely absorbing "
+              "curvature/transient/censoring; treat as PROVISIONAL" % sqrtR)
+    if n_laps_used < 2:
+        print("       (%d usable lap(s) < 2 -> kf_rmeas is PROVISIONAL, "
+              "machine field null)" % n_laps_used)
 
     # Q suggestions (both conventions), from the decision regime(s).
     dt_nom = median([l["dt_median"] for l in laps])
@@ -1055,12 +1089,15 @@ def aggregate_and_decide(laps, args):
           % (qp_spec, qh_spec))
     print("       (P1a defaults today: kf_qpos=1, kf_qhead=1e-4)")
 
-    # Decision 1: P3 needed?  Gated to require >=2 lighting/surface laps.
-    if len(laps) < 2:
+    # Decision 1: P3 needed?  Gated to require >=2 USABLE (decision-grade)
+    # lighting/surface laps -- supplying two captures where only one yields a
+    # usable straight fit must NOT unlock a hard yes/no.
+    if n_laps_used < 2:
         verdict = "UNDECIDED (INSUFFICIENT_LAPS_FOR_AGGREGATE)"
         print("  Decision 1 -- P3_NEEDED: %s" % verdict)
-        print("       single lap cannot separate a physical ambient bias from "
-              "a setpoint/x0/geometry offset (plan 3.4).")
+        print("       %d usable decision-grade lap(s) < 2: cannot separate a "
+              "physical ambient bias from a setpoint/x0/geometry offset "
+              "(plan 3.4)." % n_laps_used)
         print("       within-lap residual-bias indicator: |Delta e_y|=%.3f mm "
               "(threshold %.2f mm), %s"
               % (max_dey, args.p3_bias_thresh_mm,
