@@ -230,15 +230,19 @@ A 2-state steady-state Kalman observer reconstructs `(e_y, e_theta)` from the lo
 
 The whole config (params + Kf table) is published as one immutable double-buffered slot selected by an `atomic_uint` generation counter (release-store on publish, acquire-load per tick), so a hot LQG→LQG reconfigure can never pair new params with an old table. The observer re-seed is coupled to the generation (not a shared flag), so it can never be lost.
 
-### 3.5.4 Saturation / LOST state machine
+### 3.5.4 Saturation / LOST state machine (Issue #169 HW-verify fix)
 
-Beyond the ±`sat_band` linear band (or when the intensity rails at 0/1024) the innovation lies, so the observer must not integrate garbage:
+Beyond the linear band the innovation lies, so the observer must not integrate garbage. The first P1a HW run **diverged off the line in both edge polarities** — the root cause was a measurement model that holds only inside the ±`sat_band` band combined with a saturation detector that keyed off the **hard** 0/1024 rails (so a near-white 975 was wrongly corrected on) and a LOST trigger that counted **consecutive** SAT ticks (a SAT↔NORMAL flap reset the streak, so LOST never fired). A single out-of-band tick then injected several mm of `e_y` in one correct → runaway. The fix:
 
-- **NORMAL** — in band: run the Kalman correct, steer on the estimate.
-- **SATURATED** — railed or out-of-band: **freeze** the observer (predict only, skip the correct), keep steering on the last good heading. After `lost_ticks` consecutive SAT ticks → LOST.
+- **NORMAL** — measurement inside the band-margin window `[black+margin, white-margin]` **and** `|ey_p| ≤ sat_band`: run the Kalman correct, but **clamp the innovation** to `±|c_signed|·sat_band` first, so even a band-boundary measurement can never inject more than ~`sat_band` of `e_y` in one tick.
+- **SATURATED** — outside that window (or `|ey_p| > sat_band`): **freeze** the observer (predict only, skip the correct), keep steering on the last good heading, and accumulate out-of-band **time**. After `lost_time_ms` of accumulated saturation → LOST. Time-based (not a consecutive-tick streak) so a SAT↔NORMAL flap can no longer defeat LOST.
 - **LOST** — stop trusting the observer; command a fixed seek `-last_side·seek_dps` (curving back toward the line). After `lost_timeout_ms` in LOST → **auto-stop**: brake + disengage (the daemon stays alive, `lost_cnt` increments). Re-engage with `lqg`.
 
 Band re-entry re-seeds the estimate from the measurement (`e_y = -err/c_signed`, clamped to ±`sat_band`) so there is no discontinuity from a drifted frozen estimate.
+
+The saturation detection now keys off the **measured sensor range** (`--black` / `--white` / `--band-margin`), not the hard 0/1024 rails, because at the operating target the look-ahead intensity leaves the linear band well before the hard rails. This is validated in the oracle: `python3 tools/lqr_linetrace/lqr_sim.py --report satband --c 150 --L 55 --target 634` shows the pre-fix SM diverges (`peak|innov|≈960`) on a recoverable out-of-band kick while the fixed SM recovers to ~0.1 mm (`innov` capped ≈14) and fires LOST→seek→auto-stop on a true loss.
+
+**Operating target.** P0a measured the edge midpoint at ≈634 (black ≈249 / white ≈1020). The PID setpoint stays 512, but at 512 the black rail sits only ~1.7 mm off-line while the band is ±3.4 mm, so a normal look-ahead-induced spot excursion saturates and the observer loses the line **regardless of the SM**. The oracle confirms the fixed SM still cannot track the band at target=512 but tracks cleanly at the symmetric midpoint. The LQG therefore defaults its target to the midpoint (`LQG_DEF_TARGET=634`); PID is untouched.
 
 ### 3.5.5 Verbs
 
@@ -246,9 +250,12 @@ Band re-entry re-seeds the estimate from the measurement (`e_y = -err/c_signed`,
 linetrace lqg <speed_mmps> [target] [--hz N] [--c C] [--L L] \
               [--edge left|right] [--q1r Q] [--q2 Q] \
               [--kf-qpos Q] [--kf-qhead Q] [--kf-rmeas R] \
-              [--sat-band MM] [--lost-ticks N] [--seek-dps D] [--lost-timeout MS]
+              [--sat-band MM] [--seek-dps D] [--lost-time MS] [--lost-timeout MS] \
+              [--black N] [--white N] [--band-margin N] [--lost-ticks N]
 linetrace lqgstat [duration_ms [interval_ms]]
 ```
+
+`target` defaults to the measured edge midpoint (634), not the PID 512 — the observer needs the symmetric midpoint.
 
 `lqg` mirrors `run`: unspecified params inherit the prior `lqg` (or compiled defaults on the first engage after `start`); `seek_dps` defaults to the base speed. `lqg 0` idles at zero (FOREVER(0,0), stays engaged). `run` flips back to PID. `target` stays live for both controllers via `linetrace target N`. If the Riccati build fails to converge, the engage is **rejected** (no state change).
 
@@ -266,14 +273,17 @@ linetrace lqgstat [duration_ms [interval_ms]]
 |---|---|---|
 | `c` | 150 | intensity slope counts/mm (calibrate) |
 | `L` | 52 | look-ahead mm (measure) |
+| `target` | 634 | LQG operating setpoint = measured edge midpoint (PID stays 512) |
 | `edge` | right | steer polarity |
 | `q1r` | 0.888 | q1/r (state-feedback stiffness) |
 | `q2` | 0 | heading weight (0 → zeta 0.707 all v) |
 | `kf_qpos` / `kf_qhead` / `kf_rmeas` | 1.0 / 1e-4 / 49 | Kalman Q[0][0] / Q[1][1] / R |
-| `sat_band` | 3.4 | linear-band half-width mm |
-| `lost_ticks` | 5 | SAT ticks → LOST |
+| `sat_band` | 3.4 | linear-band half-width mm (also the innovation-clamp scale `|c|·sat_band`) |
+| `black` / `white` / `band_margin` | 249 / 1020 / 100 | measured sensor range; saturated outside `[black+margin, white-margin]` |
+| `lost_time_ms` | 50 | accumulated out-of-band time → LOST |
 | `seek_dps` | = base speed | LOST seek magnitude |
 | `lost_timeout_ms` | 500 | LOST → auto-stop |
+| `lost_ticks` | 5 | retained for CLI compat (LOST now keys off `lost_time_ms`) |
 
 At the bench `c=150 L=52` the sim oracle reports LQG IAE 0.6/0.3 (vs PID 1.9/3.4) and 0% overshoot (vs PID 64-111%) at v=150/300 with zeta ≡ 0.707. The C float port of the Kf table agrees with the oracle to ~0.4% relative (single-precision Riccati), and the closed-form K(v) matches to 6 decimals.
 

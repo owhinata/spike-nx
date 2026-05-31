@@ -571,6 +571,19 @@ def test_linetrace_lqg_arg_validation(p, color_sensor_required):
         # out-of-range hz rejected.
         out = p.sendCommand("linetrace lqg 150 --hz 5", timeout=5)
         assert "hz" in out.lower(), f"expected --hz reject: {out!r}"
+
+        # empty linear band rejected (black+margin >= white-margin), so the
+        # observer can always run a correct (Issue #169 HW-verify fix).
+        out = p.sendCommand(
+            "linetrace lqg 150 --black 400 --white 600 --band-margin 200",
+            timeout=5)
+        assert "band" in out.lower(), (
+            f"expected empty-band reject: {out!r}")
+
+        # negative lost-time rejected.
+        out = p.sendCommand("linetrace lqg 150 --lost-time -1", timeout=5)
+        assert "lost-time" in out.lower() or "must be" in out.lower(), (
+            f"expected --lost-time reject: {out!r}")
     finally:
         p.sendCommand("linetrace brake", timeout=5)
         _ensure_stopped(p)
@@ -596,6 +609,12 @@ def test_linetrace_lqg_engage_and_status(p):
         # Engage LQG at idle-zero (no motion) so the bench is safe.
         out = p.sendCommand("linetrace lqg 0 512 --c 150 --L 52", timeout=5)
         assert "lqg" in out.lower(), f"lqg engage echo missing: {out!r}"
+
+        # No explicit target -> LQG defaults to the measured edge midpoint
+        # (634), NOT the PID 512 (Issue #169 HW-verify fix).
+        out = p.sendCommand("linetrace lqg 0 --c 150 --L 52", timeout=5)
+        assert "target=634" in out, (
+            f"lqg default target should be 634: {out!r}")
 
         out = p.sendCommand("linetrace status", timeout=5)
         st = _parse_status(out)

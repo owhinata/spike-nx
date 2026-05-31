@@ -282,6 +282,251 @@ class LqgObserver:
         return turn, dict(ey=ey, eth=math.degrees(eth), K1=K1, K2=K2)
 
 
+class LqgFw:
+    """Firmware-faithful saturation-aware LQG (port of the do_lqg control
+    tick in apps/linetrace/linetrace_main.c).  Two modes:
+
+      mode='current' : the SM as shipped on feat/163-p1a-core-lqg HEAD
+                       (rail detection on hard rails only; SATURATED enters
+                       only when the PREDICTED ey_p leaves the band; LOST by
+                       consecutive sat_streak which the SAT<->NORM flap
+                       resets; no innovation clamp).  Used to REPRODUCE the
+                       HW divergence in the oracle.
+      mode='fixed'   : the proposed fix --
+                       * saturation by the LINEAR BAND of the measurement
+                         (intensity outside [black+margin, white-margin]) OR
+                         |ey_p|>sat_band -> freeze (predict-only, skip
+                         correct);
+                       * innovation CLAMPED so one bad tick can never inject
+                         a multi-mm ey jump;
+                       * LOST by out-of-band DURATION (a saturated-time
+                         accumulator, NOT consecutive sat_streak), so the
+                         SAT<->NORM flap can no longer defeat it;
+                       * seek toward last_side, auto-stop on lost_timeout_ms.
+
+    The signed-c sign convention, the predict/correct math, the Kf table and
+    the K1/K2 state feedback are IDENTICAL between modes and to the
+    firmware; only the saturation/observer guard differs.
+    """
+
+    SAT_NORMAL, SAT_SATURATED, SAT_LOST = 0, 1, 2
+
+    def __init__(self, c, L, edge, q1r, q2, hz, target, speed_mmps,
+                 kf_qpos=1.0, kf_qhead=1e-4, kf_rmeas=49.0,
+                 sat_band=3.4, lost_ticks=5, seek_dps=None,
+                 lost_timeout_ms=500, lost_time_ms=None,
+                 black=0.0, white=1024.0, band_margin=100.0,
+                 innov_clamp_mm=None, mode='current'):
+        self.c = c
+        self.L = L
+        self.edge = edge
+        self.c_sgn = edge * c
+        self.q1r = q1r
+        self.q2 = q2
+        self.r = 1.0
+        self.hz = hz
+        self.dt = 1.0 / hz
+        self.target = target
+        self.speed = speed_mmps
+        self.kf_q = (kf_qpos, kf_qhead)
+        self.kf_r = kf_rmeas
+        self.sat_band = sat_band
+        self.lost_ticks = lost_ticks
+        self.seek_dps = seek_dps if seek_dps is not None else speed_mmps
+        self.lost_timeout_ms = lost_timeout_ms
+        # 'fixed' mode: out-of-band DURATION before LOST (independent of the
+        # SAT<->NORM flap).  Defaults to lost_ticks worth of ms if unset.
+        self.lost_time_ms = (lost_time_ms if lost_time_ms is not None
+                             else int(round(lost_ticks * 1000.0 / hz)))
+        self.black = black
+        self.white = white
+        self.band_margin = band_margin
+        # innovation clamp magnitude in measurement counts.  Default: the
+        # innovation a band-boundary correction may legitimately produce
+        # (c*sat_band) so a single tick can never jump ey by more than the
+        # band width.  (firmware uses fabsf(c_sgn)*sat_band)
+        self.innov_clamp = (innov_clamp_mm if innov_clamp_mm is not None
+                            else abs(self.c_sgn) * sat_band)
+        self.mode = mode
+
+        self.ey = 0.0
+        self.eth = 0.0
+        self.prev_w = 0.0
+        self.sat_state = self.SAT_NORMAL
+        self.last_side = +1
+        self.sat_streak = 0
+        self.lost_ms_acc = 0
+        self.oob_ms_acc = 0           # fixed-mode saturated-time accumulator
+        self.lost_cnt = 0
+        self.auto_stopped = False
+        self._Kf = None
+        self._v = None
+
+    def _ensure_gain(self, v):
+        if v != self._v:
+            self._Kf = kalman_steady_gain(v, self.dt, self.c_sgn, self.L,
+                                          self.kf_q[0], self.kf_q[1],
+                                          self.kf_r)
+            self._v = v
+
+    def step(self, intensity, v):
+        self._ensure_gain(v)
+        dt = self.dt
+        c_sgn = self.c_sgn
+        Lk = self.L
+        max_turn = v if v > 0 else 0
+        err_meas = float(self.target - intensity)
+
+        kf0, kf1 = self._Kf
+
+        # 3. predict (ZOH on previously-applied omega)
+        ey_p = self.ey + v * math.sin(self.eth) * dt
+        eth_p = self.eth + self.prev_w * dt
+
+        if self.mode == 'current':
+            railed = (intensity <= 8 or intensity >= 1016)
+        else:
+            # 'fixed': saturated when the measurement leaves the LINEAR band
+            # of the sensor (near black or near white), not just the hard
+            # 0/1024 rails.
+            railed = (intensity <= self.black + self.band_margin or
+                      intensity >= self.white - self.band_margin)
+
+        meas_pos = (-err_meas / c_sgn) if not railed else 0.0
+        out_of_band = abs(ey_p) > self.sat_band
+        meas_in_band = (not railed) and abs(meas_pos) <= self.sat_band
+
+        ey = ey_p
+        eth = eth_p
+        innov = 0.0
+        turn_dps = 0
+        reseeded = False
+
+        if self.sat_state == self.SAT_LOST:
+            if meas_in_band:
+                self.sat_state = self.SAT_NORMAL
+                self.sat_streak = 0
+                self.lost_ms_acc = 0
+                self.oob_ms_acc = 0
+                ey = clamp(meas_pos, -self.sat_band, self.sat_band)
+                eth = 0.0
+                self.ey, self.eth = ey, eth
+                self.last_side = +1 if ey >= 0 else -1
+                reseeded = True
+            else:
+                turn_dps = clamp(-self.last_side * self.seek_dps,
+                                 -max_turn, max_turn)
+                if max_turn == 0:
+                    turn_dps = 0
+                self.lost_ms_acc += 1000 // self.hz
+                if self.lost_ms_acc >= self.lost_timeout_ms:
+                    self.lost_cnt += 1
+                    self.auto_stopped = True
+                    return 0, dict(ey=0.0, eth=0.0, innov=0.0,
+                                   sat=self.SAT_LOST, lost=self.lost_cnt,
+                                   K1=0.0, K2=0.0)
+
+        if self.sat_state != self.SAT_LOST and not reseeded:
+            if self.mode == 'current':
+                self._step_sm_current(railed, out_of_band, meas_in_band,
+                                      meas_pos, ey_p, eth_p, err_meas,
+                                      c_sgn, Lk, kf0, kf1)
+            else:
+                self._step_sm_fixed(railed, out_of_band, meas_in_band,
+                                    meas_pos, ey_p, eth_p, err_meas,
+                                    c_sgn, Lk, kf0, kf1)
+            ey, eth = self.ey, self.eth
+            innov = self._last_innov
+
+        # 5/6. state feedback + clamp (skipped when LOST seeks this tick)
+        K1 = math.sqrt(self.q1r)
+        K2 = math.sqrt(2.0 * v * K1 + self.q2)
+        if self.sat_state != self.SAT_LOST:
+            omega = -K1 * ey - K2 * eth
+            turn_dps = clamp(int(round(omega * DEG)), -max_turn, max_turn)
+
+        self.prev_w = math.radians(turn_dps)
+        return turn_dps, dict(ey=ey, eth=math.degrees(eth), innov=innov,
+                              sat=self.sat_state, lost=self.lost_cnt,
+                              K1=K1, K2=K2)
+
+    # ---- current (buggy) SM: rail-only sat, predicted-band entry, ----
+    # ---- streak-based LOST, NO innov clamp -------------------------------
+    def _step_sm_current(self, railed, out_of_band, meas_in_band,
+                         meas_pos, ey_p, eth_p, err_meas, c_sgn, Lk,
+                         kf0, kf1):
+        self._last_innov = 0.0
+        if self.sat_state == self.SAT_NORMAL and not railed and not out_of_band:
+            yhat = -c_sgn * ey_p - c_sgn * Lk * eth_p
+            innov = err_meas - yhat
+            self._last_innov = innov
+            self.ey = ey_p + kf0 * innov
+            self.eth = eth_p + kf1 * innov
+            self.last_side = +1 if self.ey >= 0 else -1
+            self.sat_streak = 0
+            self.lost_ms_acc = 0
+        elif self.sat_state == self.SAT_NORMAL:
+            self.sat_state = self.SAT_SATURATED
+            self.ey, self.eth = ey_p, eth_p
+            self.sat_streak += 1
+            if self.sat_streak >= self.lost_ticks:
+                self.sat_state = self.SAT_LOST
+        else:  # SAT_SATURATED
+            if meas_in_band:
+                self.sat_state = self.SAT_NORMAL
+                self.sat_streak = 0
+                self.lost_ms_acc = 0
+                self.ey = clamp(meas_pos, -self.sat_band, self.sat_band)
+                self.eth = eth_p
+                self.last_side = +1 if self.ey >= 0 else -1
+            else:
+                self.ey, self.eth = ey_p, eth_p
+                self.sat_streak += 1
+                if self.sat_streak >= self.lost_ticks:
+                    self.sat_state = self.SAT_LOST
+
+    # ---- fixed SM: band-sat detection, innov clamp, LOST by duration -----
+    def _step_sm_fixed(self, railed, out_of_band, meas_in_band,
+                       meas_pos, ey_p, eth_p, err_meas, c_sgn, Lk,
+                       kf0, kf1):
+        self._last_innov = 0.0
+        saturated = railed or out_of_band
+
+        if not saturated:
+            # NORMAL correct with a CLAMPED innovation.  Even at the band
+            # boundary the clamp bounds the single-tick ey jump.
+            yhat = -c_sgn * ey_p - c_sgn * Lk * eth_p
+            innov = err_meas - yhat
+            innov = clamp(innov, -self.innov_clamp, self.innov_clamp)
+            self._last_innov = innov
+            self.ey = ey_p + kf0 * innov
+            self.eth = eth_p + kf1 * innov
+            self.last_side = +1 if self.ey >= 0 else -1
+            self.sat_state = self.SAT_NORMAL
+            self.sat_streak = 0
+            self.oob_ms_acc = 0
+            self.lost_ms_acc = 0
+        else:
+            # Saturated: try a measurement re-seed if the spot is genuinely
+            # back inside the linear band; otherwise freeze (predict-only)
+            # and accumulate out-of-band TIME toward LOST.
+            if meas_in_band:
+                self.sat_state = self.SAT_NORMAL
+                self.sat_streak = 0
+                self.oob_ms_acc = 0
+                self.lost_ms_acc = 0
+                self.ey = clamp(meas_pos, -self.sat_band, self.sat_band)
+                self.eth = eth_p
+                self.last_side = +1 if self.ey >= 0 else -1
+            else:
+                self.sat_state = self.SAT_SATURATED
+                self.ey, self.eth = ey_p, eth_p
+                self.oob_ms_acc += 1000 // self.hz
+                if self.oob_ms_acc >= self.lost_time_ms:
+                    self.sat_state = self.SAT_LOST
+                    self.lost_ms_acc = 0
+
+
 class LqrPD:
     """Tier-1 speed-scheduled LQR-PD: omega = Gp*err + Gd(v)*d(err)/dt."""
 
@@ -312,7 +557,15 @@ class LqrPD:
 # closed-loop time-domain simulation (RK4 plant, ZOH controller)
 # --------------------------------------------------------------------------
 def simulate(ctrl, is_lqr, v, e_y0, e_th0_deg, L, c, target, hz, tsim,
-             tau=0.0, noise_lsb=0.0, dist_bias=0.0, seed=1):
+             tau=0.0, noise_lsb=0.0, dist_bias=0.0, seed=1,
+             black=0.0, white=1024.0, kick_t=None, kick_ey=0.0):
+    """Closed-loop sim.  `black`/`white` rail the simulated intensity to the
+    REAL sensor range (P1a HW: black~=249 white~=1020), making the oracle
+    faithful: outside the linear band the measurement saturates and the
+    err signal stops growing while the true model keeps predicting -c*p.
+    `kick_ey` at time `kick_t` injects a sudden cross-track displacement
+    (e.g. a sharp corner / lifted-off-line event) to test the out-of-band
+    saturation handling and LOST->seek->auto-stop logic."""
     dt_ctrl = 1.0 / hz
     nsub = 8
     h = dt_ctrl / nsub
@@ -322,6 +575,7 @@ def simulate(ctrl, is_lqr, v, e_y0, e_th0_deg, L, c, target, hz, tsim,
     rng = _Lcg(seed)
     nticks = int(tsim * hz)
     rows = []
+    kick_tick = int(kick_t * hz) if kick_t is not None else None
 
     def f2(ey, eth, w):
         return (v * math.sin(eth), w)
@@ -329,12 +583,14 @@ def simulate(ctrl, is_lqr, v, e_y0, e_th0_deg, L, c, target, hz, tsim,
     def f3(ey, eth, w, w_cmd):
         return (v * math.sin(eth), w, (w_cmd - w) / tau)
 
-    for _ in range(nticks):
+    for tick in range(nticks):
+        if kick_tick is not None and tick == kick_tick:
+            e_y += kick_ey
         p = e_y + L * math.sin(e_th)
         intensity_real = target + c * p + dist_bias
         if noise_lsb > 0:
             intensity_real += rng.uniform(-noise_lsb, noise_lsb)
-        intensity = int(clamp(round(intensity_real), 0, 1024))
+        intensity = int(clamp(round(intensity_real), black, white))
 
         if is_lqr:
             turn_dps, _ = ctrl.step(intensity, v)
@@ -692,13 +948,190 @@ def report_sweep(args):
     print("   pick the largest q1/r whose peak turn-rate stays within +-v at your top speed.")
 
 
+def _run_lqgfw(ctrl, v, e_y0, e_th0_deg, L, c, target, hz, tsim,
+               black, white, noise_lsb=0.0, kick_t=None, kick_ey=0.0,
+               seed=1):
+    """Inline RK4 plant + railed sensor, capturing FULL controller
+    diagnostics (ey_hat, innov, sat_state, lost_cnt) each tick.  Mirrors
+    simulate()'s plant exactly but threads through the LqgFw internals so we
+    can prove the observer stays bounded / LOST fires.  Honours auto_stop
+    (brake -> coast straight)."""
+    dt_ctrl = 1.0 / hz
+    nsub = 8
+    h = dt_ctrl / nsub
+    e_y = float(e_y0)
+    e_th = math.radians(e_th0_deg)
+    rng = _Lcg(seed)
+    nticks = int(tsim * hz)
+    kick_tick = int(kick_t * hz) if kick_t is not None else None
+    rows = []
+    stopped = False
+
+    def f2(eth, w, vv):
+        return (vv * math.sin(eth), w)
+
+    for tick in range(nticks):
+        if kick_tick is not None and tick == kick_tick:
+            e_y += kick_ey
+        p = e_y + L * math.sin(e_th)
+        # Plant intensity uses the SIGNED gradient (edge*c) so the oracle
+        # matches the controller's measurement convention err=target-intens
+        # = -c_sgn*p.  ctrl.c_sgn = edge*c.
+        intensity_real = target + ctrl.c_sgn * p
+        if noise_lsb > 0:
+            intensity_real += rng.uniform(-noise_lsb, noise_lsb)
+        intensity = int(clamp(round(intensity_real), black, white))
+
+        if stopped:
+            turn_dps, info = 0, dict(ey=ctrl.ey, eth=math.degrees(ctrl.eth),
+                                     innov=0.0, sat=ctrl.sat_state,
+                                     lost=ctrl.lost_cnt, K1=0.0, K2=0.0)
+        else:
+            turn_dps, info = ctrl.step(intensity, v)
+            if ctrl.auto_stopped:
+                stopped = True
+        # Faithful auto-stop: firmware sends FOREVER(0,0)+brake, so once
+        # stopped the robot is stationary (v_eff=0), not coasting forward.
+        v_eff = 0.0 if stopped else v
+        w_act = math.radians(turn_dps)
+        for _s in range(nsub):
+            k1 = f2(e_th, w_act, v_eff)
+            k2 = f2(e_th + h / 2 * k1[1], w_act, v_eff)
+            k3 = f2(e_th + h / 2 * k2[1], w_act, v_eff)
+            k4 = f2(e_th + h * k3[1], w_act, v_eff)
+            e_y += h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
+            e_th += h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+
+        rows.append(dict(t=tick / hz, e_y=e_y, e_th=math.degrees(e_th),
+                         turn=turn_dps, intens=intensity,
+                         ey_hat=info["ey"], innov=info["innov"],
+                         sat=info["sat"], lost=info["lost"],
+                         stopped=stopped))
+    return rows
+
+
+def _satband_summary(rows, label):
+    peak_eyhat = max(abs(r["ey_hat"]) for r in rows)
+    peak_innov = max(abs(r["innov"]) for r in rows)
+    final_ey = rows[-1]["e_y"]
+    lost = rows[-1]["lost"]
+    stopped = rows[-1]["stopped"]
+    # e_y at the tick auto-stop engaged (where the robot actually braked);
+    # post-stop e_y is frozen (v_eff=0), so final_ey == that value.
+    stop_idx = next((k for k, r in enumerate(rows) if r["stopped"]), None)
+    ey_at_stop = rows[stop_idx]["e_y"] if stop_idx is not None else None
+
+    # Verdict:
+    #   TRACK    - bounded, never stopped (healthy in-band / recovery)
+    #   LOST-STOP- auto-stopped on a true loss (CORRECT: seek then brake)
+    #   RUNAWAY  - large e_y and did NOT stop (the actual HW failure)
+    if stopped:
+        verdict = "LOST-STOP"
+    elif abs(final_ey) > 50.0:
+        verdict = "RUNAWAY"
+    else:
+        verdict = "TRACK"
+    extra = ("" if ey_at_stop is None
+             else " e_y@stop=%7.2f" % ey_at_stop)
+    print("   %-10s peak|ey_hat|=%7.2f peak|innov|=%8.1f final_e_y=%8.2f "
+          "lost=%d stopped=%s%s  %s"
+          % (label, peak_eyhat, peak_innov, final_ey, lost,
+             "Y" if stopped else "n", extra, verdict))
+    return verdict, lost, stopped
+
+
+def report_satband(args):
+    """Saturation-aware-observer reproduction + fix validation (Issue #169
+    P1a HW-verify failure).  Reproduces the HW divergence in the oracle
+    (railed sensor + out-of-band kick) and shows current-SM diverges while
+    the fixed SM stays bounded / recovers / fires LOST.
+
+    Scenarios per edge:
+      A. settle from e_y0 (in-band tracking must be UNCHANGED by the fix);
+      B. out-of-band kick that returns to the line (must recover, no runaway);
+      C. line truly lost (kick out and STAY out) -> LOST + seek + auto-stop.
+    """
+    c = args.c
+    L = args.L
+    target = args.target
+    # The firmware control loop runs at 100 Hz (the HW-verify failure was at
+    # 100 Hz).  The global --hz default is 200 (used by the other reports);
+    # for the satband oracle to MATCH the firmware, default to 100 unless the
+    # user passed a different value.
+    hz = 100 if args.hz == 200 else args.hz
+    v = args.speeds[0]
+    q1r = args.q1r if args.q1r is not None else matched_q1r(args.kp, c)
+    q2 = args.q2
+    black = args.black
+    white = args.white
+    margin = args.band_margin
+    sat_band = args.sat_band
+    # Match the firmware LQG_DEF_LOST_TIME_MS (fixed 50 ms), not hz-derived.
+    lost_time = args.lost_time
+
+    print("== Saturation-aware observer: reproduce HW divergence + validate "
+          "fix (Issue #169 P1a) ==")
+    print("   c=%.1f L=%.1f hz=%d v=%d target=%d q1r=%.4f q2=%.4f" % (
+        c, L, hz, v, target, q1r, q2))
+    print("   sensor range black=%.0f white=%.0f  band_margin=%.0f  "
+          "sat_band=%.2f mm  lost_time=%d ms lost_timeout=%d ms" % (
+              black, white, margin, sat_band, lost_time, args.lost_timeout))
+    print("   linear band at this target: p_white=%+.2f mm  p_black=%+.2f mm"
+          % ((white - target) / c, (black - target) / c))
+
+    def mk(mode):
+        return LqgFw(c, L, args.edge, q1r, q2, hz, target, v,
+                     kf_qpos=args.kf_qpos, kf_qhead=args.kf_qhead,
+                     kf_rmeas=args.kf_rmeas, sat_band=sat_band,
+                     lost_ticks=args.lost_ticks, lost_timeout_ms=args.lost_timeout,
+                     lost_time_ms=lost_time,
+                     black=black, white=white, band_margin=margin, mode=mode)
+
+    # Scenario B = a kick JUST past the band the look-ahead can still
+    # reacquire (recoverable); C = a kick far enough that the line is truly
+    # gone (must LOST->seek->auto-stop).  e_y0=2 settle in A proves the fix
+    # leaves in-band tracking unchanged.
+    scenarios = [
+        ("A in-band settle", dict(e_y0=2.0, e_th0=0.0, tsim=2.0,
+                                  kick_t=None, kick_ey=0.0)),
+        ("B oob kick+return", dict(e_y0=0.0, e_th0=0.0, tsim=3.0,
+                                   kick_t=0.5, kick_ey=4.0 * args.edge)),
+        ("C line lost", dict(e_y0=0.0, e_th0=0.0, tsim=3.0,
+                             kick_t=0.5, kick_ey=40.0 * args.edge)),
+    ]
+    for name, sc in scenarios:
+        print("   --- scenario %s (edge=%+d) ---" % (name, args.edge))
+        for mode in ("current", "fixed"):
+            ctrl = mk(mode)
+            # scenario B: pull the line back under the sensor after the kick
+            # so a CORRECT observer recovers; we model that by letting the
+            # plant drive back (the kick is transient, controller seeks).
+            rows = _run_lqgfw(ctrl, v, sc["e_y0"], sc["e_th0"], L, c, target,
+                              hz, sc["tsim"], black, white,
+                              noise_lsb=args.noise,
+                              kick_t=sc["kick_t"], kick_ey=sc["kick_ey"])
+            _satband_summary(rows, mode)
+        if args.plot:
+            cur = _run_lqgfw(mk("current"), v, sc["e_y0"], sc["e_th0"], L, c,
+                             target, hz, sc["tsim"], black, white,
+                             noise_lsb=args.noise, kick_t=sc["kick_t"],
+                             kick_ey=sc["kick_ey"])
+            fix = _run_lqgfw(mk("fixed"), v, sc["e_y0"], sc["e_th0"], L, c,
+                             target, hz, sc["tsim"], black, white,
+                             noise_lsb=args.noise, kick_t=sc["kick_t"],
+                             kick_ey=sc["kick_ey"])
+            print(ascii_plot([("cur_ey", [r["e_y"] for r in cur]),
+                              ("fix_ey", [r["e_y"] for r in fix])], hz,
+                             title="       e_y(t) [mm]  %s" % name))
+
+
 # --------------------------------------------------------------------------
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--report", default="all",
                    choices=["all", "verify", "damping", "step", "sweep",
-                            "coeffs", "dump-kf"])
+                            "coeffs", "dump-kf", "satband"])
     # plant / sensor (CALIBRATE these against hardware)
     p.add_argument("--c", type=float, default=60.0, help="intensity slope [counts/mm] (CALIBRATE)")
     p.add_argument("--L", type=float, default=40.0, help="sensor look-ahead [mm] (MEASURE)")
@@ -727,6 +1160,24 @@ def build_parser():
     p.add_argument("--kf-qpos", type=float, default=1.0, help="Kalman Q[0][0]")
     p.add_argument("--kf-qhead", type=float, default=1e-4, help="Kalman Q[1][1]")
     p.add_argument("--kf-rmeas", type=float, default=49.0, help="Kalman R (scalar)")
+    # saturation-aware-observer report (Issue #169 P1a HW-verify) ----------
+    p.add_argument("--edge", type=int, default=1, choices=[-1, 1],
+                   help="line edge sign (+1 right / -1 left)")
+    p.add_argument("--black", type=float, default=249.0,
+                   help="measured BLACK intensity floor (P0a)")
+    p.add_argument("--white", type=float, default=1020.0,
+                   help="measured WHITE intensity ceiling (P0a)")
+    p.add_argument("--band-margin", type=float, default=100.0,
+                   help="counts inside black/white treated as saturated")
+    p.add_argument("--sat-band", type=float, default=3.4,
+                   help="|ey_hat| linear-band half-width [mm]")
+    p.add_argument("--lost-ticks", type=int, default=5,
+                   help="consecutive SAT ticks -> LOST (current mode)")
+    p.add_argument("--lost-time", type=int, default=50,
+                   help="accumulated out-of-band time -> LOST [ms] "
+                        "(fixed mode; matches firmware LQG_DEF_LOST_TIME_MS)")
+    p.add_argument("--lost-timeout", type=int, default=500,
+                   help="LOST seek duration before auto-stop [ms]")
     # output
     p.add_argument("--plot", action="store_true", help="ASCII overlay of e_y(t)")
     p.add_argument("--csv", action="store_true", help="dump trajectory CSVs")
@@ -754,6 +1205,8 @@ def main(argv):
         report_sweep(args); print()
     if rep == "dump-kf":
         report_dump_kf(args); print()
+    if rep == "satband":
+        report_satband(args); print()
     return 0
 
 

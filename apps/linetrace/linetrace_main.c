@@ -113,8 +113,35 @@
 #define LQG_DEF_KF_QHEAD    1.0e-4f  /* Kalman Q[1][1]                     */
 #define LQG_DEF_KF_RMEAS    49.0f    /* Kalman R (scalar)                  */
 #define LQG_DEF_SAT_BAND    3.4f     /* |ey_hat| linear-band half-width mm */
-#define LQG_DEF_LOST_TICKS  5        /* consecutive SAT ticks -> LOST      */
-#define LQG_DEF_LOST_TMO_MS 500      /* LOST duration before auto-stop     */
+#define LQG_DEF_LOST_TICKS  5        /* (retained for CLI compat; LOST now */
+                                     /* triggers on out-of-band DURATION)  */
+#define LQG_DEF_LOST_TMO_MS 500      /* LOST seek duration before auto-stop*/
+
+/* LQG-recommended operating target (Issue #169 HW-verify fix).  P0a
+ * measured the edge midpoint at ~634 (black ~249 / white ~1020).  The PID
+ * shares DEFAULT_TARGET=512; the LQG observer needs the SYMMETRIC midpoint
+ * so the linear band is not asymmetrically truncated on the black side
+ * (at 512 the black rail sits only ~1.7 mm off-line vs ~3.4 mm of band, so
+ * a normal look-ahead-induced spot excursion saturates and the observer
+ * loses the line — proven in tools/lqr_linetrace/lqr_sim.py --report
+ * satband).  do_lqg defaults to this when no target arg is given; PID is
+ * untouched.
+ */
+
+#define LQG_DEF_TARGET      634
+#define LQG_DEF_BLACK       249      /* measured BLACK intensity floor      */
+#define LQG_DEF_WHITE       1020     /* measured WHITE intensity ceiling    */
+#define LQG_DEF_BAND_MARGIN 100      /* counts inside black/white = sat     */
+
+/* Out-of-band DURATION before declaring LOST (Issue #169 HW-verify fix).
+ * The previous design counted CONSECUTIVE saturated ticks (sat_streak),
+ * but a SAT<->NORMAL flap on a near-rail measurement reset the streak so
+ * LOST never engaged on HW.  We accumulate saturated TIME instead; once it
+ * exceeds this, LOST + seek + auto-stop engage.  Defaults to lost_ticks
+ * worth of ms at the active rate.
+ */
+
+#define LQG_DEF_LOST_TIME_MS 50      /* saturated-time -> LOST (ms)        */
 
 /* Kalman gain table grid (Riccati is NEVER run per tick; do_lqg builds the
  * whole table, the loop linear-interpolates).  Kf varies only ~1% across
@@ -127,9 +154,12 @@
 #define LQG_KF_ITERS        4000     /* Riccati iteration cap              */
 #define LQG_KF_EPS          1.0e-7f  /* Riccati convergence threshold      */
 
-/* Intensity rail thresholds — the railing is a sensor fact, not tuned.
- * Beyond these the look-ahead intensity saturates (0/1024) and the
- * innovation lies, so the observer freezes (plan §4).
+/* Intensity rail thresholds — hard sensor rails (kept for reference).  The
+ * observer no longer keys saturation off these alone: at the operating
+ * target the look-ahead intensity leaves the LINEAR band well before the
+ * hard rails (a near-white 975 is not a valid measurement), so saturation
+ * is detected by the band-margin test [black+margin, white-margin] instead
+ * (Issue #169 HW-verify fix; plan §4).
  */
 
 #define SAT_RAIL_LO         8
@@ -414,10 +444,14 @@ struct lt_lqg_params_s
   float kf_qpos;           /* Kalman Q[0][0]                             */
   float kf_qhead;          /* Kalman Q[1][1]                             */
   float kf_rmeas;          /* Kalman R (scalar)                          */
-  float sat_band;          /* |ey_hat| beyond which we enter SATURATED   */
-  int   lost_ticks;        /* consecutive SAT ticks -> LOST              */
+  float sat_band;          /* |ey_p| beyond which we enter SATURATED      */
+  int   lost_ticks;        /* (CLI compat; LOST now keys off lost_time_ms)*/
   int   seek_dps;          /* turn rate magnitude while seeking in LOST  */
-  int   lost_timeout_ms;   /* LOST duration before auto-brake + stop     */
+  int   lost_timeout_ms;   /* LOST seek duration before auto-brake + stop*/
+  int   black;             /* measured BLACK intensity floor (counts)    */
+  int   white;             /* measured WHITE intensity ceiling (counts)  */
+  int   band_margin;       /* counts inside black/white treated as sat   */
+  int   lost_time_ms;      /* saturated-time accumulation -> LOST (ms)   */
 };
 static struct lt_lqg_params_s g_lqg;
 
@@ -430,7 +464,8 @@ static float    g_lqg_prev_w;      /* last APPLIED omega [rad/s]          */
 static int      g_lqg_sat_state;   /* enum lt_sat_e                       */
 static int      g_lqg_last_side;   /* sign of last in-band ey_hat (+/-1)  */
 static uint32_t g_lqg_lost_cnt;    /* cumulative LOST events              */
-static int      g_lqg_lost_ms_acc; /* ms accumulated in current LOST      */
+static int      g_lqg_lost_ms_acc; /* ms accumulated in current LOST seek */
+static int      g_lqg_oob_ms_acc;  /* saturated-time accumulator -> LOST  */
 
 /* Double-buffered precomputed config slot (params + Kalman gain table).
  * Riccati is NEVER run per tick.  do_lqg fills the INACTIVE slot (params +
@@ -786,7 +821,7 @@ static void lqg_interp_kf(const struct lt_kf_table_s *t, float v,
 static void lqg_set_defaults(struct lt_lqg_params_s *p)
 {
   p->speed_mmps      = 0;
-  p->target          = DEFAULT_TARGET;
+  p->target          = LQG_DEF_TARGET;
   p->hz              = DEFAULT_HZ;
   p->c               = LQG_DEF_C;
   p->L               = LQG_DEF_L;
@@ -800,6 +835,10 @@ static void lqg_set_defaults(struct lt_lqg_params_s *p)
   p->lost_ticks      = LQG_DEF_LOST_TICKS;
   p->seek_dps        = 0;       /* 0 -> resolved to base speed in do_lqg  */
   p->lost_timeout_ms = LQG_DEF_LOST_TMO_MS;
+  p->black           = LQG_DEF_BLACK;
+  p->white           = LQG_DEF_WHITE;
+  p->band_margin     = LQG_DEF_BAND_MARGIN;
+  p->lost_time_ms    = LQG_DEF_LOST_TIME_MS;
 }
 
 /****************************************************************************
@@ -1154,6 +1193,7 @@ static int linetrace_daemon(int argc, char *argv[])
               g_lqg_prev_w    = 0.0f;
               g_lqg_sat_state = SAT_NORMAL;
               g_lqg_lost_ms_acc = 0;
+              g_lqg_oob_ms_acc  = 0;
               g_lqg_last_side = +1;
               sat_streak      = 0;
               last_lqg_gen    = gen;
@@ -1193,26 +1233,44 @@ static int linetrace_daemon(int argc, char *argv[])
           float ey_p  = g_lqg_ey + (float)v * sinf(g_lqg_eth) * dt;
           float eth_p = g_lqg_eth + g_lqg_prev_w * dt;
 
-          /* Rail / out-of-band detection BEFORE the correct: never run
-           * the Kalman correct on a railed/clipped measurement (plan §4).
+          /* Saturation detection BEFORE the correct: never run the Kalman
+           * correct on a saturated/clipped measurement (Issue #169
+           * HW-verify fix; plan §4).
            *
-           * Two band tests:
+           *  - railed: the intensity has left the LINEAR band of the
+           *    sensor.  At the operating target the look-ahead intensity
+           *    saturates well before the hard 0/1024 rails (a near-white
+           *    975 is NOT a valid measurement and corrects garbage), so we
+           *    key off the band-margin window [black+margin, white-margin]
+           *    rather than SAT_RAIL_LO/HI alone.  This is the change that
+           *    stops the HW divergence: outside this window the model
+           *    err=-c*(ey+L sin eth) no longer holds, the innovation lies,
+           *    and a single bad tick would inject a multi-mm ey jump.
            *  - out_of_band: predicted estimate ey_p outside the band.
            *    Used for the NORMAL->SATURATED transition (we trust the
            *    observer while it tracks).
            *  - meas_in_band: the MEASUREMENT-implied position (-err/c)
-           *    inside the band.  Used for SAT/LOST recovery, because the
-           *    seek can bring the real sensor back into range while a
-           *    drifted frozen estimate ey_p still reads out-of-band
-           *    (codex impl-gate round-1 BLOCKING fix): gating recovery on
-           *    ey_p would ignore a real return to the line and auto-stop.
+           *    inside the band AND not railed.  Used for SAT/LOST recovery,
+           *    because the seek can bring the real sensor back into range
+           *    while a drifted frozen estimate ey_p still reads
+           *    out-of-band: gating recovery on ey_p would ignore a real
+           *    return to the line and auto-stop.
            */
 
-          bool railed = (last_intensity <= SAT_RAIL_LO ||
-                         last_intensity >= SAT_RAIL_HI);
+          bool railed = (last_intensity <= s->p.black + s->p.band_margin ||
+                         last_intensity >= s->p.white - s->p.band_margin);
           float meas_pos = (!railed) ? (-err_meas / c_sgn) : 0.0f;
           bool out_of_band  = (fabsf(ey_p) > s->p.sat_band);
           bool meas_in_band = (!railed && fabsf(meas_pos) <= s->p.sat_band);
+
+          /* Innovation clamp magnitude: the most a single legitimate
+           * band-boundary correction may produce (|c_sgn| * sat_band).
+           * Clamping innovation guarantees one bad tick can never inject
+           * more than ~sat_band of ey even right at the band boundary
+           * (Issue #169 HW-verify fix; plan §4).
+           */
+
+          float innov_clamp = fabsf(c_sgn) * s->p.sat_band;
 
           /* 4. State estimate per the saturation/LOST state machine.
            * `reseeded` marks a band re-entry tick: the estimate is
@@ -1245,6 +1303,7 @@ static int linetrace_daemon(int argc, char *argv[])
                   g_lqg_sat_state   = SAT_NORMAL;
                   sat_streak        = 0;
                   g_lqg_lost_ms_acc = 0;
+                  g_lqg_oob_ms_acc  = 0;
                   ey  = clamp_float(meas_pos,
                                     -s->p.sat_band, s->p.sat_band);
                   eth = 0.0f;
@@ -1283,6 +1342,7 @@ static int linetrace_daemon(int argc, char *argv[])
                       g_lqg_sat_state = SAT_NORMAL;
                       sat_streak      = 0;
                       g_lqg_lost_ms_acc = 0;
+                      g_lqg_oob_ms_acc  = 0;
                       last_lqg_gen    = UINT32_MAX;
 
                       pthread_mutex_lock(&g_stats_lock);
@@ -1314,25 +1374,58 @@ static int linetrace_daemon(int argc, char *argv[])
 
           if (g_lqg_sat_state != SAT_LOST && !reseeded)
             {
-              if (g_lqg_sat_state == SAT_NORMAL && !railed && !out_of_band)
+              bool saturated = (railed || out_of_band);
+
+              if (!saturated)
                 {
-                  /* Correct (scalar innovation). */
+                  /* NORMAL correct with a CLAMPED scalar innovation.  The
+                   * clamp bounds the single-tick ey jump even right at the
+                   * band boundary, so a momentary bad measurement can never
+                   * inject a multi-mm ey step (Issue #169 HW-verify fix).
+                   */
 
                   float yhat = -c_sgn * ey_p - c_sgn * Lk * eth_p;
                   innov = err_meas - yhat;
+                  innov = clamp_float(innov, -innov_clamp, innov_clamp);
                   ey  = ey_p + kf0 * innov;
                   eth = eth_p + kf1 * innov;
                   g_lqg_ey  = ey;
                   g_lqg_eth = eth;
                   g_lqg_last_side = (ey >= 0.0f) ? +1 : -1;
+                  g_lqg_sat_state   = SAT_NORMAL;
                   sat_streak        = 0;
+                  g_lqg_oob_ms_acc  = 0;
                   g_lqg_lost_ms_acc = 0;
                 }
-              else if (g_lqg_sat_state == SAT_NORMAL)
+              else if (meas_in_band)
                 {
-                  /* NORMAL -> SATURATED: freeze the observer (predict
-                   * only, SKIP the correct — the railed/clipped
-                   * intensity would inject garbage).
+                  /* Saturated estimate/measurement, but the spot is
+                   * genuinely back inside the linear band: re-seed from the
+                   * measurement, return to NORMAL, skip the stale correct
+                   * (the next NORMAL tick corrects from the fresh seed).
+                   */
+
+                  g_lqg_sat_state   = SAT_NORMAL;
+                  sat_streak        = 0;
+                  g_lqg_oob_ms_acc  = 0;
+                  g_lqg_lost_ms_acc = 0;
+                  ey  = clamp_float(meas_pos,
+                                    -s->p.sat_band, s->p.sat_band);
+                  eth = eth_p;
+                  g_lqg_ey  = ey;
+                  g_lqg_eth = eth;
+                  g_lqg_last_side = (ey >= 0.0f) ? +1 : -1;
+                  reseeded = true;
+                }
+              else
+                {
+                  /* Saturated and out of band: FREEZE (predict only, skip
+                   * the correct).  Accumulate saturated TIME — once it
+                   * exceeds lost_time_ms, declare LOST.  Time-based (not a
+                   * consecutive sat_streak) so a SAT<->NORMAL flap on a
+                   * near-rail measurement can no longer keep resetting the
+                   * counter and defeating LOST, which is exactly what kept
+                   * LOST from ever firing on HW (Issue #169 HW-verify fix).
                    */
 
                   g_lqg_sat_state = SAT_SATURATED;
@@ -1341,45 +1434,11 @@ static int linetrace_daemon(int argc, char *argv[])
                   g_lqg_ey  = ey;
                   g_lqg_eth = eth;
                   sat_streak++;
-                  if (sat_streak >= s->p.lost_ticks)
+                  g_lqg_oob_ms_acc += 1000 / s->p.hz;
+                  if (g_lqg_oob_ms_acc >= s->p.lost_time_ms)
                     {
-                      g_lqg_sat_state = SAT_LOST;
-                    }
-                }
-              else /* SAT_SATURATED */
-                {
-                  if (meas_in_band)
-                    {
-                      /* Measurement back in band: re-seed from the
-                       * measurement, return to NORMAL, skip the stale
-                       * correct (the next NORMAL tick corrects from the
-                       * fresh seed).
-                       */
-
-                      g_lqg_sat_state   = SAT_NORMAL;
-                      sat_streak        = 0;
+                      g_lqg_sat_state   = SAT_LOST;
                       g_lqg_lost_ms_acc = 0;
-                      ey  = clamp_float(meas_pos,
-                                        -s->p.sat_band, s->p.sat_band);
-                      eth = eth_p;
-                      g_lqg_ey  = ey;
-                      g_lqg_eth = eth;
-                      g_lqg_last_side = (ey >= 0.0f) ? +1 : -1;
-                      reseeded = true;
-                    }
-                  else
-                    {
-                      /* Still out of band / railed: keep freezing. */
-
-                      ey  = ey_p;
-                      eth = eth_p;
-                      g_lqg_ey  = ey;
-                      g_lqg_eth = eth;
-                      sat_streak++;
-                      if (sat_streak >= s->p.lost_ticks)
-                        {
-                          g_lqg_sat_state = SAT_LOST;
-                        }
                     }
                 }
             }
@@ -1776,6 +1835,7 @@ static int do_start(void)
   g_lqg_sat_state     = SAT_NORMAL;
   g_lqg_lost_cnt      = 0;
   g_lqg_lost_ms_acc   = 0;
+  g_lqg_oob_ms_acc    = 0;
   g_lqg_last_side     = +1;
   memset(&g_lqg_stats, 0, sizeof(g_lqg_stats));
 
@@ -2144,8 +2204,13 @@ static int do_lqg(int argc, char **argv)
               "[--c C] [--L L] [--edge left|right]\n"
               "       [--q1r Q] [--q2 Q] [--kf-qpos Q] [--kf-qhead Q] "
               "[--kf-rmeas R]\n"
-              "       [--sat-band MM] [--lost-ticks N] [--seek-dps D] "
-              "[--lost-timeout MS]\n");
+              "       [--sat-band MM] [--seek-dps D] [--lost-time MS] "
+              "[--lost-timeout MS]\n"
+              "       [--black N] [--white N] [--band-margin N] "
+              "[--lost-ticks N]\n"
+              "  (target defaults to the measured edge midpoint %d; the\n"
+              "   observer needs the symmetric midpoint, not the PID 512)\n",
+              LQG_DEF_TARGET);
       return 1;
     }
 
@@ -2164,7 +2229,16 @@ static int do_lqg(int argc, char **argv)
     }
 
   np.speed_mmps = (int)speed;
-  int   target  = g_params.target;     /* live shared setpoint */
+
+  /* Default the LQG target to the measured edge midpoint LQG_DEF_TARGET=634
+   * (NOT the PID-shared 512, and NOT the inherited prior target): the
+   * observer needs the symmetric midpoint every engage so the linear band
+   * is not truncated on the black side (Issue #169 HW-verify fix).  An
+   * explicit positional target still overrides; if you want a sticky custom
+   * target, pass it explicitly each engage.
+   */
+
+  int   target  = LQG_DEF_TARGET;
   int   i       = 1;
 
   if (i < argc && argv[i][0] != '-')
@@ -2295,6 +2369,26 @@ static int do_lqg(int argc, char **argv)
           np.lost_timeout_ms = atoi(argv[i + 1]);
           i += 2;
         }
+      else if (strcmp(argv[i], "--black") == 0 && i + 1 < argc)
+        {
+          np.black = atoi(argv[i + 1]);
+          i += 2;
+        }
+      else if (strcmp(argv[i], "--white") == 0 && i + 1 < argc)
+        {
+          np.white = atoi(argv[i + 1]);
+          i += 2;
+        }
+      else if (strcmp(argv[i], "--band-margin") == 0 && i + 1 < argc)
+        {
+          np.band_margin = atoi(argv[i + 1]);
+          i += 2;
+        }
+      else if (strcmp(argv[i], "--lost-time") == 0 && i + 1 < argc)
+        {
+          np.lost_time_ms = atoi(argv[i + 1]);
+          i += 2;
+        }
       else
         {
           fprintf(stderr, "linetrace: unknown option '%s'\n", argv[i]);
@@ -2365,6 +2459,26 @@ static int do_lqg(int argc, char **argv)
       return 1;
     }
 
+  if (np.lost_time_ms < 0)
+    {
+      fprintf(stderr, "linetrace: --lost-time must be >= 0\n");
+      return 1;
+    }
+
+  /* Sensor band sanity: black<white and the [black+margin, white-margin]
+   * window must be non-empty, else every measurement reads "saturated"
+   * and the observer can never run a correct (Issue #169 HW-verify fix).
+   */
+
+  if (np.black < 0 || np.white > 1024 || np.band_margin < 0 ||
+      np.black + np.band_margin >= np.white - np.band_margin)
+    {
+      fprintf(stderr,
+              "linetrace: need 0<=black, white<=1024, band_margin>=0, and "
+              "black+margin < white-margin (non-empty linear band)\n");
+      return 1;
+    }
+
   /* Matched-slot publish (plan §3 / §3.1).  Fill the INACTIVE slot, build
    * its Kf table; on build failure reject with NO gen bump / NO state
    * change.  The release-store orders all slot writes before the new
@@ -2400,12 +2514,15 @@ static int do_lqg(int argc, char **argv)
          "edge=%s\n"
          "           q1r=%.4f q2=%.4f kf_qpos=%.4g kf_qhead=%.4g "
          "kf_rmeas=%.4g\n"
-         "           sat_band=%.2f lost_ticks=%d seek_dps=%d "
-         "lost_timeout=%d ms\n",
+         "           sat_band=%.2f seek_dps=%d lost_time=%d ms "
+         "lost_timeout=%d ms\n"
+         "           black=%d white=%d band_margin=%d (lost_ticks=%d "
+         "unused)\n",
          np.speed_mmps, target, np.hz, np.c, np.L,
          (np.edge == LQG_EDGE_LEFT) ? "left" : "right",
          np.q1r, np.q2, np.kf_qpos, np.kf_qhead, np.kf_rmeas,
-         np.sat_band, np.lost_ticks, np.seek_dps, np.lost_timeout_ms);
+         np.sat_band, np.seek_dps, np.lost_time_ms, np.lost_timeout_ms,
+         np.black, np.white, np.band_margin, np.lost_ticks);
   return 0;
 }
 
@@ -3385,8 +3502,9 @@ static void usage(void)
     "       linetrace lqg <speed_mmps> [target] [--hz N] [--c C] [--L L]\n"
     "                     [--edge left|right] [--q1r Q] [--q2 Q]\n"
     "                     [--kf-qpos Q] [--kf-qhead Q] [--kf-rmeas R]\n"
-    "                     [--sat-band MM] [--lost-ticks N] [--seek-dps D]\n"
-    "                     [--lost-timeout MS]\n"
+    "                     [--sat-band MM] [--seek-dps D] [--lost-time MS]\n"
+    "                     [--lost-timeout MS] [--black N] [--white N]\n"
+    "                     [--band-margin N] [--lost-ticks N]\n"
     "       linetrace target <N>\n"
     "       linetrace brake\n"
     "       linetrace stop\n"
