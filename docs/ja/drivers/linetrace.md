@@ -20,7 +20,9 @@ daemon の cmd_ring (depth 8) が再発行を吸収する。新しい `DRIVE_FOR
 linetrace cal                                   # 3 秒サンプリング
 linetrace run <speed_mmps> <kp> [target] \      # 主コマンド
               [--ki K] [--kd K] [--hz N] \
-              [--v-min mm/s] [--v-alpha A] [--v-beta B]
+              [--v-min mm/s] [--v-alpha A] [--v-beta B] \
+              [--edge left|right]
+linetrace edge left|right                       # 追従エッジ選択
 linetrace                                       # usage 表示
 ```
 
@@ -28,7 +30,7 @@ linetrace                                       # usage 表示
 
 `--max-turn` flag と `linetrace max_turn N` subcommand は Issue #126 で **廃止**。max_turn は tick ごとに `speed_apply` に追従する derived 値になった (Issue #121 で確認された経験則 max_turn ≈ v をそのまま実装)。
 
-`--v-min/--v-alpha/--v-beta` は動的速度制御 (Issue #126)。`run` ごとに「動的 OFF」(`v_min := speed`, `α := β := 0`) に reset されるオプトインスイッチ。詳細は §2.5 を参照。
+`--v-min/--v-alpha/--v-beta` は動的速度制御 (Issue #126)。`run` ごとに「動的 OFF」(`v_min := speed`, `α := β := 0`) に reset されるオプトインスイッチ。詳細は §3.2 を参照。
 
 ### 2.1 `linetrace cal`
 
@@ -49,7 +51,7 @@ linetrace: cal 250 samples: dark=42 bright=982 midpoint=512
 4. `--hz` (既定 100 Hz、`clock_nanosleep CLOCK_MONOTONIC TIMER_ABSTIME` で累積ドリフト 0) でループ:
    - color sensor を non-blocking に drain、最新 intensity 値 (`s.data.i16[3]`、`[0, 1024]` にクランプ) を保持
    - `err = target - intensity`
-   - `turn_dps = clamp(kp * err, ±max_turn)`
+   - `turn_dps = clamp(edge_sign * (p + i + d), ±max_turn)`。`edge_sign` は LEFT エッジ (既定) で `+1`、RIGHT で `-1` (§2.4 参照)
    - `ioctl(DRIVEBASE_DRIVE_FOREVER, {speed_mmps, turn_dps})`
 5. SIGINT 受信時: `ioctl(DRIVEBASE_STOP, {COAST})` → fd close → exit。
 
@@ -65,7 +67,27 @@ linetrace target 512           # cal で求めた midpoint を反映
 
 > 旧 `linetrace max_turn N` mutator は Issue #126 で撤去。max_turn は `speed_apply` から derived するため CLI ノブを残す意味がない。
 
-### 2.4 `linetrace pidstat` (Issue #118)
+### 2.4 `linetrace edge left|right` (Issue #180)
+
+ロボットが線のどちらのエッジを追従するかを選択する。光学 intensity スロープ `c` は左右エッジで符号が逆になるため、エッジ間で操舵極性を反転する必要がある。
+
+- **`left`** が既定かつ従来挙動 — ロボットは線の**左側**を走行する。`right` は操舵出力を反転する。
+- 符号反転は制御**出力**のみに適用する: `turn_dps = clamp(edge_sign * (p + i + d), ±max_turn)`。`err = target - intensity`・積分器 `i_acc`・`pidstat` の全集計は純粋な測定量のまま保たれるので、同じゲイン・同じ調整列がどちらのエッジでも同じ意味を持つ — 反転するのは指令する旋回方向だけ。
+- `target` と同様に 2 通りで設定する:
+
+```
+linetrace edge right                       # engage せずに変更
+linetrace run 100 0.3 512 --edge right     # run の一部として指定
+```
+
+- **sticky**: エッジは `run` 間で継承され (`kp/ki/kd/target/hz` と同様)、`linetrace start` 時のみ `left` に reset される。現在値は `linetrace status` (`edge: left|right`) で参照。
+- **ライブ切替の注意**: `linetrace edge` は PID 状態を reset しない。走行中にエッジを反転すると積分済みの操舵量 (`i_acc`) が即座に逆転し、ループが再収束するまで一瞬の逆操舵過渡が出る。これは仕様。きれいに切り替えたい場合は停止中に変更する。
+
+不正なトークン (`left`/`right` 以外) や引数個数の誤りは usage エラー。
+
+> 交差点分岐 — 選択エッジが分岐点での進路を決める機能 — はここでは**実装しない**。#180 はエッジパラメータを土台として確立するのみ。再起動を跨いだエッジの永続化は別途 #181 で追跡する。
+
+### 2.5 `linetrace pidstat` (Issue #118)
 
 PID ゲイン (Kp/Ki/Kd) を実機調整するための観測コマンド。drivebase の `get-state` (Issue #115) と同じスタイルで、ヘッダ行 + interval ごと 1 行ずつのストリーミング形式で PID 内部状態を出す。
 
@@ -100,6 +122,8 @@ linetrace pidstat 5000 100              # 5 秒間 100 ms interval (= ~50 行 + 
 | `sat` | 累積 delta | pidstat 開始からの飽和カウント (clamp が effect した tick 数) |
 
 集計 10 列 (err_min/max/avg, d_max/avg, turn_max/avg, v_max/avg/min) は `interval_tick_count == 0` (idle 開始直後) のとき `-` 表示。
+
+`err`/`d_term` 系の列はすべて**エッジ非依存** (`err = target - intens` で選択エッジに依らない、#180)。エッジは下流で `turn_dps` に掛ける符号を反転するだけなので、`turn_max/avg` の絶対値も影響を受けない。
 
 #### summary 行
 
@@ -189,7 +213,9 @@ linetrace run 300 0.36 512 --hz 200 --kd 0.01 --ki 0.15 \
 
 `pidstat` の `v_max/v_avg/v_min` で実挙動を確認: ストレートで `v_max≈300`、curve で `v_min` まで落ちていれば動作中。`turn_max ≤ v_max` (max_turn が speed_apply に追従) も自動成立。
 
-**重要**: `--v-*` flag は `run` ごとに「動的 OFF (`v_min := speed`, `α := β := 0`)」に reset される (kp/ki/kd/target/hz が前回値を継承するのとは異なる)。前回の動的設定をうっかり引きずる事故を避けるため。
+**重要**: `--v-*` flag は `run` ごとに「動的 OFF (`v_min := speed`, `α := β := 0`)」に reset される (kp/ki/kd/target/hz/edge が前回値を継承するのとは異なる)。前回の動的設定をうっかり引きずる事故を避けるため。
+
+`edge` は継承パラメータの 1 つ: `--edge` を省略した `run` は、直前の `run` または `linetrace edge` で選んだエッジをそのまま維持する。`left` に戻すのは `linetrace start` のみ。これは意図的な仕様で、追従エッジはコース単位の選択であり、セッション内の速度 / ゲイン再調整を跨いで維持されるべきものだから (§2.4 参照)。
 
 ## 4. 配線
 

@@ -13,10 +13,11 @@
  * docs/{ja,en}/development/capture-schemas.md).
  *
  * The `edge` byte tags which edge of the line the lap was driven on:
- *   0 = UNKNOWN/UNSET (P0b always writes this — the PID daemon has no
- *       edge concept yet), 1 = LEFT, 2 = RIGHT (reserved for P1a).  The
- *   offline P0c fitter must NOT treat edge==0 as a real edge; the
- *   operator supplies the c-sign out of band for P0b captures.
+ *   0 = UNKNOWN/UNSET, 1 = LEFT, 2 = RIGHT.  Since Issue #180 the PID
+ *   daemon always records 1 or 2 (the selected edge, LEFT by default);
+ *   0 only appears in traces from firmware predating the edge concept.
+ *   The offline P0c fitter must NOT treat edge==0 as a real edge; for
+ *   such legacy captures the operator supplies the c-sign out of band.
  ****************************************************************************/
 
 #ifndef __APPS_CAPTURE_INCLUDE_CAPTURE_SCHEMA_LINETRACE_LAP_RUN_H

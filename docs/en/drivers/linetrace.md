@@ -20,7 +20,9 @@ The daemon's command ring (depth 8) absorbs the rapid re-issue: each new `DRIVE_
 linetrace cal                                   # 3 s sample sweep
 linetrace run <speed_mmps> <kp> [target] \      # main command
               [--ki K] [--kd K] [--hz N] \
-              [--v-min mm/s] [--v-alpha A] [--v-beta B]
+              [--v-min mm/s] [--v-alpha A] [--v-beta B] \
+              [--edge left|right]
+linetrace edge left|right                       # select followed edge
 linetrace                                       # usage
 ```
 
@@ -28,7 +30,7 @@ Defaults: `target=512`, `--hz=100`.  `kp/ki/kd` are fractional (e.g. `linetrace 
 
 The `--max-turn` flag and `linetrace max_turn N` subcommand were **retired in Issue #126**.  `max_turn` is now a per-tick derived value that tracks `speed_apply` (Issue #121's empirical `max_turn ≈ v` rule baked into the controller).
 
-`--v-min/--v-alpha/--v-beta` enable dynamic speed control (Issue #126).  These flags are an opt-in safety switch and reset to "dynamic OFF" (`v_min := speed`, `α := β := 0`) on every `run`.  See §2.5 for details.
+`--v-min/--v-alpha/--v-beta` enable dynamic speed control (Issue #126).  These flags are an opt-in safety switch and reset to "dynamic OFF" (`v_min := speed`, `α := β := 0`) on every `run`.  See §3.2 for details.
 
 ### 2.1 `linetrace cal`
 
@@ -49,7 +51,7 @@ linetrace: cal 250 samples: dark=42 bright=982 midpoint=512
 4. Loop at `--hz` (default 100 Hz, `clock_nanosleep CLOCK_MONOTONIC TIMER_ABSTIME` so cumulative drift is zero):
    - Drain the color sensor non-blocking, keep the latest intensity value (`s.data.i16[3]`, clamped to `[0, 1024]`)
    - `err = target - intensity`
-   - `turn_dps = clamp(kp * err, ±max_turn)`
+   - `turn_dps = clamp(edge_sign * (p + i + d), ±max_turn)` where `edge_sign = +1` for the LEFT edge (default), `-1` for RIGHT — see §2.4
    - `ioctl(DRIVEBASE_DRIVE_FOREVER, {speed_mmps, turn_dps})`
 5. On SIGINT: `ioctl(DRIVEBASE_STOP, {COAST})`, close fds, exit.
 
@@ -65,7 +67,27 @@ Range: `target ∈ [0, 1024]`.  Missing / extra / non-integer arguments are usag
 
 > The `linetrace max_turn N` mutator that originally shipped with #119 was retired in #126: `max_turn` is now derived per tick from `speed_apply` and no longer needs a CLI knob.
 
-### 2.4 `linetrace pidstat` (Issue #118)
+### 2.4 `linetrace edge left|right` (Issue #180)
+
+Selects which edge of the line the robot follows.  The optical intensity slope `c` has the opposite sign on the two edges, so the steering polarity must flip between them.
+
+- **`left`** is the default and the legacy behavior — the robot travels on the **left** side of the line.  `right` negates the steering output.
+- The sign is applied only to the controller **output**: `turn_dps = clamp(edge_sign * (p + i + d), ±max_turn)`.  `err = target - intensity`, the integrator `i_acc`, and all `pidstat` aggregates stay in the pure measurement domain, so the same gains and the same tuning columns mean the same thing on either edge — only the commanded turn direction reverses.
+- Set it two ways, mirroring `target`:
+
+```
+linetrace edge right                       # mutate without engaging
+linetrace run 100 0.3 512 --edge right     # set as part of a run
+```
+
+- **Sticky**: the edge inherits across `run` invocations (like `kp/ki/kd/target/hz`) and resets to `left` only on `linetrace start`.  Query it with `linetrace status` (`edge: left|right`).
+- **Live switch caveat**: `linetrace edge` does not reset the PID state.  Flipping the edge mid-run instantly reverses the integrated steering authority (`i_acc`), producing a brief counter-steer transient before the loop re-settles.  This is intended; switch edges while stopped if you want a clean transition.
+
+Invalid tokens (anything other than `left`/`right`) and wrong argument counts are usage errors.
+
+> Intersection branching — where the selected edge decides which way to go at a junction — is **not** implemented here; #180 only establishes the edge parameter as the foundation.  Persisting the edge across reboots is tracked separately in #181.
+
+### 2.5 `linetrace pidstat` (Issue #118)
 
 Observation command for tuning PID gains (Kp/Ki/Kd) on real hardware.  Mirrors drivebase `get-state` (Issue #115): a header line followed by one row per interval streaming the PID internals.
 
@@ -100,6 +122,8 @@ Default `interval_ms = 1000` (1 Hz).  Shorter intervals load printf/USB-CDC onto
 | `sat` | cumulative delta | Saturation hits (clamp actually acted) since pidstat start |
 
 The 10 aggregate columns (err_min/max/avg, d_max/avg, turn_max/avg, v_max/avg/min) print `-` when `interval_tick_count == 0` (idle entry, no ticks yet).
+
+All `err`/`d_term` columns are **edge-independent** (`err = target - intens` regardless of the selected edge, #180); the edge only flips the sign applied to `turn_dps` downstream, so `turn_max/avg` magnitudes are unaffected too.
 
 #### Summary line
 
@@ -189,7 +213,9 @@ Raising α from 1.0 to 1.5 makes the controller decelerate earlier on curve entr
 
 Verify with `pidstat`: `v_max≈300` on straights, `v_min` floor on curves indicates the loop is engaging.  The `turn_max ≤ v_max` invariant (max_turn tracking speed_apply) holds automatically.
 
-**Important**: `--v-*` flags reset to "dynamic OFF" (`v_min := speed`, `α := β := 0`) on every `run` (unlike kp/ki/kd/target/hz which inherit prior values).  This avoids accidentally carrying a stale dynamic profile from a previous tuning session.
+**Important**: `--v-*` flags reset to "dynamic OFF" (`v_min := speed`, `α := β := 0`) on every `run` (unlike kp/ki/kd/target/hz/edge which inherit prior values).  This avoids accidentally carrying a stale dynamic profile from a previous tuning session.
+
+`edge` is one of the inherited parameters: a `run` that omits `--edge` keeps the edge selected by the previous `run` or `linetrace edge`.  Only `linetrace start` resets it to `left`.  This is intentional — the followed edge is a course-level choice that should persist across speed/gain retuning within a session (see §2.4).
 
 ## 4. Wiring
 

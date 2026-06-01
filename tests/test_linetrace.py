@@ -109,18 +109,20 @@ def test_linetrace_pidstat_without_daemon(p):
     assert summary is None
 
 
-def test_linetrace_pidstat_rejects_short_interval(p):
+def test_linetrace_pidstat_rejects_short_interval(p, color_sensor_required):
     """L-2: interval_ms below the control period (10 ms @ 100 Hz) rejects.
 
-    Daemon has to be up so that the validate path runs *after* the
+    Daemon has to be up so the validate path runs *after* the
     daemon-running check; otherwise the user would not learn that the
-    duration/interval values are also bad.
+    duration/interval values are also bad.  `linetrace start` only keeps
+    the daemon alive when it can CLAIM the color sensor, so this gates on
+    `color_sensor_required` (the prior `started`/`running` string probe
+    was unreliable — do_start prints "started" even when the daemon
+    thread later dies on a failed CLAIM).
     """
 
     _ensure_stopped(p)
-    start = p.sendCommand("linetrace start", timeout=8)
-    if "running" not in start.lower() and "spawned" not in start.lower():
-        pytest.skip(f"linetrace start did not succeed: {start!r}")
+    p.sendCommand("linetrace start", timeout=8)
     time.sleep(0.5)
 
     try:
@@ -140,17 +142,18 @@ def test_linetrace_pidstat_rejects_short_interval(p):
 
 
 @pytest.mark.interactive
-def test_linetrace_pidstat_snapshot(p):
+def test_linetrace_pidstat_snapshot(p, color_sensor_required):
     """L-3: bare `linetrace pidstat` prints header + 1 snapshot row.
 
     No summary line for snapshot mode (drivebase get-state parity).
+    Gates on `color_sensor_required`: do_start prints "started" even
+    when the daemon thread later dies on a failed color CLAIM, so the
+    prior `running`/`spawned` string probe gave a false success and made
+    this test fail when a sensor was present (start prints "started").
     """
 
     _ensure_stopped(p)
-    start = p.sendCommand("linetrace start", timeout=8)
-    assert "running" in start.lower() or "spawned" in start.lower(), (
-        f"linetrace start failed: {start!r}"
-    )
+    p.sendCommand("linetrace start", timeout=8)
     time.sleep(0.5)
 
     try:
@@ -324,6 +327,100 @@ def test_linetrace_set_updates_target(p):
         out = p.sendCommand("linetrace status", timeout=5)
         st = _parse_status(out)
         assert st.get("target") == "400"
+    finally:
+        _ensure_stopped(p)
+
+
+# ---------------------------------------------------------------------------
+# Issue #180: edge select (LEFT/RIGHT)
+# ---------------------------------------------------------------------------
+
+
+def test_linetrace_edge_without_daemon(p):
+    """L-180a: `edge` refuses cleanly when no daemon is running."""
+
+    _ensure_stopped(p)
+    out = p.sendCommand("linetrace edge right", timeout=5)
+    assert "not running" in out, f"unexpected: {out!r}"
+
+
+def test_linetrace_edge_rejects_invalid(p, color_sensor_required):
+    """L-180b: invalid edge token / arg count is rejected.
+
+    Like L-7/L-8, the daemon must be up (color CLAIM) so the verb's
+    parse path runs past the daemon-running guard.  Also covers the
+    `run --edge` flag parser, which sits behind the same guard (L-11).
+    """
+
+    _ensure_stopped(p)
+    p.sendCommand("linetrace start", timeout=8)
+    time.sleep(0.3)
+
+    try:
+        out = p.sendCommand("linetrace edge up", timeout=5)
+        assert "left" in out.lower() and "right" in out.lower(), (
+            f"expected edge token rejection: {out!r}"
+        )
+
+        out = p.sendCommand("linetrace edge", timeout=5)
+        assert "usage" in out.lower(), f"expected usage hint: {out!r}"
+
+        out = p.sendCommand("linetrace edge left right", timeout=5)
+        assert "usage" in out.lower(), f"expected usage hint: {out!r}"
+
+        out = p.sendCommand("linetrace run 100 0 --edge bogus", timeout=5)
+        assert "edge" in out.lower(), (
+            f"expected --edge flag rejection: {out!r}"
+        )
+    finally:
+        _ensure_stopped(p)
+
+
+@pytest.mark.interactive
+def test_linetrace_edge_default_setter_and_sticky(p):
+    """L-180c: edge defaults to left, is settable, sticky, run-flagged.
+
+    - `start` resets edge to left.
+    - `edge right` mutates without engaging; observable via status.
+    - `run` without --edge inherits the sticky edge.
+    - `run ... --edge left` overrides it.
+    - a fresh `start` resets back to left.
+    """
+
+    _ensure_stopped(p)
+    p.sendCommand("linetrace start", timeout=8)
+    time.sleep(0.3)
+
+    try:
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("edge") == "left"
+
+        out = p.sendCommand("linetrace edge right", timeout=5)
+        assert "edge=right" in out, f"unexpected edge output: {out!r}"
+
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("edge") == "right"
+
+        # run without --edge inherits the sticky right edge.
+        out = p.sendCommand("linetrace run 0 0", timeout=5)
+        assert "edge=right" in out, f"expected sticky edge: {out!r}"
+
+        # run --edge left overrides.
+        out = p.sendCommand("linetrace run 0 0 --edge left", timeout=5)
+        assert "edge=left" in out, f"expected override: {out!r}"
+    finally:
+        p.sendCommand("linetrace brake", timeout=5)
+        _ensure_stopped(p)
+
+    # A fresh start resets edge to the default.
+    p.sendCommand("linetrace start", timeout=8)
+    time.sleep(0.3)
+    try:
+        out = p.sendCommand("linetrace status", timeout=5)
+        st = _parse_status(out)
+        assert st.get("edge") == "left", f"start should reset edge: {st!r}"
     finally:
         _ensure_stopped(p)
 

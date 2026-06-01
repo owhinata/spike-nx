@@ -86,14 +86,16 @@ Driven by `linetrace cap arm/stop/export`.
 
 The `edge` byte tags which edge of the line the lap was driven on:
 
-- `0` = **UNKNOWN/UNSET** — P0b always writes this (the PID daemon has
-  no edge concept yet).  `0` is a reserved sentinel, NOT a valid
-  LEFT/RIGHT.
-- `1` = **LEFT** (set by P1a)
-- `2` = **RIGHT** (set by P1a)
+- `0` = **UNKNOWN/UNSET** — a reserved sentinel, NOT a valid LEFT/RIGHT.
+  Only appears in traces from firmware predating the edge concept;
+  since Issue #180 the daemon never writes `0`.
+- `1` = **LEFT** (default / legacy steering polarity)
+- `2` = **RIGHT**
 
-The offline P0c fitter must **NOT** treat `edge == 0` as a real edge;
-for P0b captures the operator supplies the `c`-sign (which edge) out of
+Since Issue #180 the PID daemon always records the selected edge
+(`1`/`2`, LEFT by default; see `linetrace edge`).  The offline P0c
+fitter must still **NOT** treat `edge == 0` as a real edge; for such
+legacy captures the operator supplies the `c`-sign (which edge) out of
 band.
 
 ## Adding a new schema

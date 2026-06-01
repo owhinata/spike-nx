@@ -56,6 +56,17 @@
 #define DEFAULT_TARGET      512
 #define DEFAULT_HZ          100
 
+/* Followed line edge (Issue #180).  Values match the capture schema's
+ * `edge` byte (0 = unset, 1 = LEFT, 2 = RIGHT).  LEFT is the legacy
+ * implicit polarity (robot travels on the left side of the line);
+ * RIGHT flips the steering output sign (the optical slope `c` has the
+ * opposite sign on the two edges).
+ */
+
+#define EDGE_LEFT           1
+#define EDGE_RIGHT          2
+#define DEFAULT_EDGE        EDGE_LEFT
+
 /* Dynamic speed normalization scales (Issue #126).  Hardcoded based on
  * Issue #121 v=300/200Hz observations: peak |err| ~36 (line edge),
  * peak per-tick |derr| ~16 (kd=0.1, d_max~320 / kd_x100 / 10 * dt_ms).
@@ -91,6 +102,7 @@ static struct
   int v_min_mmps;     /* dynamic speed floor; == speed_mmps disables scaling */
   int v_alpha_x100;   /* coefficient on |err|;  0 disables err contribution  */
   int v_beta_x100;    /* coefficient on |derr|; 0 disables derr contribution */
+  int edge;           /* EDGE_LEFT (default) / EDGE_RIGHT; flips turn sign   */
 } g_params;
 
 /* PID observability state (Issue #118).
@@ -204,7 +216,11 @@ static struct
 
 #define CAP_MAX_RECORDS  (CAP_MAX_BYTES / CAP_RECORD_SIZE)
 
-/* edge sentinel: P0b has no edge concept yet (P1a sets LEFT/RIGHT). */
+/* edge sentinel: schema value 0 meaning "no edge".  The daemon now
+ * always records EDGE_LEFT/EDGE_RIGHT (Issue #180), so this only
+ * appears in traces from firmware predating the edge concept.  Kept
+ * to document the schema and the offline fitter's "ignore 0" rule.
+ */
 
 #define CAP_EDGE_UNSET   0
 
@@ -462,6 +478,19 @@ static int clamp_int(int v, int lo, int hi)
   return v;
 }
 
+/* int64 input, int output.  Used for the PID sum after the edge-sign
+ * multiply (Issue #180): applying the sign in the int64 domain avoids
+ * the INT_MIN * -1 UB that an `int` multiply could hit, and clamping to
+ * the [-max_turn, max_turn] window keeps the result well inside int.
+ */
+
+static int clamp_int_i64(int64_t v, int lo, int hi)
+{
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return (int)v;
+}
+
 /****************************************************************************
  * Lap capture per-tick append (Issue #166)
  ****************************************************************************/
@@ -479,7 +508,7 @@ static int clamp_int(int v, int lo, int hi)
  */
 
 static void cap_append_tick(int db_fd, int intensity, int target,
-                            int turn_cmd_dps)
+                            int edge, int turn_cmd_dps)
 {
   /* Lock-free fast path: an idle (not-armed) capture adds zero lock
    * contention to the control loop.  The hint may momentarily lag the
@@ -558,7 +587,14 @@ static void cap_append_tick(int db_fd, int intensity, int target,
   rec.heading_mdeg = heading_mdeg;
   rec.turn_rate_dps = (int16_t)clamp_int(turn_rate_dps, -32768, 32767);
   rec.speed_mmps   = (int16_t)clamp_int(speed_mmps, -32768, 32767);
-  rec.edge         = CAP_EDGE_UNSET;
+
+  /* Issue #180: the daemon now tracks a real edge.  The caller passes
+   * the per-tick edge snapshot so this label matches the turn_cmd_dps
+   * that was computed with the same edge sign.  CAP_EDGE_UNSET only
+   * appears in traces from firmware predating the edge concept.
+   */
+
+  rec.edge         = (uint8_t)edge;
 
   memcpy(&g_cap.buf[(size_t)g_cap.count * CAP_RECORD_SIZE], &rec,
          sizeof(rec));
@@ -694,6 +730,14 @@ static int linetrace_daemon(int argc, char *argv[])
           continue;
         }
 
+      /* Snapshot the followed edge once per tick (Issue #180).  The
+       * same value drives both the steering-sign multiply and the
+       * capture record below, so a concurrent `linetrace edge` cannot
+       * label this tick's turn command with the other edge.
+       */
+
+      int edge = g_params.edge;
+
       /* Engagement gate (Issue #117): when not engaged (initial state
        * after `start`, or after `brake`), stop hammering the drivebase
        * chardev with FOREVER(0,0) every tick.  Send STOP{COAST} once
@@ -765,7 +809,7 @@ static int linetrace_daemon(int argc, char *argv[])
           pthread_mutex_unlock(&g_stats_lock);
 
 #ifdef CONFIG_APP_CAPTURE
-          cap_append_tick(db_fd, last_intensity, g_params.target, 0);
+          cap_append_tick(db_fd, last_intensity, g_params.target, edge, 0);
 #endif
           goto sleep_to_next_tick;
         }
@@ -904,9 +948,19 @@ static int linetrace_daemon(int argc, char *argv[])
           i_term      = 0;
         }
 
-      int sum_dps  = (int)((int64_t)p_term + i_term + d_term);
-      int turn_dps = clamp_int(sum_dps, -max_turn_apply, max_turn_apply);
-      int saturated = (sum_dps != turn_dps) ? 1 : 0;
+      /* Edge select (Issue #180): flip the steering output sign for the
+       * RIGHT edge.  `err` (and thus i_acc / the pidstat aggregates)
+       * stays the pure target-intensity measurement, so a tuner reads
+       * the same physical error regardless of edge; only the commanded
+       * turn polarity changes.  The sign is applied in the int64 domain
+       * before the clamp/cast to avoid INT_MIN * -1 UB; the clamp is
+       * symmetric so saturation detection is unaffected.
+       */
+
+      int     edge_sign = (edge == EDGE_RIGHT) ? -1 : 1;
+      int64_t sum64     = ((int64_t)p_term + i_term + d_term) * edge_sign;
+      int turn_dps  = clamp_int_i64(sum64, -max_turn_apply, max_turn_apply);
+      int saturated = (sum64 != turn_dps) ? 1 : 0;
 
       int rc = drivebase_send_forever(db_fd, speed_apply, turn_dps);
 
@@ -972,7 +1026,7 @@ static int linetrace_daemon(int argc, char *argv[])
       pthread_mutex_unlock(&g_stats_lock);
 
 #ifdef CONFIG_APP_CAPTURE
-      cap_append_tick(db_fd, last_intensity, g_params.target, turn_dps);
+      cap_append_tick(db_fd, last_intensity, g_params.target, edge, turn_dps);
 #endif
 
     sleep_to_next_tick:
@@ -1078,6 +1132,7 @@ static int do_start(void)
   g_params.v_min_mmps   = 0;
   g_params.v_alpha_x100 = 0;
   g_params.v_beta_x100  = 0;
+  g_params.edge         = DEFAULT_EDGE;
 
   memset(&g_stats, 0, sizeof(g_stats));
   g_stats.last_intensity = -1;
@@ -1224,6 +1279,30 @@ static int parse_gain(const char *s, int *out_x100)
   return 0;
 }
 
+/* Parse a "left"/"right" edge token (Issue #180).  Returns 0 and writes
+ * EDGE_LEFT/EDGE_RIGHT on success, -1 on an unrecognized token.
+ */
+
+static int parse_edge(const char *s, int *out)
+{
+  if (strcmp(s, "left") == 0)
+    {
+      *out = EDGE_LEFT;
+      return 0;
+    }
+  if (strcmp(s, "right") == 0)
+    {
+      *out = EDGE_RIGHT;
+      return 0;
+    }
+  return -1;
+}
+
+static const char *edge_str(int edge)
+{
+  return (edge == EDGE_RIGHT) ? "right" : "left";
+}
+
 static int do_run(int argc, char **argv)
 {
   if (!g_daemon_running)
@@ -1238,7 +1317,8 @@ static int do_run(int argc, char **argv)
       fprintf(stderr,
               "usage: linetrace run <speed_mmps> <kp> [target] "
               "[--ki K] [--kd K] [--hz N] "
-              "[--v-min mm/s] [--v-alpha A] [--v-beta B]\n");
+              "[--v-min mm/s] [--v-alpha A] [--v-beta B] "
+              "[--edge left|right]\n");
       return 1;
     }
 
@@ -1254,6 +1334,7 @@ static int do_run(int argc, char **argv)
   int  kd_x100    = g_params.kd_x100;
   int  target     = g_params.target;
   int  hz         = g_params.hz;
+  int  edge       = g_params.edge;   /* sticky: inherits prior run */
 
   /* Dynamic-speed flags reset to no-op every run.  Unlike --ki/--kd/
    * --hz which inherit prior values, --v-* are an opt-in safety switch
@@ -1327,6 +1408,16 @@ static int do_run(int argc, char **argv)
             }
           i += 2;
         }
+      else if (strcmp(argv[i], "--edge") == 0 && i + 1 < argc)
+        {
+          if (parse_edge(argv[i + 1], &edge) < 0)
+            {
+              fprintf(stderr,
+                      "linetrace: --edge must be 'left' or 'right'\n");
+              return 1;
+            }
+          i += 2;
+        }
       else
         {
           fprintf(stderr, "linetrace: unknown option '%s'\n", argv[i]);
@@ -1379,14 +1470,15 @@ static int do_run(int argc, char **argv)
   g_params.v_min_mmps   = v_min_mmps;
   g_params.v_alpha_x100 = v_alpha_x100;
   g_params.v_beta_x100  = v_beta_x100;
+  g_params.edge         = edge;
   g_pid_reset_request   = true;
   g_engaged             = true;
 
   printf("linetrace: speed=%d mm/s kp=%.2f ki=%.2f kd=%.2f "
-         "target=%d hz=%d v_min=%d v_alpha=%.2f v_beta=%.2f\n",
+         "target=%d hz=%d v_min=%d v_alpha=%.2f v_beta=%.2f edge=%s\n",
          speed_mmps, kp_x100 / 100.0, ki_x100 / 100.0, kd_x100 / 100.0,
          target, hz, v_min_mmps,
-         v_alpha_x100 / 100.0, v_beta_x100 / 100.0);
+         v_alpha_x100 / 100.0, v_beta_x100 / 100.0, edge_str(edge));
   return 0;
 }
 
@@ -1445,6 +1537,44 @@ static int do_set_target(int argc, char **argv)
 
   g_params.target = target_new;
   printf("linetrace: target=%d\n", g_params.target);
+  return 0;
+}
+
+/****************************************************************************
+ * Subcommand: edge (Issue #180)
+ *
+ * Select the followed line edge (left|right) without engaging the
+ * drivebase, mirroring the `target` setter.  No PID reset is issued:
+ * `err` and the integrator stay in the pure measurement domain, so the
+ * new sign takes effect on the next tick.  Note this means flipping the
+ * edge mid-run instantly reverses the integrated steering authority and
+ * produces a brief counter-steer transient (documented behavior).
+ ****************************************************************************/
+
+static int do_set_edge(int argc, char **argv)
+{
+  if (!g_daemon_running)
+    {
+      fprintf(stderr,
+              "linetrace: not running — 'linetrace start' first\n");
+      return 1;
+    }
+
+  if (argc != 1)
+    {
+      fprintf(stderr, "usage: linetrace edge left|right\n");
+      return 1;
+    }
+
+  int edge_new;
+  if (parse_edge(argv[0], &edge_new) < 0)
+    {
+      fprintf(stderr, "linetrace: edge must be 'left' or 'right'\n");
+      return 1;
+    }
+
+  g_params.edge = edge_new;
+  printf("linetrace: edge=%s\n", edge_str(g_params.edge));
   return 0;
 }
 
@@ -2144,6 +2274,7 @@ static int do_status(void)
   printf("ki:            %.2f\n", g_params.ki_x100 / 100.0);
   printf("kd:            %.2f\n", g_params.kd_x100 / 100.0);
   printf("target:        %d\n", g_params.target);
+  printf("edge:          %s\n", edge_str(g_params.edge));
   printf("hz:            %d\n", g_params.hz);
   printf("v_min:         %d mm/s\n", g_params.v_min_mmps);
   printf("v_alpha:       %.2f\n", g_params.v_alpha_x100 / 100.0);
@@ -2183,8 +2314,10 @@ static void usage(void)
     "       linetrace cal\n"
     "       linetrace run <speed_mmps> <kp> [target] "
     "[--ki K] [--kd K] [--hz N]\n"
-    "                     [--v-min mm/s] [--v-alpha A] [--v-beta B]\n"
+    "                     [--v-min mm/s] [--v-alpha A] [--v-beta B] "
+    "[--edge left|right]\n"
     "       linetrace target <N>\n"
+    "       linetrace edge left|right\n"
     "       linetrace brake\n"
     "       linetrace stop\n"
     "       linetrace pidstat [duration_ms [interval_ms]]\n"
@@ -2205,12 +2338,15 @@ static void usage(void)
     "           run 0 0               command stop (daemon stays alive)\n"
     "           gain ranges: kp/ki/kd in [-100.00, 100.00] (0.01 step)\n"
     "           v-alpha/v-beta in [0.00, 100.00]; v-min in [1, speed]\n"
-    "           kp/ki/kd/target/hz inherit from previous run;\n"
+    "           kp/ki/kd/target/hz/edge inherit from previous run;\n"
     "           v-min/v-alpha/v-beta reset to 'dynamic OFF' every run\n"
     "           defaults: target=%d hz=%d (first run after start)\n"
     "  target:  set target intensity without engaging the drivebase\n"
     "           (e.g. 'target 400' so 'status' shows last_err against\n"
     "           the operational target while positioning).  [0, 1024]\n"
+    "  edge:    select followed line edge (left|right); flips turn sign.\n"
+    "           left = default/legacy; sticky across runs, resets to\n"
+    "           left on 'start'.  Flipping mid-run counter-steers once.\n"
     "  brake:   FOREVER(0,0) + STOP{BRAKE}; reset speed=0 kp=0\n"
     "           daemon stays alive — 'linetrace run ...' to re-engage\n"
     "  stop:    coast wheels, daemon exits\n"
@@ -2278,6 +2414,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "target") == 0)
     {
       return do_set_target(argc - 2, argv + 2);
+    }
+
+  if (strcmp(argv[1], "edge") == 0)
+    {
+      return do_set_edge(argc - 2, argv + 2);
     }
 
   if (strcmp(argv[1], "brake") == 0)
