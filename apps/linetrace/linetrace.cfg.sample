@@ -1,0 +1,40 @@
+# /mnt/flash/linetrace.cfg — linetrace runtime tuning (Issue #181)
+#
+# Loaded by `linetrace start` from /mnt/flash/linetrace.cfg.  Keys that
+# are absent revert to compiled defaults.  Unknown keys, parse errors,
+# and out-of-range values are logged via syslog and skipped per-line
+# (the rest of the file still applies).
+#
+# Precedence: CLI args to `linetrace run` > this file > compiled.
+# `vi /mnt/flash/linetrace.cfg` to edit, then `linetrace stop; linetrace start`.
+#
+# linetrace is NOT auto-started by rcS (unlike drivebase): this file is
+# read each time you manually run `linetrace start`, so the tuning
+# survives a reboot once you re-start the daemon.
+#
+# All values are integers.  Gains are x100 scaled (kp_x100 = 36 => 0.36),
+# matching the `linetrace run` CLI range of [-100.00, 100.00].  A bare
+# `linetrace run` (no positional args) re-engages at these values, so a
+# fully-populated cfg lets you start tracing without retyping `run` args.
+
+# --- PID gains (x100 scaled; CLI range [-100.00, 100.00]) ---
+kp_x100        = 0        # proportional gain x100 (e.g. 36 => 0.36)
+ki_x100        = 0        # integral gain x100
+kd_x100        = 0        # derivative gain x100
+
+# --- Setpoint / loop ---
+target         = 512      # target intensity [0, 1024] (cal midpoint)
+hz             = 100      # control loop frequency [10, 200]
+
+# --- Base speed ---
+speed_mmps     = 0        # forward speed mm/s (>= 0; 0 = stop/hold)
+
+# --- Dynamic speed profile (Issue #126); these reset every run to the
+#     value here when present, otherwise to 'dynamic OFF' ---
+v_min_mmps     = 1        # dynamic speed floor mm/s [1, INT_MAX];
+                          # clamped down to the run's speed at engage time
+v_alpha_x100   = 0        # |err| weight x100 [0, 100.00]; 0 disables
+v_beta_x100    = 0        # |derr| weight x100 [0, 100.00]; 0 disables
+
+# --- Followed line edge (Issue #180) ---
+edge           = 1        # 1 = left (default/legacy), 2 = right

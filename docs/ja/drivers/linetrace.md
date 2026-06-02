@@ -18,19 +18,19 @@ daemon の cmd_ring (depth 8) が再発行を吸収する。新しい `DRIVE_FOR
 
 ```
 linetrace cal                                   # 3 秒サンプリング
-linetrace run <speed_mmps> <kp> [target] \      # 主コマンド
-              [--ki K] [--kd K] [--hz N] \
+linetrace run [speed_mmps] [kp] [target] \      # 主コマンド
+              [--kp K] [--ki K] [--kd K] [--hz N] \
               [--v-min mm/s] [--v-alpha A] [--v-beta B] \
               [--edge left|right]
 linetrace edge left|right                       # 追従エッジ選択
 linetrace                                       # usage 表示
 ```
 
-デフォルト: `target=512`, `--hz=100`。`kp/ki/kd` は実数 (`linetrace run 100 0.3` 等)。intensity モードでは err 絶対値が ~10× になるので、reflection 時代の `kp` 値の **1/10 程度から開始する** (例: 1.5 → 0.15)。
+デフォルト: `target=512`, `--hz=100` (`/mnt/flash/linetrace.cfg` があればそれが上書き — §3.3 参照)。`speed_mmps`/`kp`/`target` は **optional な positional 引数** (Issue #181): 省略したものは現在値 (`start` 時の config overlay、または前回 run) を継承する。したがって引数なしの `linetrace run` は永続化済み / 直前のチューニングで再 engage する (何も設定が無ければ `speed=0 kp=0` に解決され、従来の `run 0 0` active-hold と同じ)。先頭の `-0.3` は positional ではなく option として解釈されるため、**負の**ゲインは `--kp` で渡す (`--ki`/`--kd` と対称)。positional `kp` と `--kp` を両方与えた場合は flag が勝つ。`kp/ki/kd` は実数 (`linetrace run 100 0.3` 等)。intensity モードでは err 絶対値が ~10× になるので、reflection 時代の `kp` 値の **1/10 程度から開始する** (例: 1.5 → 0.15)。
 
 `--max-turn` flag と `linetrace max_turn N` subcommand は Issue #126 で **廃止**。max_turn は tick ごとに `speed_apply` に追従する derived 値になった (Issue #121 で確認された経験則 max_turn ≈ v をそのまま実装)。
 
-`--v-min/--v-alpha/--v-beta` は動的速度制御 (Issue #126)。`run` ごとに「動的 OFF」(`v_min := speed`, `α := β := 0`) に reset されるオプトインスイッチ。詳細は §3.2 を参照。
+`--v-min/--v-alpha/--v-beta` は動的速度制御 (Issue #126)。`run` ごとに reset されるオプトインスイッチで、reset 先は `linetrace.cfg` に値があればその値 (§3.3)、無ければ「動的 OFF」(`v_min := speed`, `α := β := 0`)。詳細は §3.2 を参照。
 
 ### 2.1 `linetrace cal`
 
@@ -85,7 +85,7 @@ linetrace run 100 0.3 512 --edge right     # run の一部として指定
 
 不正なトークン (`left`/`right` 以外) や引数個数の誤りは usage エラー。
 
-> 交差点分岐 — 選択エッジが分岐点での進路を決める機能 — はここでは**実装しない**。#180 はエッジパラメータを土台として確立するのみ。再起動を跨いだエッジの永続化は別途 #181 で追跡する。
+> 交差点分岐 — 選択エッジが分岐点での進路を決める機能 — はここでは**実装しない**。#180 はエッジパラメータを土台として確立するのみ。再起動を跨いだエッジ (および他チューニング) の永続化は #181 で実装した — §3.3 参照。
 
 ### 2.5 `linetrace pidstat` (Issue #118)
 
@@ -213,9 +213,38 @@ linetrace run 300 0.36 512 --hz 200 --kd 0.01 --ki 0.15 \
 
 `pidstat` の `v_max/v_avg/v_min` で実挙動を確認: ストレートで `v_max≈300`、curve で `v_min` まで落ちていれば動作中。`turn_max ≤ v_max` (max_turn が speed_apply に追従) も自動成立。
 
-**重要**: `--v-*` flag は `run` ごとに「動的 OFF (`v_min := speed`, `α := β := 0`)」に reset される (kp/ki/kd/target/hz/edge が前回値を継承するのとは異なる)。前回の動的設定をうっかり引きずる事故を避けるため。
+**重要**: `--v-*` flag は `run` ごとに reset される (kp/ki/kd/target/hz/edge が前回値を継承するのとは異なる)。前回の動的設定をうっかり引きずる事故を避けるため。reset 先は `linetrace.cfg` に値があればその値 (明示的な operator 設定であり「暗黙の引き継ぎ」ではない — §3.3 参照)、無ければ「動的 OFF (`v_min := speed`, `α := β := 0`)」。config 由来の `v_min` は今回の `speed` まで clamp ダウンされるので、永続化された高速 floor が低速 run を壊すことはない。明示的な `--v-min` は従来どおり `[1, speed]` で範囲チェックされる。
 
-`edge` は継承パラメータの 1 つ: `--edge` を省略した `run` は、直前の `run` または `linetrace edge` で選んだエッジをそのまま維持する。`left` に戻すのは `linetrace start` のみ。これは意図的な仕様で、追従エッジはコース単位の選択であり、セッション内の速度 / ゲイン再調整を跨いで維持されるべきものだから (§2.4 参照)。
+`edge` は継承パラメータの 1 つ: `--edge` を省略した `run` は、直前の `run` または `linetrace edge` で選んだエッジをそのまま維持する。`linetrace start` 時は config 値 (`linetrace.cfg` の `edge`、無ければ `left`) に戻る。これは意図的な仕様で、追従エッジはコース単位の選択であり、セッション内の速度 / ゲイン再調整を跨いで維持されるべきものだから (§2.4 参照)。
+
+### 3.3 設定の永続化 (Issue #181)
+
+PID チューニングとセンサ設定を `/mnt/flash/linetrace.cfg` に永続化することで、再ビルドなしで reboot を跨いで保持できる。`drivebase.cfg` (Issue #143) と同じ仕組み。
+
+linetrace は rcS で **auto-start されない** (`btsensor`/`drivebase` のみ) ので、ファイルは手動 `linetrace start` のたびに読まれる: `do_start` がコンパイル既定値を seed → config キーを overlay → daemon を spawn する。ロードは daemon thread 生成より前に起きるので、settings-freeze の仕組み無しで race-free。
+
+**優先順位: `linetrace run` の CLI 引数 > `linetrace.cfg` > コンパイル既定値**。引数なしの `linetrace run` は永続化値で走り、`run` に positional / flag を付ければその session ではそれが上書きする。
+
+wire format (`drivebase.cfg` と同一): 1 行 1 `key=value`、`#` コメント (行頭 / 行末)、`=` 前後の空白 trim、CRLF/LF・UTF-8 BOM 許容。ファイルが無ければ silent。未知キー / parse エラー / 範囲外値は `dmesg` に出して行単位で skip (残りの行は適用される)。成功時は `linetrace: loaded N config key(s) from /mnt/flash/linetrace.cfg (M rejected)` をログ。
+
+値はすべて整数。ゲインは x100 scaled (`run` CLI の範囲に一致):
+
+| key | g_params | 範囲 | 意味 |
+|---|---|---|---|
+| `kp_x100` | kp | `[-10000, 10000]` | 比例ゲイン ×100 (`36` ⇒ 0.36) |
+| `ki_x100` | ki | `[-10000, 10000]` | 積分ゲイン ×100 |
+| `kd_x100` | kd | `[-10000, 10000]` | 微分ゲイン ×100 |
+| `target` | target | `[0, 1024]` | 目標 intensity |
+| `hz` | hz | `[10, 200]` | 制御ループ周波数 |
+| `speed_mmps` | speed | `>= 0` | 基本前進速度 (mm/s) |
+| `v_min_mmps` | v_min | `[1, INT_MAX]` | 動的速度の床 (run speed まで clamp) |
+| `v_alpha_x100` | v_alpha | `[0, 10000]` | `\|err\|` 寄与係数 ×100 |
+| `v_beta_x100` | v_beta | `[0, 10000]` | `\|derr\|` 寄与係数 ×100 |
+| `edge` | edge | `1` / `2` | 追従エッジ: **1 = left** (既定), **2 = right** |
+
+`vi /mnt/flash/linetrace.cfg` で編集し、`linetrace stop; linetrace start` で反映する。全キーを範囲・単位付きで列挙したテンプレートが `apps/linetrace/linetrace.cfg.sample` にある (値はコンパイル既定値。ただし `v_min_mmps` は 0 が無効値のため床を 1 にしている)。稼働中の daemon でファイルを書き換えずに target だけ変えたい場合は `linetrace target <N>` を使う (positional `run` 解決では単一の数値は `target` ではなく `speed` と解釈されるため)。
+
+`sensor-tilt-angle` (sensor servo, Issue #165) は意図的にまだキーにしていない — #165 着地時に追加する。
 
 ## 4. 配線
 

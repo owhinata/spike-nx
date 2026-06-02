@@ -88,6 +88,50 @@ def _ensure_stopped(p):
     time.sleep(0.3)
 
 
+_LT_CFG_PATH = "/mnt/flash/linetrace.cfg"
+
+
+def _write_cfg(p, lines):
+    """Write a linetrace.cfg via NSH echo redirection.
+
+    First line truncates (`>`), the rest append (`>>`).  Keys are
+    `key=value` with no spaces, so NSH argv-splitting leaves them intact
+    and no quoting is needed.
+    """
+    first = True
+    for ln in lines:
+        redir = ">" if first else ">>"
+        p.sendCommand(f"echo {ln} {redir} {_LT_CFG_PATH}", timeout=5)
+        first = False
+
+
+def _rm_cfg(p):
+    """Remove linetrace.cfg so it cannot leak into later tests.
+
+    Critical: a stale `edge=2` would break the edge-default test, which
+    expects `start` to reset edge to left when no config is installed.
+    """
+    p.sendCommand(f"rm {_LT_CFG_PATH}", timeout=5)
+
+
+def _wait_color_bound(p, timeout=15.0):
+    """Poll `sensor color` until the LUMP layer has classified the sensor.
+
+    `color_sensor_required` is session-scoped, so it only proves the
+    sensor was bound at session start.  After a reboot the LUMP layer
+    needs a few seconds to re-classify the device; starting linetrace
+    before then CLAIMs an unbound port and the daemon dies on
+    LEGOSENSOR_CLAIM.  Mirror the fixture's probe and wait for it.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        out = p.sendCommand("sensor color", timeout=5)
+        if "bound port" in out and "<unbound>" not in out:
+            return True
+        time.sleep(0.5)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Non-interactive: argument paths that don't need the daemon
 # ---------------------------------------------------------------------------
@@ -312,6 +356,7 @@ def test_linetrace_set_updates_target(p):
     """
 
     _ensure_stopped(p)
+    _rm_cfg(p)   # assert compiled defaults — a stale cfg would seed others
     p.sendCommand("linetrace start", timeout=8)
     time.sleep(0.3)
 
@@ -388,6 +433,7 @@ def test_linetrace_edge_default_setter_and_sticky(p):
     """
 
     _ensure_stopped(p)
+    _rm_cfg(p)   # assert edge default left — a stale cfg edge would seed it
     p.sendCommand("linetrace start", timeout=8)
     time.sleep(0.3)
 
@@ -528,6 +574,7 @@ def test_linetrace_run_dynamic_flags_status(p):
     """
 
     _ensure_stopped(p)
+    _rm_cfg(p)   # re-run resets v-* to no-op; a stale cfg would seed them
     p.sendCommand("linetrace start", timeout=8)
     time.sleep(0.3)
     try:
@@ -723,3 +770,230 @@ def test_linetrace_cap_arm_then_status(p):
     finally:
         p.sendCommand("linetrace cap abort", timeout=5)
         _ensure_stopped(p)
+
+
+# ---------------------------------------------------------------------------
+# Issue #181: linetrace.cfg persistence
+#
+# do_start seeds the compiled defaults, overlays /mnt/flash/linetrace.cfg,
+# then spawns the daemon — so a `start` with a config installed comes up
+# at the persisted tuning.  These gate on color_sensor_required: do_start
+# prints "started" but the daemon thread dies on a failed color CLAIM, so
+# `status` reports `running: no` and never echoes the overlaid params
+# without a real sensor.  Every test removes the cfg in `finally` so a
+# stale `edge=2` cannot break the edge-default test.
+# ---------------------------------------------------------------------------
+
+
+def test_linetrace_cfg_overlays_params_on_start(p, color_sensor_required):
+    """L-181a: every cfg key is overlaid onto g_params at start.
+
+    Idle path — `start` does not engage the drivebase, so no motion.
+    """
+
+    _ensure_stopped(p)
+    _write_cfg(p, [
+        "kp_x100=36",        # 0.36
+        "ki_x100=15",        # 0.15
+        "kd_x100=1",         # 0.01
+        "target=400",
+        "hz=120",
+        "speed_mmps=250",
+        "v_min_mmps=150",
+        "v_alpha_x100=100",  # 1.00
+        "v_beta_x100=50",    # 0.50
+        "edge=2",            # right
+    ])
+    try:
+        p.sendCommand("linetrace start", timeout=8)
+        time.sleep(0.5)
+
+        st = _parse_status(p.sendCommand("linetrace status", timeout=5))
+        assert st.get("running") == "yes", f"daemon not up: {st!r}"
+        assert st.get("kp") == "0.36", st
+        assert st.get("ki") == "0.15", st
+        assert st.get("kd") == "0.01", st
+        assert st.get("target") == "400", st
+        assert st.get("hz") == "120", st
+        assert st.get("speed") == "250", st
+        assert st.get("v_min") == "150", st
+        assert st.get("v_alpha") == "1.00", st
+        assert st.get("v_beta") == "0.50", st
+        assert st.get("edge") == "right", st
+    finally:
+        _ensure_stopped(p)
+        _rm_cfg(p)
+
+
+def test_linetrace_cfg_enoent_uses_compiled_defaults(p, color_sensor_required):
+    """L-181b: a missing cfg is silent; start uses compiled defaults."""
+
+    _ensure_stopped(p)
+    _rm_cfg(p)
+    try:
+        p.sendCommand("linetrace start", timeout=8)
+        time.sleep(0.5)
+
+        st = _parse_status(p.sendCommand("linetrace status", timeout=5))
+        assert st.get("running") == "yes", f"daemon not up: {st!r}"
+        assert st.get("target") == "512", st   # DEFAULT_TARGET
+        assert st.get("hz") == "100", st        # DEFAULT_HZ
+        assert st.get("edge") == "left", st     # DEFAULT_EDGE
+    finally:
+        _ensure_stopped(p)
+
+
+def test_linetrace_cfg_cli_overrides_config(p, color_sensor_required):
+    """L-181c: an explicit `run` arg wins over the config value.
+
+    Uses speed=0 (active hold) so the precedence check is motion-free.
+    """
+
+    _ensure_stopped(p)
+    _write_cfg(p, ["target=400", "kp_x100=36"])
+    try:
+        p.sendCommand("linetrace start", timeout=8)
+        time.sleep(0.5)
+
+        # Config seeded target=400; CLI target=512 must override.
+        out = p.sendCommand("linetrace run 0 0 512", timeout=5)
+        assert "target=512" in out, f"CLI did not override cfg: {out!r}"
+
+        st = _parse_status(p.sendCommand("linetrace status", timeout=5))
+        assert st.get("target") == "512", st
+    finally:
+        p.sendCommand("linetrace brake", timeout=5)
+        _ensure_stopped(p)
+        _rm_cfg(p)
+
+
+def test_linetrace_cfg_bare_run_inherits_kp(p, color_sensor_required):
+    """L-181d: bare `run` inherits the persisted kp (optional positional).
+
+    Config carries speed=0 so the bare run is a motion-free active hold
+    while still proving the positional kp resolves from the config.
+    """
+
+    _ensure_stopped(p)
+    _write_cfg(p, ["speed_mmps=0", "kp_x100=36"])
+    try:
+        p.sendCommand("linetrace start", timeout=8)
+        time.sleep(0.5)
+
+        out = p.sendCommand("linetrace run", timeout=5)
+        assert "kp=0.36" in out, f"bare run did not inherit kp: {out!r}"
+        assert "speed=0" in out, f"bare run did not inherit speed: {out!r}"
+    finally:
+        p.sendCommand("linetrace brake", timeout=5)
+        _ensure_stopped(p)
+        _rm_cfg(p)
+
+
+def test_linetrace_run_negative_kp_via_flag(p, color_sensor_required):
+    """L-181e: `--kp` reaches a negative gain unreachable as a positional.
+
+    `run 0 --kp -0.3`: speed=0 positional (hold, no motion), kp via flag
+    so the leading '-' is not mistaken for an option terminator.
+    """
+
+    _ensure_stopped(p)
+    _rm_cfg(p)
+    try:
+        p.sendCommand("linetrace start", timeout=8)
+        time.sleep(0.5)
+
+        out = p.sendCommand("linetrace run 0 --kp -0.3", timeout=5)
+        assert "kp=-0.30" in out, f"--kp negative not applied: {out!r}"
+    finally:
+        p.sendCommand("linetrace brake", timeout=5)
+        _ensure_stopped(p)
+
+
+@pytest.mark.interactive
+def test_linetrace_cfg_v_min_clamps_to_speed(p, color_sensor_required):
+    """L-181f: a config v_min above the run speed clamps instead of rejecting.
+
+    Engages at speed=100 with cfg v_min=200 — the config-derived floor is
+    clamped to 100 rather than erroring (an explicit --v-min still
+    range-checks).  Interactive: speed>0 commands motion; braked at once.
+    """
+
+    _ensure_stopped(p)
+    _write_cfg(p, ["v_min_mmps=200", "v_alpha_x100=100"])
+    try:
+        p.sendCommand("linetrace start", timeout=8)
+        time.sleep(0.5)
+
+        out = p.sendCommand("linetrace run 100 0 512", timeout=5)
+        assert "v-min" not in out.lower(), f"cfg v_min wrongly rejected: {out!r}"
+        assert "v_min=100" in out, f"cfg v_min not clamped to speed: {out!r}"
+    finally:
+        p.sendCommand("linetrace brake", timeout=5)
+        _ensure_stopped(p)
+        _rm_cfg(p)
+
+
+@pytest.mark.interactive
+def test_linetrace_cfg_v_baseline_on_run(p, color_sensor_required):
+    """L-181g: config v-* become the per-run reset baseline.
+
+    With v-* in the config, a `run` that omits --v-* uses the config
+    values (not the no-op default).  Interactive: speed>0; braked at once.
+    """
+
+    _ensure_stopped(p)
+    _write_cfg(p, [
+        "v_min_mmps=120",
+        "v_alpha_x100=100",  # 1.00
+        "v_beta_x100=50",    # 0.50
+    ])
+    try:
+        p.sendCommand("linetrace start", timeout=8)
+        time.sleep(0.5)
+
+        out = p.sendCommand("linetrace run 200 0", timeout=5)
+        assert "v_min=120" in out, f"v_min baseline not from cfg: {out!r}"
+        assert "v_alpha=1.00" in out, f"v_alpha baseline not from cfg: {out!r}"
+        assert "v_beta=0.50" in out, f"v_beta baseline not from cfg: {out!r}"
+    finally:
+        p.sendCommand("linetrace brake", timeout=5)
+        _ensure_stopped(p)
+        _rm_cfg(p)
+
+
+@pytest.mark.interactive
+def test_linetrace_cfg_survives_reboot(p, color_sensor_required):
+    """L-181h: cfg persists across reboot; a manual start re-reads it.
+
+    linetrace is not rcS-autostarted, so after reboot we `linetrace
+    start` by hand and confirm the persisted tuning is back.  Marked
+    interactive because it reboots the Hub mid-session.
+    """
+
+    _ensure_stopped(p)
+    _write_cfg(p, ["target=333", "edge=2", "hz=140"])
+    try:
+        p.reboot(timeout=20)
+
+        # The LUMP layer must re-classify the color sensor before
+        # linetrace can CLAIM it; 2 s is not enough on a cold boot.
+        assert _wait_color_bound(p, timeout=15.0), "color sensor not re-bound after reboot"
+
+        # CLAIM can still lose a race with the very first LUMP sync, so
+        # give the daemon one retry before declaring it down.
+        st = {}
+        for _ in range(3):
+            p.sendCommand("linetrace start", timeout=8)
+            time.sleep(0.8)
+            st = _parse_status(p.sendCommand("linetrace status", timeout=5))
+            if st.get("running") == "yes":
+                break
+            _ensure_stopped(p)
+            time.sleep(0.5)
+        assert st.get("running") == "yes", f"daemon not up after reboot: {st!r}"
+        assert st.get("target") == "333", st
+        assert st.get("edge") == "right", st
+        assert st.get("hz") == "140", st
+    finally:
+        _ensure_stopped(p)
+        _rm_cfg(p)

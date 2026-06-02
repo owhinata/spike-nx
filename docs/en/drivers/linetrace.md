@@ -18,19 +18,19 @@ The daemon's command ring (depth 8) absorbs the rapid re-issue: each new `DRIVE_
 
 ```
 linetrace cal                                   # 3 s sample sweep
-linetrace run <speed_mmps> <kp> [target] \      # main command
-              [--ki K] [--kd K] [--hz N] \
+linetrace run [speed_mmps] [kp] [target] \      # main command
+              [--kp K] [--ki K] [--kd K] [--hz N] \
               [--v-min mm/s] [--v-alpha A] [--v-beta B] \
               [--edge left|right]
 linetrace edge left|right                       # select followed edge
 linetrace                                       # usage
 ```
 
-Defaults: `target=512`, `--hz=100`.  `kp/ki/kd` are fractional (e.g. `linetrace run 100 0.3`).  Intensity-era kp values are roughly **1/10 of the reflection-era values** because err magnitudes are ~10× larger (range 0..1024 vs 0..100); start at ~0.15 instead of 1.5.
+Defaults: `target=512`, `--hz=100` (or whatever `/mnt/flash/linetrace.cfg` overrides — see §3.3).  `speed_mmps`/`kp`/`target` are **optional positionals** (Issue #181): an omitted one inherits the current value (the config overlay applied at `start`, or the prior run).  A bare `linetrace run` therefore re-engages at the persisted/last tuning; with nothing configured it resolves to `speed=0 kp=0`, the same active-hold as the long-standing `run 0 0` idiom.  Because a leading `-0.3` parses as an option rather than a positional, a **negative** gain must be passed via `--kp` (symmetric with `--ki`/`--kd`); a positional `kp` and `--kp` together let the flag win.  `kp/ki/kd` are fractional (e.g. `linetrace run 100 0.3`).  Intensity-era kp values are roughly **1/10 of the reflection-era values** because err magnitudes are ~10× larger (range 0..1024 vs 0..100); start at ~0.15 instead of 1.5.
 
 The `--max-turn` flag and `linetrace max_turn N` subcommand were **retired in Issue #126**.  `max_turn` is now a per-tick derived value that tracks `speed_apply` (Issue #121's empirical `max_turn ≈ v` rule baked into the controller).
 
-`--v-min/--v-alpha/--v-beta` enable dynamic speed control (Issue #126).  These flags are an opt-in safety switch and reset to "dynamic OFF" (`v_min := speed`, `α := β := 0`) on every `run`.  See §3.2 for details.
+`--v-min/--v-alpha/--v-beta` enable dynamic speed control (Issue #126).  These flags are an opt-in safety switch and reset on every `run` — to the `linetrace.cfg` value if one is set (§3.3), otherwise to "dynamic OFF" (`v_min := speed`, `α := β := 0`).  See §3.2 for details.
 
 ### 2.1 `linetrace cal`
 
@@ -85,7 +85,7 @@ linetrace run 100 0.3 512 --edge right     # set as part of a run
 
 Invalid tokens (anything other than `left`/`right`) and wrong argument counts are usage errors.
 
-> Intersection branching — where the selected edge decides which way to go at a junction — is **not** implemented here; #180 only establishes the edge parameter as the foundation.  Persisting the edge across reboots is tracked separately in #181.
+> Intersection branching — where the selected edge decides which way to go at a junction — is **not** implemented here; #180 only establishes the edge parameter as the foundation.  Persisting the edge (and the other tuning) across reboots is implemented in #181 — see §3.3.
 
 ### 2.5 `linetrace pidstat` (Issue #118)
 
@@ -213,9 +213,38 @@ Raising α from 1.0 to 1.5 makes the controller decelerate earlier on curve entr
 
 Verify with `pidstat`: `v_max≈300` on straights, `v_min` floor on curves indicates the loop is engaging.  The `turn_max ≤ v_max` invariant (max_turn tracking speed_apply) holds automatically.
 
-**Important**: `--v-*` flags reset to "dynamic OFF" (`v_min := speed`, `α := β := 0`) on every `run` (unlike kp/ki/kd/target/hz/edge which inherit prior values).  This avoids accidentally carrying a stale dynamic profile from a previous tuning session.
+**Important**: `--v-*` flags reset on every `run` (unlike kp/ki/kd/target/hz/edge which inherit prior values).  This avoids accidentally carrying a stale dynamic profile from a previous tuning session.  The reset target is the `linetrace.cfg` value when one is set (an explicit operator choice, not a silent carryover — see §3.3), otherwise "dynamic OFF" (`v_min := speed`, `α := β := 0`).  A config-derived `v_min` is clamped down to the current run's `speed` so a persisted high-speed floor never breaks a deliberately slow run; an explicit `--v-min` is still range-checked `[1, speed]`.
 
-`edge` is one of the inherited parameters: a `run` that omits `--edge` keeps the edge selected by the previous `run` or `linetrace edge`.  Only `linetrace start` resets it to `left`.  This is intentional — the followed edge is a course-level choice that should persist across speed/gain retuning within a session (see §2.4).
+`edge` is one of the inherited parameters: a `run` that omits `--edge` keeps the edge selected by the previous `run` or `linetrace edge`.  `linetrace start` resets it to the configured value (`linetrace.cfg` `edge`, else `left`).  This is intentional — the followed edge is a course-level choice that should persist across speed/gain retuning within a session (see §2.4).
+
+### 3.3 Persisted configuration (Issue #181)
+
+PID tuning and sensor settings can be persisted to `/mnt/flash/linetrace.cfg` so they survive a reboot without rebuilding the firmware.  This mirrors `drivebase.cfg` (Issue #143).
+
+linetrace is **not** auto-started by rcS (only `btsensor`/`drivebase` are), so the file is read each time you manually run `linetrace start`: `do_start` seeds the compiled defaults, then overlays the config keys, then spawns the daemon.  Loading happens before the daemon thread exists, so it is race-free without any settings-freeze machinery.
+
+**Precedence: CLI args to `linetrace run` > `linetrace.cfg` > compiled defaults.**  A bare `linetrace run` runs at the persisted values; any positional or flag on `run` overrides them for that session.
+
+Wire format (identical to `drivebase.cfg`): one `key=value` per line, `#` comments (full-line or trailing), whitespace trimmed, CRLF/LF and UTF-8 BOM tolerated.  A missing file is silent; unknown keys, parse errors, and out-of-range values are logged via `dmesg` and skipped per-line (the rest of the file still applies).  A successful load logs `linetrace: loaded N config key(s) from /mnt/flash/linetrace.cfg (M rejected)`.
+
+All values are integers; gains are x100 scaled (matching the `run` CLI range):
+
+| key | g_params | range | meaning |
+|---|---|---|---|
+| `kp_x100` | kp | `[-10000, 10000]` | proportional gain ×100 (`36` ⇒ 0.36) |
+| `ki_x100` | ki | `[-10000, 10000]` | integral gain ×100 |
+| `kd_x100` | kd | `[-10000, 10000]` | derivative gain ×100 |
+| `target` | target | `[0, 1024]` | target intensity |
+| `hz` | hz | `[10, 200]` | control loop frequency |
+| `speed_mmps` | speed | `>= 0` | base forward speed (mm/s) |
+| `v_min_mmps` | v_min | `[1, INT_MAX]` | dynamic-speed floor (clamped to run speed) |
+| `v_alpha_x100` | v_alpha | `[0, 10000]` | `\|err\|` weight ×100 |
+| `v_beta_x100` | v_beta | `[0, 10000]` | `\|derr\|` weight ×100 |
+| `edge` | edge | `1` or `2` | followed edge: **1 = left** (default), **2 = right** |
+
+Edit with `vi /mnt/flash/linetrace.cfg`, then `linetrace stop; linetrace start` to apply.  A template listing every key with its range and unit lives at `apps/linetrace/linetrace.cfg.sample` (values are the compiled defaults, except `v_min_mmps` whose floor is 1 since 0 is not a valid key value).  To change only the target on a running daemon without rewriting the file, use `linetrace target <N>` (the positional `run` resolution treats a single number as `speed`, not `target`).
+
+`sensor-tilt-angle` (sensor servo, Issue #165) is intentionally not yet a key — it will be added when #165 lands.
 
 ## 4. Wiring
 

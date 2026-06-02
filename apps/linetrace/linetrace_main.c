@@ -41,6 +41,8 @@
 #include <arch/board/board_drivebase.h>
 #include <arch/board/board_legosensor.h>
 
+#include "linetrace_config.h"
+
 #ifdef CONFIG_APP_CAPTURE
 #  include "capture.h"
 #  include "capture_schema_linetrace_lap_run.h"
@@ -1075,6 +1077,12 @@ static int linetrace_daemon(int argc, char *argv[])
  * Subcommand: start
  ****************************************************************************/
 
+/* Forward declaration: the start banner reports the configured edge,
+ * but edge_str() is defined alongside the run-command parser below.
+ */
+
+static const char *edge_str(int edge);
+
 static int do_start(void)
 {
   if (g_daemon_running)
@@ -1134,6 +1142,27 @@ static int do_start(void)
   g_params.v_beta_x100  = 0;
   g_params.edge         = DEFAULT_EDGE;
 
+  /* Overlay persisted tuning from /mnt/flash/linetrace.cfg (Issue #181).
+   * Loaded here, before task_create(), so the daemon never observes a
+   * half-written g_params (linetrace has no settings-freeze mechanism;
+   * "load before spawn" is the race-free equivalent).  Precedence is
+   * CLI > config > compiled — `run` still overrides any of these.  Keys
+   * absent from the file (present bit clear) keep the compiled default.
+   */
+
+  lt_config_load(LT_CONFIG_DEFAULT_PATH);
+  const struct lt_config_defaults_s *cfg = lt_config_get_defaults();
+  if (cfg->present & LT_CFG_KP)     g_params.kp_x100      = cfg->kp_x100;
+  if (cfg->present & LT_CFG_KI)     g_params.ki_x100      = cfg->ki_x100;
+  if (cfg->present & LT_CFG_KD)     g_params.kd_x100      = cfg->kd_x100;
+  if (cfg->present & LT_CFG_TARGET) g_params.target       = cfg->target;
+  if (cfg->present & LT_CFG_HZ)     g_params.hz           = cfg->hz;
+  if (cfg->present & LT_CFG_SPEED)  g_params.speed_mmps   = cfg->speed_mmps;
+  if (cfg->present & LT_CFG_VMIN)   g_params.v_min_mmps   = cfg->v_min_mmps;
+  if (cfg->present & LT_CFG_VALPHA) g_params.v_alpha_x100 = cfg->v_alpha_x100;
+  if (cfg->present & LT_CFG_VBETA)  g_params.v_beta_x100  = cfg->v_beta_x100;
+  if (cfg->present & LT_CFG_EDGE)   g_params.edge         = cfg->edge;
+
   memset(&g_stats, 0, sizeof(g_stats));
   g_stats.last_intensity = -1;
 
@@ -1158,9 +1187,16 @@ static int do_start(void)
       return 1;
     }
 
-  printf("linetrace: started (pid=%d) — idle (speed=0 kp=0 target=%d)\n",
-         g_daemon_pid, DEFAULT_TARGET);
-  printf("linetrace: 'linetrace cal' / 'linetrace run <speed> <kp> [target]'\n");
+  /* Report the engaged baseline g_params actually holds (compiled
+   * defaults overlaid with any linetrace.cfg keys), not a hardcoded
+   * "speed=0 kp=0" which would lie once a config is installed.
+   */
+
+  printf("linetrace: started (pid=%d) — idle (speed=%d kp=%.2f target=%d "
+         "edge=%s)\n",
+         g_daemon_pid, g_params.speed_mmps, g_params.kp_x100 / 100.0,
+         g_params.target, edge_str(g_params.edge));
+  printf("linetrace: 'linetrace cal' / 'linetrace run [speed] [kp] [target]'\n");
   return 0;
 }
 
@@ -1312,41 +1348,42 @@ static int do_run(int argc, char **argv)
       return 1;
     }
 
-  if (argc < 2)
-    {
-      fprintf(stderr,
-              "usage: linetrace run <speed_mmps> <kp> [target] "
-              "[--ki K] [--kd K] [--hz N] "
-              "[--v-min mm/s] [--v-alpha A] [--v-beta B] "
-              "[--edge left|right]\n");
-      return 1;
-    }
+  /* speed/kp/target are optional positionals (Issue #181): each leading
+   * token that does not start with '-' is consumed in order.  An omitted
+   * positional inherits the current g_params value — the compiled
+   * default, the linetrace.cfg overlay applied at start, or the prior
+   * run ("sticky").  A bare `linetrace run` therefore re-engages at the
+   * persisted/last tuning; with nothing configured it resolves to
+   * speed=0 kp=0, i.e. the existing `run 0 0` active-hold idiom.
+   */
 
-  int  speed_mmps = atoi(argv[0]);
-  int  kp_x100    = 0;
-  if (parse_gain(argv[1], &kp_x100) < 0)
-    {
-      fprintf(stderr,
-              "linetrace: kp must be in [-100.00, 100.00]\n");
-      return 1;
-    }
+  const struct lt_config_defaults_s *cfg = lt_config_get_defaults();
+
+  int  speed_mmps = g_params.speed_mmps;  /* sticky / config / compiled */
+  int  kp_x100    = g_params.kp_x100;      /* sticky / config / compiled */
   int  ki_x100    = g_params.ki_x100;
   int  kd_x100    = g_params.kd_x100;
   int  target     = g_params.target;
   int  hz         = g_params.hz;
   int  edge       = g_params.edge;   /* sticky: inherits prior run */
+  int  i          = 0;
 
-  /* Dynamic-speed flags reset to no-op every run.  Unlike --ki/--kd/
-   * --hz which inherit prior values, --v-* are an opt-in safety switch
-   * — silently carrying over a dynamic profile from a previous run is a
-   * footgun (e.g. user types `run 200 3.6` expecting fixed speed and
-   * the daemon keeps a stale --v-min from yesterday's tuning session).
-   */
+  if (i < argc && argv[i][0] != '-')
+    {
+      speed_mmps = atoi(argv[i]);
+      i++;
+    }
 
-  int  v_min_mmps   = speed_mmps;   /* default: dynamic OFF */
-  int  v_alpha_x100 = 0;
-  int  v_beta_x100  = 0;
-  int  i            = 2;
+  if (i < argc && argv[i][0] != '-')
+    {
+      if (parse_gain(argv[i], &kp_x100) < 0)
+        {
+          fprintf(stderr,
+                  "linetrace: kp must be in [-100.00, 100.00]\n");
+          return 1;
+        }
+      i++;
+    }
 
   if (i < argc && argv[i][0] != '-')
     {
@@ -1354,11 +1391,35 @@ static int do_run(int argc, char **argv)
       i++;
     }
 
+  /* Dynamic-speed flags reset every run.  Unlike --ki/--kd/--hz which
+   * inherit prior values, --v-* are an opt-in switch — silently carrying
+   * over a dynamic profile from a previous run is a footgun (Issue #126).
+   * The reset target is the linetrace.cfg value when present (an explicit
+   * operator choice is not a "silent carryover"), otherwise no-op
+   * (Issue #181).  `v_min_from_cli` distinguishes an explicit --v-min
+   * (range-checked) from a config-derived floor (clamped to speed).
+   */
+
+  bool v_min_from_cli = false;
+  int  v_min_mmps   = (cfg->present & LT_CFG_VMIN)   ? cfg->v_min_mmps   : speed_mmps;
+  int  v_alpha_x100 = (cfg->present & LT_CFG_VALPHA) ? cfg->v_alpha_x100 : 0;
+  int  v_beta_x100  = (cfg->present & LT_CFG_VBETA)  ? cfg->v_beta_x100  : 0;
+
   while (i < argc)
     {
       if (strcmp(argv[i], "--hz") == 0 && i + 1 < argc)
         {
           hz = atoi(argv[i + 1]);
+          i += 2;
+        }
+      else if (strcmp(argv[i], "--kp") == 0 && i + 1 < argc)
+        {
+          if (parse_gain(argv[i + 1], &kp_x100) < 0)
+            {
+              fprintf(stderr,
+                      "linetrace: --kp must be in [-100.00, 100.00]\n");
+              return 1;
+            }
           i += 2;
         }
       else if (strcmp(argv[i], "--ki") == 0 && i + 1 < argc)
@@ -1383,7 +1444,8 @@ static int do_run(int argc, char **argv)
         }
       else if (strcmp(argv[i], "--v-min") == 0 && i + 1 < argc)
         {
-          v_min_mmps = atoi(argv[i + 1]);
+          v_min_mmps     = atoi(argv[i + 1]);
+          v_min_from_cli = true;
           i += 2;
         }
       else if (strcmp(argv[i], "--v-alpha") == 0 && i + 1 < argc)
@@ -1439,19 +1501,28 @@ static int do_run(int argc, char **argv)
 
   /* v_min validation: only meaningful when speed>0.  speed==0 means
    * "stop motion" and dynamic-speed flags are silently ignored to keep
-   * `linetrace run 0 0` semantics intact.  v_min=0 is rejected because
-   * it would let the controller stop the robot in tight curves —
-   * separate semantics that deserve their own flag if ever needed.
+   * `linetrace run 0 0` semantics intact.  An explicit --v-min is
+   * range-checked [1, speed] (v_min=0 is rejected — it would let the
+   * controller stop the robot in tight curves).  A config-derived floor
+   * is instead clamped to this run's speed so a persisted high-speed
+   * v_min does not break a deliberately slow run (Issue #181).
    */
 
   if (speed_mmps > 0)
     {
-      if (v_min_mmps < 1 || v_min_mmps > speed_mmps)
+      if (v_min_from_cli)
         {
-          fprintf(stderr,
-                  "linetrace: --v-min must be in [1, %d]\n",
-                  speed_mmps);
-          return 1;
+          if (v_min_mmps < 1 || v_min_mmps > speed_mmps)
+            {
+              fprintf(stderr,
+                      "linetrace: --v-min must be in [1, %d]\n",
+                      speed_mmps);
+              return 1;
+            }
+        }
+      else if (v_min_mmps > speed_mmps)
+        {
+          v_min_mmps = speed_mmps;
         }
     }
   else
@@ -2312,8 +2383,8 @@ static void usage(void)
   fprintf(stderr,
     "usage: linetrace start\n"
     "       linetrace cal\n"
-    "       linetrace run <speed_mmps> <kp> [target] "
-    "[--ki K] [--kd K] [--hz N]\n"
+    "       linetrace run [speed_mmps] [kp] [target] "
+    "[--kp K] [--ki K] [--kd K] [--hz N]\n"
     "                     [--v-min mm/s] [--v-alpha A] [--v-beta B] "
     "[--edge left|right]\n"
     "       linetrace target <N>\n"
@@ -2324,7 +2395,7 @@ static void usage(void)
     "       linetrace status\n"
     "       linetrace cap arm <n> | stop | export | abort | status\n"
     "\n"
-    "  start:   spawn resident daemon (idle: speed=0 kp=0 target=%d)\n"
+    "  start:   spawn resident daemon (idle, baseline from linetrace.cfg)\n"
     "  cal:     daemon samples 3 s, prints dark/bright/midpoint\n"
     "           (requires speed=0; use 'linetrace run 0 0' if needed)\n"
     "  run:     update daemon params live\n"
@@ -2335,18 +2406,23 @@ static void usage(void)
     "           run 300 3.6 512 --v-min 150 --v-alpha 1.0 --v-beta 0.5\n"
     "                                 dynamic speed: 150-300 mm/s,\n"
     "                                 max_turn auto-tracks speed\n"
+    "           run                   re-engage at persisted/last tuning\n"
     "           run 0 0               command stop (daemon stays alive)\n"
+    "           speed/kp/target are optional; omitted ones inherit the\n"
+    "           current value (linetrace.cfg / prior run). Use --kp for a\n"
+    "           negative gain ('-0.3' alone parses as an option).\n"
     "           gain ranges: kp/ki/kd in [-100.00, 100.00] (0.01 step)\n"
     "           v-alpha/v-beta in [0.00, 100.00]; v-min in [1, speed]\n"
     "           kp/ki/kd/target/hz/edge inherit from previous run;\n"
-    "           v-min/v-alpha/v-beta reset to 'dynamic OFF' every run\n"
-    "           defaults: target=%d hz=%d (first run after start)\n"
+    "           v-min/v-alpha/v-beta reset every run (to linetrace.cfg\n"
+    "           value if set, else 'dynamic OFF')\n"
     "  target:  set target intensity without engaging the drivebase\n"
     "           (e.g. 'target 400' so 'status' shows last_err against\n"
     "           the operational target while positioning).  [0, 1024]\n"
     "  edge:    select followed line edge (left|right); flips turn sign.\n"
-    "           left = default/legacy; sticky across runs, resets to\n"
-    "           left on 'start'.  Flipping mid-run counter-steers once.\n"
+    "           left = default/legacy; sticky across runs, resets to the\n"
+    "           configured value (linetrace.cfg edge, else left) on\n"
+    "           'start'.  Flipping mid-run counter-steers once.\n"
     "  brake:   FOREVER(0,0) + STOP{BRAKE}; reset speed=0 kp=0\n"
     "           daemon stays alive — 'linetrace run ...' to re-engage\n"
     "  stop:    coast wheels, daemon exits\n"
@@ -2370,8 +2446,7 @@ static void usage(void)
     "           abort     discard an armed/done capture (free buffer)\n"
     "           status    print cap_state/count/capacity/overflow\n"
     "           brake freezes an in-flight capture; stop drops an\n"
-    "           un-exported one — `cap export` before `linetrace stop`\n",
-    DEFAULT_TARGET, DEFAULT_TARGET, DEFAULT_HZ);
+    "           un-exported one — `cap export` before `linetrace stop`\n");
 }
 
 /****************************************************************************
